@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "EventCorrelation": {
+      "additionalProperties": false,
+      "properties": {
+        "parent_event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Event Id"
+        },
+        "openai_trace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openai Trace Id"
+        },
+        "main_agent_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Main Agent Run Id"
+        },
+        "worker_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Job Id"
+        },
+        "mcp_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mcp Request Id"
+        },
+        "artifact_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Ids"
+        },
+        "failure_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Ids"
+        }
+      },
+      "title": "EventCorrelation",
+      "type": "object"
+    },
+    "EventSeverity": {
+      "enum": [
+        "debug",
+        "info",
+        "warning",
+        "error"
+      ],
+      "title": "EventSeverity",
+      "type": "string"
+    },
+    "EventSource": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/EventSourceType"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "worker_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "EventSource",
+      "type": "object"
+    },
+    "EventSourceType": {
+      "enum": [
+        "frontend",
+        "main_agent",
+        "runtime",
+        "mcp_adapter",
+        "worker",
+        "quality_gate"
+      ],
+      "title": "EventSourceType",
+      "type": "string"
+    },
+    "EventType": {
+      "enum": [
+        "task.created",
+        "task.updated",
+        "task.waiting_user",
+        "task.succeeded",
+        "task.partial_failed",
+        "task.failed",
+        "task.cancelled",
+        "main_agent.started",
+        "main_agent.decision",
+        "main_agent.plan_updated",
+        "main_agent.clarification_requested",
+        "main_agent.finalizing",
+        "worker.job_created",
+        "worker.started",
+        "worker.progress",
+        "worker.completed",
+        "worker.partial",
+        "worker.error",
+        "worker.timeout",
+        "worker.cancelled",
+        "artifact.processing",
+        "artifact.created",
+        "artifact.available",
+        "artifact.failed",
+        "gate.started",
+        "gate.passed",
+        "gate.failed",
+        "repair.round_started",
+        "repair.round_completed",
+        "repair.round_failed"
+      ],
+      "title": "EventType",
+      "type": "string"
+    },
+    "EventVisibility": {
+      "enum": [
+        "user",
+        "internal"
+      ],
+      "title": "EventVisibility",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "WorkerType": {
+      "enum": [
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair"
+      ],
+      "title": "WorkerType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "router.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "seq": {
+      "minimum": 0,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "type": {
+      "$ref": "#/$defs/EventType"
+    },
+    "source": {
+      "$ref": "#/$defs/EventSource"
+    },
+    "severity": {
+      "$ref": "#/$defs/EventSeverity"
+    },
+    "visibility": {
+      "$ref": "#/$defs/EventVisibility"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Message"
+    },
+    "correlation": {
+      "$ref": "#/$defs/EventCorrelation"
+    },
+    "payload": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Payload",
+      "type": "object"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "task_id",
+    "seq",
+    "type",
+    "source",
+    "severity",
+    "visibility",
+    "title",
+    "correlation",
+    "payload",
+    "created_at"
+  ],
+  "title": "RouterEvent",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.router.local/router.v1/event.schema.json",
+  "x-schema-version": "router.v1"
+}

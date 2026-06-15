@@ -1,0 +1,14 @@
+[project]
+name = "router-agent"
+version = "0.1.0"
+description = "Router backend schema contracts and runtime models."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.11,<3",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+package = false

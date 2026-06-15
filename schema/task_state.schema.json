@@ -1,0 +1,1353 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ArtifactType"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uri"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "type",
+        "version"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "ArtifactType": {
+      "enum": [
+        "raw_user_request",
+        "requirements_ir",
+        "plc_code",
+        "io_contract",
+        "plc_project_bundle",
+        "test_cases",
+        "test_report",
+        "failing_trace",
+        "formal_properties",
+        "formal_model",
+        "formal_report",
+        "counterexample",
+        "patch",
+        "repair_summary",
+        "gate_report",
+        "final_report",
+        "worker_log",
+        "main_agent_log",
+        "misc"
+      ],
+      "title": "ArtifactType",
+      "type": "string"
+    },
+    "Assumption": {
+      "additionalProperties": false,
+      "properties": {
+        "assumption_id": {
+          "title": "Assumption Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/AssumptionSource"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "assumption_id",
+        "text",
+        "source",
+        "created_at"
+      ],
+      "title": "Assumption",
+      "type": "object"
+    },
+    "AssumptionSource": {
+      "enum": [
+        "user",
+        "main_agent",
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair",
+        "runtime"
+      ],
+      "title": "AssumptionSource",
+      "type": "string"
+    },
+    "ClarificationQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/ClarificationStatus"
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "asked_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asked At"
+        },
+        "answered_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answered At"
+        }
+      },
+      "required": [
+        "question_id",
+        "question",
+        "reason",
+        "required",
+        "status"
+      ],
+      "title": "ClarificationQuestion",
+      "type": "object"
+    },
+    "ClarificationStatus": {
+      "enum": [
+        "open",
+        "answered",
+        "skipped"
+      ],
+      "title": "ClarificationStatus",
+      "type": "string"
+    },
+    "CurrentArtifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "raw_user_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requirements_ir": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "current_code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "current_io_contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_test_cases": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_test_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_failing_trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_formal_properties": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_formal_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_counterexample": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_repair_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "latest_gate_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "final_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "all_artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "All Artifact Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "all_artifact_ids"
+      ],
+      "title": "CurrentArtifacts",
+      "type": "object"
+    },
+    "DifficultyLevel": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ],
+      "title": "DifficultyLevel",
+      "type": "string"
+    },
+    "DifficultyProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/DifficultyLevel"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "signals": {
+          "$ref": "#/$defs/DifficultySignals"
+        },
+        "requires_test": {
+          "title": "Requires Test",
+          "type": "boolean"
+        },
+        "requires_formal": {
+          "title": "Requires Formal",
+          "type": "boolean"
+        },
+        "requires_repair_loop": {
+          "title": "Requires Repair Loop",
+          "type": "boolean"
+        },
+        "need_clarification": {
+          "title": "Need Clarification",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "level",
+        "reasons",
+        "signals",
+        "requires_test",
+        "requires_formal",
+        "requires_repair_loop",
+        "need_clarification"
+      ],
+      "title": "DifficultyProfile",
+      "type": "object"
+    },
+    "DifficultySignals": {
+      "additionalProperties": false,
+      "properties": {
+        "has_existing_code": {
+          "title": "Has Existing Code",
+          "type": "boolean"
+        },
+        "has_io_points": {
+          "title": "Has Io Points",
+          "type": "boolean"
+        },
+        "has_timing_logic": {
+          "title": "Has Timing Logic",
+          "type": "boolean"
+        },
+        "has_state_machine": {
+          "title": "Has State Machine",
+          "type": "boolean"
+        },
+        "has_safety_constraints": {
+          "title": "Has Safety Constraints",
+          "type": "boolean"
+        },
+        "has_emergency_stop": {
+          "title": "Has Emergency Stop",
+          "type": "boolean"
+        },
+        "has_interlock": {
+          "title": "Has Interlock",
+          "type": "boolean"
+        },
+        "has_fault_latching": {
+          "title": "Has Fault Latching",
+          "type": "boolean"
+        },
+        "has_mode_switching": {
+          "title": "Has Mode Switching",
+          "type": "boolean"
+        },
+        "multi_module": {
+          "title": "Multi Module",
+          "type": "boolean"
+        },
+        "requirement_incomplete": {
+          "title": "Requirement Incomplete",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "has_existing_code",
+        "has_io_points",
+        "has_timing_logic",
+        "has_state_machine",
+        "has_safety_constraints",
+        "has_emergency_stop",
+        "has_interlock",
+        "has_fault_latching",
+        "has_mode_switching",
+        "multi_module",
+        "requirement_incomplete"
+      ],
+      "title": "DifficultySignals",
+      "type": "object"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_id": {
+          "title": "Failure Id",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/FailureSource"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "requirement_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requirement Ids"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actual"
+        },
+        "reproduction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureReproduction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence_artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Artifact Ids",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/FailureStatus"
+        },
+        "created_by_worker_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created By Worker Job Id"
+        },
+        "resolved_by_worker_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved By Worker Job Id"
+        },
+        "resolved_by_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved By Artifact Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved At"
+        }
+      },
+      "required": [
+        "failure_id",
+        "source",
+        "severity",
+        "title",
+        "description",
+        "evidence_artifact_ids",
+        "status",
+        "created_at"
+      ],
+      "title": "Failure",
+      "type": "object"
+    },
+    "FailureReproduction": {
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Steps"
+        },
+        "input_trace_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Trace Artifact Id"
+        },
+        "counterexample_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Counterexample Artifact Id"
+        }
+      },
+      "title": "FailureReproduction",
+      "type": "object"
+    },
+    "FailureSource": {
+      "enum": [
+        "compile",
+        "test",
+        "formal",
+        "requirement",
+        "repair",
+        "runtime",
+        "unknown"
+      ],
+      "title": "FailureSource",
+      "type": "string"
+    },
+    "FailureStatus": {
+      "enum": [
+        "open",
+        "resolved",
+        "waived"
+      ],
+      "title": "FailureStatus",
+      "type": "string"
+    },
+    "GateState": {
+      "additionalProperties": false,
+      "properties": {
+        "test_required": {
+          "title": "Test Required",
+          "type": "boolean"
+        },
+        "formal_required": {
+          "title": "Formal Required",
+          "type": "boolean"
+        },
+        "regression_required": {
+          "title": "Regression Required",
+          "type": "boolean"
+        },
+        "formal_regression_required": {
+          "title": "Formal Regression Required",
+          "type": "boolean"
+        },
+        "latest_test_passed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Test Passed"
+        },
+        "latest_formal_passed": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Formal Passed"
+        },
+        "has_blocking_failure": {
+          "title": "Has Blocking Failure",
+          "type": "boolean"
+        },
+        "can_finish_as_success": {
+          "title": "Can Finish As Success",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "test_required",
+        "formal_required",
+        "regression_required",
+        "formal_regression_required",
+        "has_blocking_failure",
+        "can_finish_as_success"
+      ],
+      "title": "GateState",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "ProjectContext": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        },
+        "project_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Name"
+        },
+        "target_plc_language": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetPlcLanguage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "target_platform": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Known values include Codesys, Siemens, Beckhoff, Mitsubishi, Omron, Rockwell, and unknown; arbitrary platform strings are allowed.",
+          "title": "Target Platform"
+        },
+        "coding_style_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coding Style Artifact Id"
+        },
+        "project_memory_artifact_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Memory Artifact Ids"
+        }
+      },
+      "title": "ProjectContext",
+      "type": "object"
+    },
+    "RuntimeLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_repair_rounds": {
+          "maximum": 3,
+          "minimum": 0,
+          "title": "Max Repair Rounds",
+          "type": "integer"
+        },
+        "repair_rounds": {
+          "minimum": 0,
+          "title": "Repair Rounds",
+          "type": "integer"
+        },
+        "max_parallel_workers": {
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Max Parallel Workers",
+          "type": "integer"
+        },
+        "active_parallel_workers": {
+          "minimum": 0,
+          "title": "Active Parallel Workers",
+          "type": "integer"
+        },
+        "max_worker_calls": {
+          "minimum": 0,
+          "title": "Max Worker Calls",
+          "type": "integer"
+        },
+        "worker_calls_used": {
+          "minimum": 0,
+          "title": "Worker Calls Used",
+          "type": "integer"
+        },
+        "task_timeout_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Timeout Seconds"
+        }
+      },
+      "required": [
+        "max_repair_rounds",
+        "repair_rounds",
+        "max_parallel_workers",
+        "active_parallel_workers",
+        "max_worker_calls",
+        "worker_calls_used"
+      ],
+      "title": "RuntimeLimits",
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "debug",
+        "info",
+        "warning",
+        "error",
+        "blocking"
+      ],
+      "title": "Severity",
+      "type": "string"
+    },
+    "TargetPlcLanguage": {
+      "enum": [
+        "ST",
+        "LD",
+        "FBD",
+        "SFC",
+        "IL",
+        "unknown"
+      ],
+      "title": "TargetPlcLanguage",
+      "type": "string"
+    },
+    "TaskPhase": {
+      "enum": [
+        "intake",
+        "clarifying",
+        "planning",
+        "developing",
+        "testing",
+        "formal_verifying",
+        "repairing",
+        "regression",
+        "quality_gate",
+        "synthesizing",
+        "completed"
+      ],
+      "title": "TaskPhase",
+      "type": "string"
+    },
+    "TaskStatus": {
+      "enum": [
+        "created",
+        "running",
+        "waiting_user",
+        "succeeded",
+        "partial_failed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "TaskStatus",
+      "type": "string"
+    },
+    "TaskTrace": {
+      "additionalProperties": false,
+      "properties": {
+        "openai_trace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openai Trace Id"
+        },
+        "main_agent_run_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Main Agent Run Ids",
+          "type": "array"
+        },
+        "latest_main_agent_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Main Agent Run Id"
+        }
+      },
+      "required": [
+        "main_agent_run_ids"
+      ],
+      "title": "TaskTrace",
+      "type": "object"
+    },
+    "TaskType": {
+      "enum": [
+        "qa",
+        "new_plc_development",
+        "modify_existing_code",
+        "test_existing_code",
+        "formal_verify_existing_code",
+        "repair_existing_code",
+        "project_level_development",
+        "unknown"
+      ],
+      "title": "TaskType",
+      "type": "string"
+    },
+    "WorkerJobRef": {
+      "additionalProperties": false,
+      "properties": {
+        "worker_job_id": {
+          "title": "Worker Job Id",
+          "type": "string"
+        },
+        "worker_type": {
+          "$ref": "#/$defs/WorkerType"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkerJobStatus"
+        },
+        "objective": {
+          "title": "Objective",
+          "type": "string"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        }
+      },
+      "required": [
+        "worker_job_id",
+        "worker_type",
+        "status",
+        "objective"
+      ],
+      "title": "WorkerJobRef",
+      "type": "object"
+    },
+    "WorkerJobStatus": {
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "partial",
+        "error",
+        "timeout",
+        "cancelled"
+      ],
+      "title": "WorkerJobStatus",
+      "type": "string"
+    },
+    "WorkerType": {
+      "enum": [
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair"
+      ],
+      "title": "WorkerType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "router.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "user_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "User Id"
+    },
+    "title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Title"
+    },
+    "status": {
+      "$ref": "#/$defs/TaskStatus"
+    },
+    "phase": {
+      "$ref": "#/$defs/TaskPhase"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Started At"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "raw_user_request": {
+      "title": "Raw User Request",
+      "type": "string"
+    },
+    "normalized_goal": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Normalized Goal"
+    },
+    "task_type": {
+      "$ref": "#/$defs/TaskType"
+    },
+    "difficulty": {
+      "$ref": "#/$defs/DifficultyProfile"
+    },
+    "project_context": {
+      "$ref": "#/$defs/ProjectContext"
+    },
+    "runtime_limits": {
+      "$ref": "#/$defs/RuntimeLimits"
+    },
+    "gates": {
+      "$ref": "#/$defs/GateState"
+    },
+    "current_artifacts": {
+      "$ref": "#/$defs/CurrentArtifacts"
+    },
+    "active_worker_jobs": {
+      "items": {
+        "$ref": "#/$defs/WorkerJobRef"
+      },
+      "title": "Active Worker Jobs",
+      "type": "array"
+    },
+    "completed_worker_job_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Completed Worker Job Ids",
+      "type": "array"
+    },
+    "assumptions": {
+      "items": {
+        "$ref": "#/$defs/Assumption"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "unresolved_questions": {
+      "items": {
+        "$ref": "#/$defs/ClarificationQuestion"
+      },
+      "title": "Unresolved Questions",
+      "type": "array"
+    },
+    "failures": {
+      "items": {
+        "$ref": "#/$defs/Failure"
+      },
+      "title": "Failures",
+      "type": "array"
+    },
+    "trace": {
+      "$ref": "#/$defs/TaskTrace"
+    },
+    "event_seq": {
+      "minimum": 0,
+      "title": "Event Seq",
+      "type": "integer"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Metadata"
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "session_id",
+    "status",
+    "phase",
+    "created_at",
+    "updated_at",
+    "raw_user_request",
+    "task_type",
+    "difficulty",
+    "project_context",
+    "runtime_limits",
+    "gates",
+    "current_artifacts",
+    "active_worker_jobs",
+    "completed_worker_job_ids",
+    "assumptions",
+    "unresolved_questions",
+    "failures",
+    "trace",
+    "event_seq"
+  ],
+  "title": "TaskState",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.router.local/router.v1/task_state.schema.json",
+  "x-schema-version": "router.v1"
+}
