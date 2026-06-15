@@ -36,6 +36,8 @@
 
 Git 历史使用简洁的 Conventional Commit 前缀，例如 `feat: add router v1 schema contract`、`docs: add architecture implementation plan` 和 `chore: add uv project setup`。请继续使用 `feat:`、`fix:`、`docs:` 或 `chore:`。
 
+Git 新建分支请使用以下格式的命名方式：`feat:xxx`、`fix:xxx`、`docs:xxx`、`chore:xxx`。
+
 拉取请求应包含摘要、契约兼容性说明、已运行的验证命令，以及相关 issue 或设计文档链接。修改 `schema/` 或 `backend/app/models/` 时，请包含示例载荷。
 
 请使用 ssh 的方式进行 git 相关操作。
