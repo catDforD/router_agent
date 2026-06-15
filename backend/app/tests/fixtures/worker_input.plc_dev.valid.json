@@ -1,0 +1,50 @@
+{
+  "schema_version": "router.v1",
+  "task_id": "task-001",
+  "worker_job_id": "worker-job-dev-001",
+  "worker_type": "plc-dev",
+  "mcp_tool": "plc_dev.run",
+  "mode": "create",
+  "objective": "Generate initial Structured Text for the pump interlock.",
+  "input_artifacts": [
+    {
+      "artifact_id": "artifact-raw-request-001",
+      "type": "raw_user_request",
+      "version": 1,
+      "uri": "local://artifacts/task-001/raw-request.json",
+      "summary": "Original user request"
+    }
+  ],
+  "context": {
+    "user_goal": "Create a PLC program for a pump interlock.",
+    "task_type": "new_plc_development",
+    "difficulty_level": "L1",
+    "target_plc_language": "ST",
+    "target_platform": "Codesys",
+    "assumptions": []
+  },
+  "constraints": [
+    {
+      "constraint_id": "constraint-001",
+      "type": "language",
+      "description": "Use IEC 61131-3 Structured Text.",
+      "severity": "hard"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "artifact_type": "plc_code",
+      "required": true,
+      "description": "Generated PLC Structured Text source."
+    }
+  ],
+  "budget": {
+    "timeout_seconds": 300,
+    "max_iterations": 1
+  },
+  "trace_context": {
+    "worker_job_id": "worker-job-dev-001"
+  },
+  "idempotency_key": "task-001:worker-job-dev-001",
+  "created_at": "2026-06-15T10:01:00Z"
+}

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.artifacts import router as artifacts_router
 from app.api.health import router as health_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
@@ -24,6 +25,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title=app_settings.app_name, lifespan=lifespan)
     app.state.settings = app_settings
     app.include_router(health_router)
+    app.include_router(artifacts_router)
     return app
 
 
