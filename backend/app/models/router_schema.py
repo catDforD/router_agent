@@ -1,3 +1,4 @@
+
 """Pydantic models for the Router v1 cross-service contract."""
 
 from __future__ import annotations
