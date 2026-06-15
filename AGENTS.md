@@ -38,6 +38,8 @@ Git 历史使用简洁的 Conventional Commit 前缀，例如 `feat: add router 
 
 拉取请求应包含摘要、契约兼容性说明、已运行的验证命令，以及相关 issue 或设计文档链接。修改 `schema/` 或 `backend/app/models/` 时，请包含示例载荷。
 
+请使用 ssh 的方式进行 git 相关操作。
+
 ## 安全与配置提示
 
 不要提交密钥、本地虚拟环境或生成的缓存。请将 schema 文件视为外部 API 契约：如果没有记录迁移影响，应避免破坏字段名、枚举值或必填属性。
