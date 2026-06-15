@@ -1,11 +1,14 @@
-## ADDED Requirements
+# backend-health-foundation Specification
 
+## Purpose
+TBD - created by archiving change init-backend-foundation. Update Purpose after archive.
+## Requirements
 ### Requirement: Backend app starts through the documented entrypoint
 The backend SHALL expose a FastAPI application as `app.main:app` when run from the `backend/` directory.
 
 #### Scenario: Uvicorn starts the backend app
 - **WHEN** a developer runs `cd backend` followed by `uv run uvicorn app.main:app --reload`
-- **THEN** Uvicorn starts the Router backend application without requiring database connectivity
+- **THEN** Uvicorn starts the Router backend application without requiring database, OpenAI, artifact store, or MCP worker connectivity
 
 ### Requirement: Runtime settings load from environment variables
 The backend SHALL load typed runtime settings from environment variables with local-safe defaults for app name, app environment, database URL, artifact root, MCP mode, OpenAI API key, and log level.
@@ -23,7 +26,7 @@ The backend SHALL initialize a shared logging configuration during application s
 
 #### Scenario: Startup emits non-secret operational context
 - **WHEN** the backend application starts
-- **THEN** logs identify the application and environment without logging secret values such as `OPENAI_API_KEY`
+- **THEN** logs identify the application and environment without logging secret values such as `OPENAI_API_KEY` or password-bearing connection strings
 
 ### Requirement: Base health endpoints report service liveness
 The backend SHALL expose `GET /health` and `GET /api/health` endpoints that return the documented base health payload.
@@ -41,4 +44,8 @@ The backend SHALL keep the base health endpoints independent from PostgreSQL, Op
 
 #### Scenario: Database is unavailable
 - **WHEN** PostgreSQL is stopped, unreachable, or not configured beyond the `DATABASE_URL` setting
+- **THEN** `GET /health` and `GET /api/health` still return the base `ok` health response
+
+#### Scenario: OpenAI and MCP dependencies are unavailable
+- **WHEN** `OPENAI_API_KEY` is unset and no MCP worker server is running
 - **THEN** `GET /health` and `GET /api/health` still return the base `ok` health response
