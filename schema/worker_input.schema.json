@@ -1,0 +1,777 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ArtifactType"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uri"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "type",
+        "version"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "ArtifactType": {
+      "enum": [
+        "raw_user_request",
+        "requirements_ir",
+        "plc_code",
+        "io_contract",
+        "plc_project_bundle",
+        "test_cases",
+        "test_report",
+        "failing_trace",
+        "formal_properties",
+        "formal_model",
+        "formal_report",
+        "counterexample",
+        "patch",
+        "repair_summary",
+        "gate_report",
+        "final_report",
+        "worker_log",
+        "main_agent_log",
+        "misc"
+      ],
+      "title": "ArtifactType",
+      "type": "string"
+    },
+    "Assumption": {
+      "additionalProperties": false,
+      "properties": {
+        "assumption_id": {
+          "title": "Assumption Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/AssumptionSource"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "assumption_id",
+        "text",
+        "source",
+        "created_at"
+      ],
+      "title": "Assumption",
+      "type": "object"
+    },
+    "AssumptionSource": {
+      "enum": [
+        "user",
+        "main_agent",
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair",
+        "runtime"
+      ],
+      "title": "AssumptionSource",
+      "type": "string"
+    },
+    "ConstraintSeverity": {
+      "enum": [
+        "soft",
+        "hard"
+      ],
+      "title": "ConstraintSeverity",
+      "type": "string"
+    },
+    "DifficultyLevel": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4"
+      ],
+      "title": "DifficultyLevel",
+      "type": "string"
+    },
+    "ExpectedOutputSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "$ref": "#/$defs/ArtifactType"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "schema_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Schema Ref"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "required",
+        "description"
+      ],
+      "title": "ExpectedOutputSpec",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "McpToolName": {
+      "enum": [
+        "plc_dev.run",
+        "plc_test.run",
+        "plc_formal.run",
+        "plc_repair.run"
+      ],
+      "title": "McpToolName",
+      "type": "string"
+    },
+    "ModuleScope": {
+      "additionalProperties": false,
+      "properties": {
+        "module_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module Name"
+        },
+        "included_io_points": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Included Io Points"
+        },
+        "included_requirements": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Included Requirements"
+        },
+        "excluded_requirements": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excluded Requirements"
+        }
+      },
+      "title": "ModuleScope",
+      "type": "object"
+    },
+    "QualityRequirements": {
+      "additionalProperties": false,
+      "properties": {
+        "must_compile": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Compile"
+        },
+        "must_generate_tests": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Generate Tests"
+        },
+        "must_run_tests": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Run Tests"
+        },
+        "must_formal_verify": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Formal Verify"
+        },
+        "must_return_counterexample_on_failure": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Return Counterexample On Failure"
+        },
+        "must_use_minimal_patch": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Must Use Minimal Patch"
+        }
+      },
+      "title": "QualityRequirements",
+      "type": "object"
+    },
+    "TaskType": {
+      "enum": [
+        "qa",
+        "new_plc_development",
+        "modify_existing_code",
+        "test_existing_code",
+        "formal_verify_existing_code",
+        "repair_existing_code",
+        "project_level_development",
+        "unknown"
+      ],
+      "title": "TaskType",
+      "type": "string"
+    },
+    "TraceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "openai_trace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Openai Trace Id"
+        },
+        "main_agent_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Main Agent Run Id"
+        },
+        "worker_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Job Id"
+        },
+        "mcp_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mcp Request Id"
+        },
+        "parent_event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Event Id"
+        }
+      },
+      "title": "TraceContext",
+      "type": "object"
+    },
+    "WorkerBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_iterations": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Iterations"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "max_cost_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Cost Usd"
+        }
+      },
+      "required": [
+        "timeout_seconds"
+      ],
+      "title": "WorkerBudget",
+      "type": "object"
+    },
+    "WorkerConstraint": {
+      "additionalProperties": false,
+      "properties": {
+        "constraint_id": {
+          "title": "Constraint Id",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/WorkerConstraintType"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/ConstraintSeverity"
+        }
+      },
+      "required": [
+        "constraint_id",
+        "type",
+        "description",
+        "severity"
+      ],
+      "title": "WorkerConstraint",
+      "type": "object"
+    },
+    "WorkerConstraintType": {
+      "enum": [
+        "platform",
+        "language",
+        "style",
+        "interface",
+        "safety_property",
+        "testing",
+        "formal",
+        "repair",
+        "runtime",
+        "other"
+      ],
+      "title": "WorkerConstraintType",
+      "type": "string"
+    },
+    "WorkerContext": {
+      "additionalProperties": false,
+      "properties": {
+        "user_goal": {
+          "title": "User Goal",
+          "type": "string"
+        },
+        "task_type": {
+          "$ref": "#/$defs/TaskType"
+        },
+        "difficulty_level": {
+          "$ref": "#/$defs/DifficultyLevel"
+        },
+        "requirement_summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requirement Summary"
+        },
+        "target_plc_language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Plc Language"
+        },
+        "target_platform": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Platform"
+        },
+        "module_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModuleScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "repair_round": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repair Round"
+        },
+        "assumptions": {
+          "items": {
+            "$ref": "#/$defs/Assumption"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "selected_failure_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Failure Ids"
+        },
+        "quality_requirements": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QualityRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "user_goal",
+        "task_type",
+        "difficulty_level",
+        "assumptions"
+      ],
+      "title": "WorkerContext",
+      "type": "object"
+    },
+    "WorkerMode": {
+      "enum": [
+        "create",
+        "modify",
+        "analyze",
+        "test",
+        "regression_test",
+        "formal_verify",
+        "formal_regression",
+        "repair",
+        "explain"
+      ],
+      "title": "WorkerMode",
+      "type": "string"
+    },
+    "WorkerType": {
+      "enum": [
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair"
+      ],
+      "title": "WorkerType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "router.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "worker_job_id": {
+      "title": "Worker Job Id",
+      "type": "string"
+    },
+    "worker_type": {
+      "$ref": "#/$defs/WorkerType"
+    },
+    "mcp_tool": {
+      "$ref": "#/$defs/McpToolName"
+    },
+    "mode": {
+      "$ref": "#/$defs/WorkerMode"
+    },
+    "objective": {
+      "title": "Objective",
+      "type": "string"
+    },
+    "input_artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "title": "Input Artifacts",
+      "type": "array"
+    },
+    "context": {
+      "$ref": "#/$defs/WorkerContext"
+    },
+    "constraints": {
+      "items": {
+        "$ref": "#/$defs/WorkerConstraint"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "expected_outputs": {
+      "items": {
+        "$ref": "#/$defs/ExpectedOutputSpec"
+      },
+      "title": "Expected Outputs",
+      "type": "array"
+    },
+    "budget": {
+      "$ref": "#/$defs/WorkerBudget"
+    },
+    "trace_context": {
+      "$ref": "#/$defs/TraceContext"
+    },
+    "idempotency_key": {
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Metadata"
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "worker_job_id",
+    "worker_type",
+    "mcp_tool",
+    "mode",
+    "objective",
+    "input_artifacts",
+    "context",
+    "constraints",
+    "expected_outputs",
+    "budget",
+    "trace_context",
+    "idempotency_key",
+    "created_at"
+  ],
+  "title": "WorkerInput",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.router.local/router.v1/worker_input.schema.json",
+  "x-schema-version": "router.v1"
+}

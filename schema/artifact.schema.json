@@ -1,0 +1,733 @@
+{
+  "$defs": {
+    "ArtifactCreator": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/ArtifactCreatorType"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "worker_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "worker_job_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Job Id"
+        },
+        "main_agent_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Main Agent Run Id"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ArtifactCreator",
+      "type": "object"
+    },
+    "ArtifactCreatorType": {
+      "enum": [
+        "user",
+        "main_agent",
+        "runtime",
+        "worker"
+      ],
+      "title": "ArtifactCreatorType",
+      "type": "string"
+    },
+    "ArtifactMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "target_plc_language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Plc Language"
+        },
+        "target_platform": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Platform"
+        },
+        "module_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module Name"
+        },
+        "requirement_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requirement Ids"
+        },
+        "code_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "test_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TestArtifactMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "formal_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormalArtifactMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "patch_metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PatchMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "title": "ArtifactMetadata",
+      "type": "object"
+    },
+    "ArtifactStatus": {
+      "enum": [
+        "processing",
+        "available",
+        "failed",
+        "archived"
+      ],
+      "title": "ArtifactStatus",
+      "type": "string"
+    },
+    "ArtifactStorage": {
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/ArtifactStorageProvider"
+        },
+        "uri": {
+          "title": "Uri",
+          "type": "string"
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bucket"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        }
+      },
+      "required": [
+        "provider",
+        "uri"
+      ],
+      "title": "ArtifactStorage",
+      "type": "object"
+    },
+    "ArtifactStorageProvider": {
+      "enum": [
+        "local",
+        "s3",
+        "minio",
+        "database",
+        "memory"
+      ],
+      "title": "ArtifactStorageProvider",
+      "type": "string"
+    },
+    "ArtifactType": {
+      "enum": [
+        "raw_user_request",
+        "requirements_ir",
+        "plc_code",
+        "io_contract",
+        "plc_project_bundle",
+        "test_cases",
+        "test_report",
+        "failing_trace",
+        "formal_properties",
+        "formal_model",
+        "formal_report",
+        "counterexample",
+        "patch",
+        "repair_summary",
+        "gate_report",
+        "final_report",
+        "worker_log",
+        "main_agent_log",
+        "misc"
+      ],
+      "title": "ArtifactType",
+      "type": "string"
+    },
+    "ArtifactVisibility": {
+      "enum": [
+        "user",
+        "internal"
+      ],
+      "title": "ArtifactVisibility",
+      "type": "string"
+    },
+    "CodeMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "code_version": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code Version"
+        },
+        "is_current": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Current"
+        },
+        "compile_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassFailUnknownStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "entry_function_block": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entry Function Block"
+        }
+      },
+      "title": "CodeMetadata",
+      "type": "object"
+    },
+    "FormalArtifactMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "total_properties": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Properties"
+        },
+        "passed_properties": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Passed Properties"
+        },
+        "failed_properties": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failed Properties"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassFailUnknownStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "FormalArtifactMetadata",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "PassFailUnknownStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "unknown"
+      ],
+      "title": "PassFailUnknownStatus",
+      "type": "string"
+    },
+    "PatchMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "from_code_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Code Artifact Id"
+        },
+        "to_code_artifact_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To Code Artifact Id"
+        },
+        "changed_files": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Changed Files"
+        },
+        "changed_lines": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Changed Lines"
+        },
+        "repair_round": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repair Round"
+        }
+      },
+      "title": "PatchMetadata",
+      "type": "object"
+    },
+    "TestArtifactMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "total": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total"
+        },
+        "passed": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Passed"
+        },
+        "failed": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failed"
+        },
+        "coverage_score": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coverage Score"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassFailUnknownStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TestArtifactMetadata",
+      "type": "object"
+    },
+    "WorkerType": {
+      "enum": [
+        "plc-dev",
+        "plc-test",
+        "plc-formal",
+        "plc-repair"
+      ],
+      "title": "WorkerType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "router.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "type": {
+      "$ref": "#/$defs/ArtifactType"
+    },
+    "version": {
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Display Name"
+    },
+    "status": {
+      "$ref": "#/$defs/ArtifactStatus"
+    },
+    "visibility": {
+      "$ref": "#/$defs/ArtifactVisibility"
+    },
+    "storage": {
+      "$ref": "#/$defs/ArtifactStorage"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "parent_artifact_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Parent Artifact Ids",
+      "type": "array"
+    },
+    "derived_from_worker_job_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Derived From Worker Job Id"
+    },
+    "derived_from_artifact_ids": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Derived From Artifact Ids"
+    },
+    "created_by": {
+      "$ref": "#/$defs/ArtifactCreator"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ArtifactMetadata"
+    },
+    "inline_content": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonValue"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "task_id",
+    "type",
+    "version",
+    "name",
+    "status",
+    "visibility",
+    "storage",
+    "summary",
+    "parent_artifact_ids",
+    "created_by",
+    "created_at",
+    "updated_at",
+    "metadata"
+  ],
+  "title": "Artifact",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.router.local/router.v1/artifact.schema.json",
+  "x-schema-version": "router.v1"
+}
