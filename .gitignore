@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.serena/
 .ruff_cache/
 .mypy_cache/
 .pyre/
@@ -21,6 +22,9 @@ env/
 build/
 dist/
 *.egg-info/
+
+# Local runtime data
+data/
 
 # Local configuration and secrets
 .env

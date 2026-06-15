@@ -1,0 +1,45 @@
+{
+  "schema_version": "router.v1",
+  "artifact_id": "artifact-plc-code-001",
+  "task_id": "task-001",
+  "type": "plc_code",
+  "version": 1,
+  "name": "pump_interlock.st",
+  "display_name": "Pump Interlock Structured Text",
+  "status": "available",
+  "visibility": "user",
+  "storage": {
+    "provider": "local",
+    "uri": "local://artifacts/task-001/pump_interlock.st",
+    "path": "task-001/pump_interlock.st",
+    "mime_type": "text/plain",
+    "size_bytes": 512,
+    "content_hash": "sha256:example"
+  },
+  "summary": "Initial Structured Text implementation for the pump interlock.",
+  "parent_artifact_ids": [
+    "artifact-raw-request-001"
+  ],
+  "derived_from_worker_job_id": "worker-job-dev-001",
+  "created_by": {
+    "type": "worker",
+    "worker_type": "plc-dev",
+    "worker_job_id": "worker-job-dev-001"
+  },
+  "created_at": "2026-06-15T10:03:00Z",
+  "updated_at": "2026-06-15T10:03:00Z",
+  "metadata": {
+    "target_plc_language": "ST",
+    "target_platform": "Codesys",
+    "code_metadata": {
+      "code_version": 1,
+      "is_current": true,
+      "compile_status": "unknown",
+      "entry_function_block": "FB_PumpInterlock"
+    },
+    "tags": [
+      "plc",
+      "interlock"
+    ]
+  }
+}

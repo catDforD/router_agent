@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "Router backend schema contracts and runtime models."
 requires-python = ">=3.11"
 dependencies = [
+    "alembic>=1.16,<2",
     "fastapi>=0.137.0",
+    "psycopg[binary]>=3.2,<4",
     "pydantic>=2.11,<3",
     "pydantic-settings>=2.14.1",
+    "sqlalchemy>=2.0,<3",
     "uvicorn>=0.49.0",
 ]
 

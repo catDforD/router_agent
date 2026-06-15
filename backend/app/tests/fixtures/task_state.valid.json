@@ -1,0 +1,86 @@
+{
+  "schema_version": "router.v1",
+  "task_id": "task-001",
+  "session_id": "session-001",
+  "status": "created",
+  "phase": "intake",
+  "created_at": "2026-06-15T10:00:00Z",
+  "updated_at": "2026-06-15T10:00:00Z",
+  "raw_user_request": "Create a PLC program for a pump interlock.",
+  "task_type": "new_plc_development",
+  "difficulty": {
+    "level": "L1",
+    "score": 0.3,
+    "confidence": 0.8,
+    "reasons": [
+      "Single-module PLC request with limited safety logic."
+    ],
+    "signals": {
+      "has_existing_code": false,
+      "has_io_points": true,
+      "has_timing_logic": false,
+      "has_state_machine": false,
+      "has_safety_constraints": true,
+      "has_emergency_stop": false,
+      "has_interlock": true,
+      "has_fault_latching": false,
+      "has_mode_switching": false,
+      "multi_module": false,
+      "requirement_incomplete": false
+    },
+    "requires_test": true,
+    "requires_formal": false,
+    "requires_repair_loop": false,
+    "need_clarification": false
+  },
+  "project_context": {
+    "target_plc_language": "ST",
+    "target_platform": "Codesys"
+  },
+  "runtime_limits": {
+    "max_repair_rounds": 3,
+    "repair_rounds": 0,
+    "max_parallel_workers": 4,
+    "active_parallel_workers": 0,
+    "max_worker_calls": 8,
+    "worker_calls_used": 0,
+    "task_timeout_seconds": 3600
+  },
+  "gates": {
+    "test_required": true,
+    "formal_required": false,
+    "regression_required": false,
+    "formal_regression_required": false,
+    "has_blocking_failure": false,
+    "can_finish_as_success": false
+  },
+  "current_artifacts": {
+    "raw_user_request": {
+      "artifact_id": "artifact-raw-request-001",
+      "type": "raw_user_request",
+      "version": 1,
+      "uri": "local://artifacts/task-001/raw-request.json",
+      "summary": "Original user request"
+    },
+    "all_artifact_ids": [
+      "artifact-raw-request-001"
+    ]
+  },
+  "active_worker_jobs": [],
+  "completed_worker_job_ids": [],
+  "assumptions": [
+    {
+      "assumption_id": "assumption-001",
+      "text": "The target PLC language is Structured Text.",
+      "source": "main_agent",
+      "confidence": 0.8,
+      "created_at": "2026-06-15T10:00:00Z"
+    }
+  ],
+  "unresolved_questions": [],
+  "failures": [],
+  "trace": {
+    "main_agent_run_ids": []
+  },
+  "event_seq": 0
+}

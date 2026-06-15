@@ -257,7 +257,7 @@
 6. **Artifact Store**  
     目标：
     ```
-    实现本地 Artifact Store，后续可替换为 MinIO / S3。
+    实现本地 Artifact Store。
     ```
     Todo：
     ```
