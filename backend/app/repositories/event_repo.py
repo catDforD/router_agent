@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
 from app.models.db_models import EventRow, TaskRow
-from app.models.router_schema import RouterEvent
+from app.models.router_schema import EventVisibility, RouterEvent
 from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
 
 
@@ -55,10 +55,25 @@ class EventRepository:
         )
         return persisted_event
 
-    def list_events(self, task_id: str) -> list[RouterEvent]:
-        rows = self.session.execute(
-            select(EventRow)
-            .where(EventRow.task_id == task_id)
-            .order_by(EventRow.seq)
-        ).scalars()
+    def list_events(
+        self,
+        task_id: str,
+        *,
+        after_seq: int | None = None,
+        visibility: EventVisibility | str | None = None,
+        limit: int | None = None,
+    ) -> list[RouterEvent]:
+        if limit is not None and limit < 1:
+            raise ValueError("event query limit must be greater than zero")
+
+        statement = select(EventRow).where(EventRow.task_id == task_id)
+        if after_seq is not None:
+            statement = statement.where(EventRow.seq > after_seq)
+        if visibility is not None:
+            statement = statement.where(EventRow.visibility == enum_value(visibility))
+        statement = statement.order_by(EventRow.seq)
+        if limit is not None:
+            statement = statement.limit(limit)
+
+        rows = self.session.execute(statement).scalars()
         return [RouterEvent.model_validate(row.event_json) for row in rows]
