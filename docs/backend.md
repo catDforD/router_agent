@@ -417,58 +417,75 @@
 9. **TaskState 初始化和难度初判**  
     目标：
     ```
-    用户创建任务后，后端可以初始化 TaskState，并做第一版规则化难度判断。
+    用户创建任务后，后端可以初始化一个可持久化、可回放的保守 TaskState。
+    当前阶段不做真实语义难度判断；难度初判留给后续 Main Agent intake/classification 逻辑。
     ```
     Todo：
     ```
     实现 backend/app/services/task_service.py。
+    只预留 TaskState.task_type、difficulty、gates 等字段，不实现临时关键词分类器。
     ```
     初始化内容：
     ```
     schema_version = router.v1
     status = created
     phase = intake
-    task_type = unknown 或 new_plc_development
-    difficulty.level = L0-L4
+    task_type = unknown
+    difficulty.level = L0
+    difficulty.confidence = 低置信度
+    difficulty.reasons 说明尚未经过 agent 分类
+    difficulty.requires_test = false
+    difficulty.requires_formal = false
+    difficulty.requires_repair_loop = false
     runtime_limits.max_repair_rounds = 3
     runtime_limits.max_parallel_workers = 4
-    gates.test_required
-    gates.formal_required
+    gates.test_required = false
+    gates.formal_required = false
     current_artifacts.raw_user_request
     ```
-    第一版规则：
+    后续 Main Agent 接入后再实现的判断行为：
     ```
-    包含“解释 / 分析 / 看一下” → qa 或 analyze
-    包含“生成 / 实现 / 开发 / 写一个” → new_plc_development
-    包含“修复 / 报错 / 不通过 / bug” → repair_existing_code
-    包含“急停 / 互锁 / 故障锁存 / 模式切换 / 状态机” → 至少 L3，requires_formal=true
-    包含“测试 / 仿真 / 用例” → requires_test=true
+    包含“解释 / 分析 / 看一下” → qa 或 analyze  ，L0/L1
+    包含“生成 / 实现 / 开发 / 写一个” → new_plc_development， L2
+    包含“修复 / 报错 / 不通过 / bug” → repair_existing_code L3
+    包含“急停 / 互锁 / 故障锁存 / 模式切换 / 状态机” → L3/L4，requires_formal=true
+    包含“测试 / 仿真 / 用例” → requires_test=true, L2
     ```
     检查方式：
     ```
-    pytest tests/unit/test_task_init.py -q
+    pytest backend/app/tests/unit/test_task_service.py -q
+    pytest backend/app/tests/unit/test_task_api.py -q
     ```
-    必须覆盖：
+    当前必须覆盖：
+    ```
+    1. create_task 后 TaskState 为 created/intake。
+    2. create_task 后 task_type = unknown，difficulty.level = L0，且置信度低。
+    3. create_task 后 test/formal/repair gate 都不要求。
+    4. runtime_limits 使用默认上限。
+    5. raw_user_request artifact 已写入，并同步到 current_artifacts.raw_user_request。
+    6. task.created event 已写入，GET /api/tasks/{id} 可以返回当前 TaskState。
+    ```
+    延后到 Main Agent 接入后覆盖：
     ```
     简单解释任务 → L0/L1，不要求 test/formal。
     普通电机启停 → L2，要求 test。
     带急停故障锁存 → L3，要求 test + formal。
     已有代码报错 → repair_existing_code。
     ```
-    真实测试：
+    当前真实测试：
     ```
-    创建 4 个任务：
-    1. 解释这段 ST 代码
-    2. 写一个电机启停逻辑
-    3. 写一个带急停和互锁的输送线逻辑
-    4. 修复这段 PLC 代码的故障复位问题
+    创建 1 个任务：
+    1. 写一个带急停和互锁的输送线逻辑
 
     curl http://localhost:8000/api/tasks/{task_id}
     ```
     验收标准：
     ```
-    TaskState.task_type 和 difficulty 大致合理。
-    L3 任务 gates.formal_required = true。
+    TaskState.task_type = unknown。
+    TaskState.difficulty.level = L0，且 reasons 说明尚未经过 agent 分类。
+    gates.test_required = false。
+    gates.formal_required = false。
+    raw_user_request artifact 和 task.created event 可查。
     ```
 
 10. **Scheduler Guard**  
@@ -1476,7 +1493,7 @@
     | 4 | Artifact Store | artifact 测试通过 | 文件可写可读 |
     | 5 | Event + SSE | event 测试通过 | curl -N 可看到事件 |
     | 6 | Task API | API 测试通过 | POST /api/tasks 创建任务 |
-    | 7 | TaskState 初始化 | task init 测试通过 | L3 任务自动要求 formal |
+    | 7 | TaskState 初始化 | task init 测试通过 | 创建任务后 unknown/L0，artifact/event 可查 |
     | 8 | Scheduler Guard | guard 测试通过 | 非法调用被拒绝 |
     | 9 | Quality Gate | gate 测试通过 | 有 blocking failure 不能 success |
     | 10 | Mock MCP Adapter | mock 测试通过 | 四个 worker mock 可调用 |
