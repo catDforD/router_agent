@@ -12,6 +12,7 @@ ENV_KEYS = (
     "ARTIFACT_ROOT",
     "OPENAI_API_KEY",
     "MCP_MODE",
+    "MOCK_SCENARIO",
     "LOG_LEVEL",
 )
 
@@ -35,6 +36,7 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.artifact_root == Path("data/artifacts")
     assert settings.openai_api_key is None
     assert settings.mcp_mode == "mock"
+    assert settings.mock_scenario == "dev_test_pass"
     assert settings.log_level == "INFO"
 
 
@@ -43,6 +45,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@db:5432/router_test")
     monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/router-artifacts")
     monkeypatch.setenv("MCP_MODE", "real")
+    monkeypatch.setenv("MOCK_SCENARIO", "worker_timeout")
     monkeypatch.setenv("LOG_LEVEL", "debug")
 
     settings = Settings()
@@ -51,4 +54,5 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.database_url == "postgresql+psycopg://test:test@db:5432/router_test"
     assert settings.artifact_root == Path("/tmp/router-artifacts")
     assert settings.mcp_mode == "real"
+    assert settings.mock_scenario == "worker_timeout"
     assert settings.log_level == "DEBUG"
