@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     mcp_mode: str = Field(default="mock", validation_alias="MCP_MODE")
+    mock_scenario: str = Field(
+        default="dev_test_pass",
+        validation_alias="MOCK_SCENARIO",
+    )
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
 
     model_config = SettingsConfigDict(extra="ignore", populate_by_name=True)
