@@ -132,6 +132,9 @@
         展示代码、测试报告、形式化验证报告、patch、final report
         ```
         这些接口都将提供给前端进行调用，前端只能走这些接口调用相关能力。
+
+        前端集成时请以 [Frontend API Usage Guide](frontend-api.md) 为调用手册；
+        该文档补充了任务创建、SSE 事件流、Artifact 读取、最终报告和 trace summary 的使用细节。
     - **后端实现（Main Agent Service）**  
         后端服务主要负责：
         ```

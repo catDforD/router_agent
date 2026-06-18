@@ -121,6 +121,10 @@ The artifact script prints generated artifact IDs and example curl commands.
 uv run uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
+Frontend integration details for this local API are documented in
+[`docs/frontend-api.md`](frontend-api.md), including task creation, SSE events,
+artifact reads, final reports, and trace summaries.
+
 ## Optional: LLM-Backed PLC MCP Server
 
 The Router mock worker path remains the default. To exercise the real MCP transport boundary with LLM-simulated PLC workers, configure the PLC worker MCP server and DeepSeek worker settings in `.env`:
