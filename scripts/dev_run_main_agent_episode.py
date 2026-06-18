@@ -27,6 +27,7 @@ from app.mcp.mock_worker import (  # noqa: E402
     SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS,
     SCENARIO_TEST_FAILED_THEN_REPAIR_PASS,
 )
+from app.models.router_schema import TaskPhase, TaskStatus  # noqa: E402
 from app.repositories.task_repo import TaskRepository  # noqa: E402
 from app.services.task_service import TaskService  # noqa: E402
 
@@ -80,6 +81,8 @@ class LocalMockMainAgentRunner:
                     tool_name=result.tool,
                 )
             )
+            if result.status == "no-op" and result.next_recommended_action == "return_final_output":
+                continue
             if result.status != "applied":
                 break
 
@@ -89,6 +92,14 @@ class LocalMockMainAgentRunner:
             main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
             summary="Local mock Main Agent episode finished.",
         )
+        if task.gates.can_finish_as_success:
+            output = output.model_copy(
+                update={
+                    "final_task_status": TaskStatus.SUCCEEDED,
+                    "phase": TaskPhase.COMPLETED.value,
+                    "summary": "Local mock Main Agent episode succeeded.",
+                }
+            )
         return output.model_copy(update={"plan": plan})
 
 

@@ -21,6 +21,7 @@ from app.models.router_schema import (
 
 
 ERROR_MCP_TIMEOUT = "MCP_TIMEOUT"
+ERROR_MCP_CONNECTION_ERROR = "MCP_CONNECTION_ERROR"
 ERROR_WORKER_SCHEMA_INVALID = "WORKER_SCHEMA_INVALID"
 ERROR_WORKER_EXECUTION_ERROR = "WORKER_EXECUTION_ERROR"
 
@@ -113,6 +114,29 @@ def timeout_worker_result(
         next_action=NextRecommendedAction.RETRY,
         started_at=started_at,
         completed_at=completed_at,
+    )
+
+
+def connection_error_worker_result(
+    worker_input: WorkerInput,
+    *,
+    started_at: datetime,
+    completed_at: datetime,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> WorkerResult:
+    """Build a standard MCP connection-error WorkerResult."""
+
+    return _error_worker_result(
+        worker_input,
+        execution_status=WorkerExecutionStatus.ERROR,
+        error_code=ERROR_MCP_CONNECTION_ERROR,
+        message=message,
+        retryable=True,
+        next_action=NextRecommendedAction.RETRY,
+        started_at=started_at,
+        completed_at=completed_at,
+        details=details,
     )
 
 

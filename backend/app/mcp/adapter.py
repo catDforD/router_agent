@@ -10,8 +10,24 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.ids import new_artifact_id, new_event_id
+from app.core.config import get_settings
+from app.core.ids import new_artifact_id, new_event_id, prefixed_id
 from app.core.time import utc_now
+from app.mcp.client import (
+    PlcMcpClient,
+    PlcMcpConnectionError,
+    PlcMcpInvalidResponseError,
+    PlcMcpTimeoutError,
+    PlcMcpToolError,
+    PlcMcpToolNotFoundError,
+)
+from app.mcp.draft import (
+    LlmWorkerDraftOutput,
+    McpDraftValidationError,
+    McpInputArtifactSnapshot,
+    McpWorkerRequest,
+    validate_worker_draft_output,
+)
 from app.models.router_schema import (
     ArtifactCreator,
     ArtifactCreatorType,
@@ -30,6 +46,7 @@ from app.models.router_schema import (
     WorkerInput,
     WorkerJobStatus,
     WorkerResult,
+    WorkerType,
 )
 from app.repositories.worker_job_repo import WorkerJobRepository
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
@@ -45,6 +62,7 @@ from app.mcp.mock_worker import (
 )
 from app.mcp.normalizer import (
     WorkerResultNormalizationError,
+    connection_error_worker_result,
     execution_error_worker_result,
     normalize_worker_result,
     schema_invalid_worker_result,
@@ -54,6 +72,7 @@ from app.mcp.normalizer import (
 
 MockRunner = Callable[..., MockWorkerOutput]
 CheckpointCallback = Callable[[], None]
+RealWorkerMode = str
 
 EVIDENCE_ARTIFACT_TYPES = {
     ArtifactType.TEST_REPORT.value,
@@ -78,8 +97,17 @@ class McpAdapter:
         mcp_mode: str = "mock",
         mock_scenario: str = DEFAULT_MOCK_SCENARIO,
         mock_runner: MockRunner | None = None,
+        mcp_client: PlcMcpClient | None = None,
+        plc_worker_mcp_url: str | None = None,
+        plc_worker_timeout_seconds: int | None = None,
+        plc_worker_artifact_max_chars: int | None = None,
+        plc_dev_mode: str | None = None,
+        plc_test_mode: str | None = None,
+        plc_formal_mode: str | None = None,
+        plc_repair_mode: str | None = None,
         checkpoint: CheckpointCallback | None = None,
     ) -> None:
+        settings = get_settings()
         self.session = session
         self.artifact_store = ArtifactStore(
             session=session,
@@ -90,6 +118,24 @@ class McpAdapter:
         self.mcp_mode = mcp_mode
         self.mock_scenario = mock_scenario
         self.mock_runner = mock_runner or run_mock_worker
+        self.mcp_client = mcp_client
+        self.plc_worker_mcp_url = plc_worker_mcp_url or settings.plc_worker_mcp_url
+        self.plc_worker_timeout_seconds = (
+            plc_worker_timeout_seconds or settings.plc_worker_timeout_seconds
+        )
+        self.plc_worker_artifact_max_chars = (
+            plc_worker_artifact_max_chars or settings.plc_worker_artifact_max_chars
+        )
+        self.worker_modes = {
+            WorkerType.PLC_DEV.value: plc_dev_mode if plc_dev_mode is not None else settings.plc_dev_mode,
+            WorkerType.PLC_TEST.value: plc_test_mode if plc_test_mode is not None else settings.plc_test_mode,
+            WorkerType.PLC_FORMAL.value: (
+                plc_formal_mode if plc_formal_mode is not None else settings.plc_formal_mode
+            ),
+            WorkerType.PLC_REPAIR.value: (
+                plc_repair_mode if plc_repair_mode is not None else settings.plc_repair_mode
+            ),
+        }
         self.checkpoint = checkpoint
 
     def call_worker(
@@ -100,12 +146,26 @@ class McpAdapter:
     ) -> WorkerResult:
         """Invoke a worker and persist the Router-side audit trail."""
 
-        if self.mcp_mode != "mock":
+        if self.mcp_mode not in {"mock", "real", "hybrid"}:
             raise McpAdapterUnsupportedModeError(
                 f"unsupported MCP_MODE for local adapter: {self.mcp_mode!r}"
             )
 
         active_scenario = scenario or self.mock_scenario
+        route = self._route_for_worker(worker_input)
+        if route == "real":
+            worker_input = worker_input.model_copy(
+                deep=True,
+                update={
+                    "trace_context": worker_input.trace_context.model_copy(
+                        update={
+                            "worker_job_id": worker_input.worker_job_id,
+                            "mcp_request_id": worker_input.trace_context.mcp_request_id
+                            or prefixed_id("mcp-request"),
+                        }
+                    )
+                },
+            )
         started_at = utc_now()
         self.worker_job_repository.create_job(worker_input, started_at=started_at)
         self.event_service.append_event(
@@ -120,22 +180,31 @@ class McpAdapter:
                     "worker_type": _value(worker_input.worker_type),
                     "mcp_tool": _value(worker_input.mcp_tool),
                     "worker_job_id": worker_input.worker_job_id,
-                    "mock_scenario": active_scenario,
+                    "worker_route": route,
+                    "mock_scenario": active_scenario if route == "mock" else None,
                 },
             )
         )
         self._checkpoint()
 
         try:
-            mock_output = self.mock_runner(worker_input, scenario=active_scenario)
-            if not isinstance(mock_output, MockWorkerOutput):
-                raise MockWorkerSchemaInvalid("mock output is not a MockWorkerOutput")
+            if route == "mock":
+                mock_output = self.mock_runner(worker_input, scenario=active_scenario)
+                if not isinstance(mock_output, MockWorkerOutput):
+                    raise MockWorkerSchemaInvalid("mock output is not a MockWorkerOutput")
+                draft_output = _draft_from_mock_output(mock_output)
+            else:
+                draft_output = self._call_real_worker(worker_input)
+                validate_worker_draft_output(draft_output, worker_input)
 
-            produced_refs = self._persist_artifacts(worker_input, mock_output)
+            produced_refs = self._persist_artifact_writes(
+                worker_input,
+                draft_output.artifact_writes,
+            )
             completed_at = utc_now()
             raw_result = self._build_success_result(
                 worker_input=worker_input,
-                mock_output=mock_output,
+                draft_output=draft_output,
                 produced_artifacts=produced_refs,
                 started_at=started_at,
                 completed_at=completed_at,
@@ -180,7 +249,59 @@ class McpAdapter:
             self._checkpoint()
             return result
 
-        except (MockWorkerSchemaInvalid, WorkerResultNormalizationError) as exc:
+        except PlcMcpTimeoutError as exc:
+            completed_at = utc_now()
+            result = timeout_worker_result(
+                worker_input,
+                started_at=started_at,
+                completed_at=completed_at,
+                message=str(exc),
+            )
+            self.worker_job_repository.complete_job(
+                worker_input.worker_job_id,
+                result,
+                status=WorkerJobStatus.TIMEOUT,
+            )
+            self.event_service.append_event(
+                self._terminal_worker_event(
+                    worker_input=worker_input,
+                    result=result,
+                    created_at=completed_at,
+                )
+            )
+            self._checkpoint()
+            return result
+
+        except PlcMcpConnectionError as exc:
+            completed_at = utc_now()
+            result = connection_error_worker_result(
+                worker_input,
+                started_at=started_at,
+                completed_at=completed_at,
+                message=str(exc),
+                details=exc.details,
+            )
+            self.worker_job_repository.complete_job(
+                worker_input.worker_job_id,
+                result,
+                status=WorkerJobStatus.ERROR,
+            )
+            self.event_service.append_event(
+                self._terminal_worker_event(
+                    worker_input=worker_input,
+                    result=result,
+                    created_at=completed_at,
+                )
+            )
+            self._checkpoint()
+            return result
+
+        except (
+            MockWorkerSchemaInvalid,
+            WorkerResultNormalizationError,
+            PlcMcpInvalidResponseError,
+            McpDraftValidationError,
+        ) as exc:
             completed_at = utc_now()
             details = getattr(exc, "details", None)
             result = schema_invalid_worker_result(
@@ -208,16 +329,32 @@ class McpAdapter:
         except MockWorkerExecutionError as exc:
             return self._complete_execution_error(worker_input, started_at, exc)
 
+        except (PlcMcpToolNotFoundError, PlcMcpToolError) as exc:
+            return self._complete_execution_error(worker_input, started_at, exc)
+
         except Exception as exc:
             return self._complete_execution_error(worker_input, started_at, exc)
 
-    def _persist_artifacts(
+    def _call_real_worker(self, worker_input: WorkerInput) -> LlmWorkerDraftOutput:
+        client = self.mcp_client or PlcMcpClient(
+            url=self.plc_worker_mcp_url,
+            timeout_seconds=self.plc_worker_timeout_seconds,
+        )
+        return client.call_worker_tool(
+            _value(worker_input.mcp_tool),
+            McpWorkerRequest(
+                worker_input=worker_input,
+                input_artifacts=self._input_artifact_snapshots(worker_input),
+            ),
+        )
+
+    def _persist_artifact_writes(
         self,
         worker_input: WorkerInput,
-        mock_output: MockWorkerOutput,
+        artifact_writes: Any,
     ) -> list[ArtifactRef]:
         produced_refs: list[ArtifactRef] = []
-        for intent in mock_output.artifact_writes:
+        for intent in artifact_writes:
             artifact = self.artifact_store.write_artifact_content(
                 _artifact_write_request(worker_input, intent)
             ).artifact
@@ -247,7 +384,7 @@ class McpAdapter:
         self,
         *,
         worker_input: WorkerInput,
-        mock_output: MockWorkerOutput,
+        draft_output: LlmWorkerDraftOutput,
         produced_artifacts: list[ArtifactRef],
         started_at: datetime,
         completed_at: datetime,
@@ -259,23 +396,57 @@ class McpAdapter:
             worker_type=worker_input.worker_type,
             mcp_tool=worker_input.mcp_tool,
             execution_status=WorkerExecutionStatus.COMPLETED,
-            outcome=mock_output.outcome,
-            summary=mock_output.summary,
+            outcome=draft_output.outcome,
+            summary=draft_output.summary,
             produced_artifacts=produced_artifacts,
-            diagnostics=list(mock_output.diagnostics),
-            assumptions=[],
-            failures=_failures_with_evidence(mock_output.failures, produced_artifacts),
-            clarification_request=mock_output.clarification_request,
-            metrics=mock_output.metrics,
-            next_recommended_action=mock_output.next_recommended_action,
+            diagnostics=list(draft_output.diagnostics),
+            assumptions=list(draft_output.assumptions),
+            failures=_failures_with_evidence(draft_output.failures, produced_artifacts),
+            clarification_request=draft_output.clarification_request,
+            metrics=draft_output.metrics,
+            next_recommended_action=draft_output.next_recommended_action,
             error=None,
             trace_context=worker_input.trace_context.model_copy(
                 update={"worker_job_id": worker_input.worker_job_id}
             ),
             started_at=started_at,
             completed_at=completed_at,
-            metadata=mock_output.metadata,
+            metadata=draft_output.metadata,
         )
+
+    def _input_artifact_snapshots(
+        self,
+        worker_input: WorkerInput,
+    ) -> list[McpInputArtifactSnapshot]:
+        snapshots: list[McpInputArtifactSnapshot] = []
+        for artifact_ref in worker_input.input_artifacts:
+            content: str | None = None
+            content_truncated = False
+            content_chars: int | None = None
+            mime_type: str | None = None
+            try:
+                stored = self.artifact_store.read_artifact_content(artifact_ref.artifact_id)
+                decoded = stored.content.decode("utf-8")
+                content_truncated = len(decoded) > self.plc_worker_artifact_max_chars
+                content = decoded[: self.plc_worker_artifact_max_chars]
+                content_chars = len(content)
+                mime_type = stored.artifact.storage.mime_type
+            except Exception:
+                content = None
+            snapshots.append(
+                McpInputArtifactSnapshot(
+                    artifact_id=artifact_ref.artifact_id,
+                    type=artifact_ref.type,
+                    version=artifact_ref.version,
+                    summary=artifact_ref.summary,
+                    uri=artifact_ref.uri,
+                    content=content,
+                    content_truncated=content_truncated,
+                    content_chars=content_chars,
+                    mime_type=mime_type,
+                )
+            )
+        return snapshots
 
     def _complete_execution_error(
         self,
@@ -395,6 +566,15 @@ class McpAdapter:
         if self.checkpoint is not None:
             self.checkpoint()
 
+    def _route_for_worker(self, worker_input: WorkerInput) -> RealWorkerMode:
+        worker_type = _value(worker_input.worker_type)
+        override = self.worker_modes.get(worker_type)
+        if override is not None:
+            return override
+        if self.mcp_mode == "real":
+            return "real"
+        return "mock"
+
 
 def call_mcp_adapter(
     worker_input: WorkerInput,
@@ -412,6 +592,33 @@ def call_mcp_adapter(
         mcp_mode=mcp_mode,
         mock_scenario=mock_scenario,
     ).call_worker(worker_input)
+
+
+def _draft_from_mock_output(mock_output: MockWorkerOutput) -> LlmWorkerDraftOutput:
+    return LlmWorkerDraftOutput(
+        outcome=mock_output.outcome,
+        summary=mock_output.summary,
+        artifact_writes=[
+            {
+                "artifact_type": intent.artifact_type,
+                "version": intent.version,
+                "name": intent.name,
+                "content": intent.content,
+                "summary": intent.summary,
+                "visibility": intent.visibility,
+                "metadata": intent.metadata,
+                "parent_artifact_ids": list(intent.parent_artifact_ids),
+                "mime_type": intent.mime_type,
+            }
+            for intent in mock_output.artifact_writes
+        ],
+        diagnostics=list(mock_output.diagnostics),
+        failures=list(mock_output.failures),
+        clarification_request=mock_output.clarification_request,
+        metrics=mock_output.metrics,
+        next_recommended_action=mock_output.next_recommended_action,
+        metadata=mock_output.metadata,
+    )
 
 
 def _artifact_write_request(
