@@ -35,6 +35,7 @@ from app.models.router_schema import (
 DEFAULT_MOCK_SCENARIO = "dev_test_pass"
 SCENARIO_DEV_TEST_PASS = "dev_test_pass"
 SCENARIO_TEST_FAILED_THEN_REPAIR_PASS = "test_failed_then_repair_pass"
+SCENARIO_TEST_FAILED_REPAIR_EXHAUSTED = "test_failed_repair_exhausted"
 SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS = "formal_failed_then_repair_pass"
 SCENARIO_NEED_CLARIFICATION = "need_clarification"
 SCENARIO_WORKER_TIMEOUT = "worker_timeout"
@@ -227,9 +228,16 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
 def _plc_test(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
     code_ref = _artifact_ref(worker_input, ArtifactType.PLC_CODE)
     should_fail = (
-        scenario == SCENARIO_TEST_FAILED_THEN_REPAIR_PASS
+        scenario
+        in {
+            SCENARIO_TEST_FAILED_THEN_REPAIR_PASS,
+            SCENARIO_TEST_FAILED_REPAIR_EXHAUSTED,
+        }
         and code_ref is not None
-        and code_ref.version <= 1
+        and (
+            scenario == SCENARIO_TEST_FAILED_REPAIR_EXHAUSTED
+            or code_ref.version <= 1
+        )
     )
     if should_fail:
         return _plc_test_failed(worker_input, scenario=scenario)
@@ -729,6 +737,16 @@ def _diagnostic(*, severity: Severity, code: str, message: str) -> Diagnostic:
 
 
 def _report_version(worker_input: WorkerInput, artifact_type: ArtifactType) -> int:
+    if artifact_type in {
+        ArtifactType.TEST_REPORT,
+        ArtifactType.FAILING_TRACE,
+        ArtifactType.FORMAL_REPORT,
+        ArtifactType.COUNTEREXAMPLE,
+    }:
+        code_ref = _artifact_ref(worker_input, ArtifactType.PLC_CODE)
+        if code_ref is not None:
+            return max(1, code_ref.version)
+
     same_type_versions = [
         artifact.version
         for artifact in worker_input.input_artifacts

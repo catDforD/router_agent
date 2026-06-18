@@ -121,6 +121,63 @@ The artifact script prints generated artifact IDs and example curl commands.
 uv run uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
+## Optional: LLM-Backed PLC MCP Server
+
+The Router mock worker path remains the default. To exercise the real MCP transport boundary with LLM-simulated PLC workers, configure the PLC worker MCP server and DeepSeek worker settings in `.env`:
+
+```text
+MCP_MODE=real
+PLC_WORKER_MCP_URL=http://localhost:9000/mcp
+PLC_WORKER_TIMEOUT_SECONDS=300
+PLC_WORKER_ARTIFACT_MAX_CHARS=12000
+
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+Start the worker MCP server in one terminal:
+
+```bash
+uv run python scripts/start_plc_worker_mcp_server.py
+```
+
+Check tool discovery from another terminal:
+
+```bash
+uv run python scripts/dev_list_plc_mcp_tools.py
+```
+
+Expected tools:
+
+```text
+plc_dev.run
+plc_test.run
+plc_formal.run
+plc_repair.run
+```
+
+For gradual rollout, use hybrid routing:
+
+```text
+MCP_MODE=hybrid
+PLC_DEV_MODE=real
+PLC_TEST_MODE=mock
+PLC_FORMAL_MODE=mock
+PLC_REPAIR_MODE=mock
+```
+
+Opt-in live worker smoke calls require `--live`:
+
+```bash
+uv run python scripts/dev_call_real_mcp_worker.py --worker plc-dev --live
+uv run python scripts/dev_call_real_mcp_worker.py --worker plc-test --live
+uv run python scripts/dev_call_real_mcp_worker.py --worker plc-formal --live
+uv run python scripts/dev_call_real_mcp_worker.py --worker plc-repair --live
+```
+
+The LLM-backed `plc-test` and `plc-formal` workers are simulation artifacts for integration testing. They are not a substitute for real PLC test execution or formal verification, and should be replaced behind the same MCP tools when the real subagents are available.
+
 ## Verify Artifact APIs
 
 List artifacts for the seeded task:

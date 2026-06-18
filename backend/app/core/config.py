@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +33,43 @@ class Settings(BaseSettings):
         validation_alias="MAIN_AGENT_MAX_TURNS",
     )
     mcp_mode: str = Field(default="mock", validation_alias="MCP_MODE")
+    plc_worker_mcp_url: str = Field(
+        default="http://localhost:9000/mcp",
+        validation_alias="PLC_WORKER_MCP_URL",
+    )
+    plc_worker_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        validation_alias="PLC_WORKER_TIMEOUT_SECONDS",
+    )
+    plc_worker_artifact_max_chars: int = Field(
+        default=12_000,
+        ge=1,
+        validation_alias="PLC_WORKER_ARTIFACT_MAX_CHARS",
+    )
+    plc_dev_mode: str | None = Field(default=None, validation_alias="PLC_DEV_MODE")
+    plc_test_mode: str | None = Field(default=None, validation_alias="PLC_TEST_MODE")
+    plc_formal_mode: str | None = Field(default=None, validation_alias="PLC_FORMAL_MODE")
+    plc_repair_mode: str | None = Field(default=None, validation_alias="PLC_REPAIR_MODE")
+    deepseek_api_key: str | None = Field(default=None, validation_alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(
+        default="https://api.deepseek.com/v1",
+        validation_alias="DEEPSEEK_BASE_URL",
+    )
+    deepseek_model: str = Field(
+        default="deepseek-chat",
+        validation_alias="DEEPSEEK_MODEL",
+    )
+    deepseek_timeout_seconds: int = Field(
+        default=60,
+        ge=1,
+        validation_alias="DEEPSEEK_TIMEOUT_SECONDS",
+    )
+    deepseek_max_retries: int = Field(
+        default=1,
+        ge=0,
+        validation_alias="DEEPSEEK_MAX_RETRIES",
+    )
     mock_scenario: str = Field(
         default="dev_test_pass",
         validation_alias="MOCK_SCENARIO",
@@ -46,9 +83,67 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, value: str) -> str:
         return value.upper()
 
+    @field_validator("mcp_mode")
+    @classmethod
+    def normalize_mcp_mode(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"mock", "real", "hybrid"}:
+            raise ValueError("mcp_mode must be 'mock', 'real', or 'hybrid'")
+        return normalized
+
+    @field_validator(
+        "plc_dev_mode",
+        "plc_test_mode",
+        "plc_formal_mode",
+        "plc_repair_mode",
+    )
+    @classmethod
+    def normalize_worker_mode(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower()
+        if normalized not in {"mock", "real"}:
+            raise ValueError("PLC worker mode must be 'mock' or 'real'")
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_hybrid_defaults(self) -> Settings:
+        if self.mcp_mode == "hybrid":
+            return self
+        return self
+
+    def redacted_diagnostics(self) -> dict[str, str | int | None]:
+        """Return non-secret settings useful for local diagnostics."""
+
+        return {
+            "app_env": self.app_env,
+            "mcp_mode": self.mcp_mode,
+            "plc_worker_mcp_url": self.plc_worker_mcp_url,
+            "plc_worker_timeout_seconds": self.plc_worker_timeout_seconds,
+            "plc_worker_artifact_max_chars": self.plc_worker_artifact_max_chars,
+            "plc_dev_mode": self.plc_dev_mode,
+            "plc_test_mode": self.plc_test_mode,
+            "plc_formal_mode": self.plc_formal_mode,
+            "plc_repair_mode": self.plc_repair_mode,
+            "deepseek_base_url": self.deepseek_base_url,
+            "deepseek_model": self.deepseek_model,
+            "deepseek_timeout_seconds": self.deepseek_timeout_seconds,
+            "deepseek_max_retries": self.deepseek_max_retries,
+            "deepseek_api_key": _redacted(self.deepseek_api_key),
+            "openai_api_key": _redacted(self.openai_api_key),
+        }
+
 
 @lru_cache
 def get_settings() -> Settings:
     """Return cached settings without opening external connections."""
 
     return Settings()
+
+
+def _redacted(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}...{value[-4:]}"
