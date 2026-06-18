@@ -1560,7 +1560,7 @@
 31. **第二阶段最小目标**  
     目标：
     ```
-    第二周接入真实 plc-dev，其余 worker 继续 mock：
+    接入真实 plc-dev，其余 worker 继续 mock：
     real plc-dev
     mock plc-test
     mock plc-formal
@@ -1577,7 +1577,7 @@
 32. **第三阶段最小目标**  
     目标：
     ```
-    第三周接入真实 plc-test 和修复闭环：
+    接入真实 plc-test 和修复闭环：
     real plc-dev
     real plc-test
     mock/real plc-repair
@@ -1594,7 +1594,7 @@
 33. **第四阶段最小目标**  
     目标：
     ```
-    第四周接入 plc-formal，稳定 L3 高可靠流程：
+    接入 plc-formal，稳定 L3 高可靠流程：
     dev → test + formal → repair → regression test + formal regression → final_report
     ```
     验收标准：

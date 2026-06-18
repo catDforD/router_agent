@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.models.router_schema import (
     Artifact,
+    EventType,
     RouterEvent,
     TaskState,
     WorkerInput,
@@ -86,6 +87,20 @@ def test_typescript_contract_mentions_core_pydantic_field_surface() -> None:
                 schema_id_name,
                 field_name,
             )
+
+
+def test_typescript_contract_mentions_main_agent_observability_events() -> None:
+    ts_contract = (REPO_ROOT / "schema/ts/router_contract.d.ts").read_text(
+        encoding="utf-8"
+    )
+
+    for event_type in (
+        EventType.MAIN_AGENT_TURN_STARTED,
+        EventType.MAIN_AGENT_TOOL_CALLED,
+        EventType.MAIN_AGENT_TOOL_RESULT,
+        EventType.MAIN_AGENT_COMPLETED,
+    ):
+        assert f'"{event_type.value}"' in ts_contract
 
 
 def extract_interface_body(ts_contract: str, interface_name: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
@@ -35,11 +36,25 @@ class TaskRepository:
             raise RepositoryNotFoundError(f"task not found: {task_id}")
         return TaskState.model_validate(row.state_json)
 
+    def get_task_for_update(self, task_id: str) -> TaskState:
+        row = self.session.execute(
+            select(TaskRow)
+            .where(TaskRow.id == task_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if row is None:
+            raise RepositoryNotFoundError(f"task not found: {task_id}")
+        return TaskState.model_validate(row.state_json)
+
     def update_task_state(self, task_state: TaskState) -> TaskState:
         row = self.session.get(TaskRow, task_state.task_id)
         if row is None:
             raise RepositoryNotFoundError(f"task not found: {task_state.task_id}")
 
+        event_seq = max(row.event_seq, task_state.event_seq)
+        if event_seq != task_state.event_seq:
+            task_state = task_state.model_copy(update={"event_seq": event_seq})
         self._apply_task_state(row, task_state)
         flush_or_raise_conflict(
             self.session,

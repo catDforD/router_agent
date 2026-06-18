@@ -25,6 +25,7 @@ class EventRepository:
             select(TaskRow)
             .where(TaskRow.id == event.task_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if task_row is None:
             raise RepositoryNotFoundError(f"task not found: {event.task_id}")

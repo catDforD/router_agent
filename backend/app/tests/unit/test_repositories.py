@@ -125,6 +125,26 @@ def test_append_event_assigns_monotonic_sequence_per_task(db_session: Session) -
     assert updated_task.event_seq == 2
 
 
+def test_task_update_preserves_newer_event_sequence(
+    db_session: Session,
+) -> None:
+    task = create_task(db_session)
+    event_repository = EventRepository(db_session)
+    task_repository = TaskRepository(db_session)
+
+    first = event_repository.append_event(router_event("event-001"))
+    stale_update = task.model_copy(update={"status": "running"})
+    updated = task_repository.update_task_state(stale_update)
+    second = event_repository.append_event(router_event("event-002"))
+    restored = task_repository.get_task(task.task_id)
+
+    assert first.seq == 1
+    assert updated.event_seq == 1
+    assert second.seq == 2
+    assert restored.event_seq == 2
+    assert restored.status == "running"
+
+
 def test_duplicate_event_sequence_is_rejected_by_database_constraint(
     db_session: Session,
 ) -> None:

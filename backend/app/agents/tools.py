@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -72,6 +73,7 @@ from app.workers.worker_result_handler import handle_worker_result
 
 
 DEFAULT_READ_ARTIFACT_MAX_CHARS = 12_000
+CheckpointCallback = Callable[[], None]
 TERMINAL_EVENT_BY_STATUS = {
     TaskStatus.SUCCEEDED.value: EventType.TASK_SUCCEEDED,
     TaskStatus.PARTIAL_FAILED.value: EventType.TASK_PARTIAL_FAILED,
@@ -89,6 +91,9 @@ class AgentToolContext:
     mcp_mode: str = "mock"
     mock_scenario: str = DEFAULT_MOCK_SCENARIO
     read_artifact_max_chars: int = DEFAULT_READ_ARTIFACT_MAX_CHARS
+    report_first_finalization: bool = False
+    checkpoint: CheckpointCallback | None = None
+    observability_recorder: Any | None = None
 
 
 class ToolStatus(str, Enum):
@@ -206,12 +211,14 @@ class AgentToolService:
         task_id: str,
         *,
         objective: str | None = None,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_dev",
             task_id=task_id,
             worker_type=WorkerType.PLC_DEV.value,
             objective=objective,
+            rationale_summary=rationale_summary,
         )
 
     def call_plc_test(
@@ -219,12 +226,14 @@ class AgentToolService:
         task_id: str,
         *,
         objective: str | None = None,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_test",
             task_id=task_id,
             worker_type=WorkerType.PLC_TEST.value,
             objective=objective,
+            rationale_summary=rationale_summary,
         )
 
     def call_plc_formal(
@@ -232,12 +241,14 @@ class AgentToolService:
         task_id: str,
         *,
         objective: str | None = None,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_formal",
             task_id=task_id,
             worker_type=WorkerType.PLC_FORMAL.value,
             objective=objective,
+            rationale_summary=rationale_summary,
         )
 
     def call_plc_repair(
@@ -245,27 +256,33 @@ class AgentToolService:
         task_id: str,
         *,
         objective: str | None = None,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_repair",
             task_id=task_id,
             worker_type=WorkerType.PLC_REPAIR.value,
             objective=objective,
+            rationale_summary=rationale_summary,
         )
 
     def run_parallel_workers(
         self,
         task_id: str,
         requests: list[ParallelWorkerRequest],
+        *,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         tool_name = "run_parallel_workers"
         if not requests:
-            return self._rejected_result(
+            result = self._rejected_result(
                 tool_name=tool_name,
                 task_id=task_id,
                 code="empty_parallel_batch",
                 message="parallel worker batch must not be empty",
             )
+            self._record_tool_result(tool_name, result)
+            return result
 
         task = self._get_task(task_id)
         proposed_jobs: list[ProposedWorkerJob] = []
@@ -279,11 +296,28 @@ class AgentToolService:
                     input_artifacts=artifacts,
                 )
             )
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={
+                "task_id": task_id,
+                "workers": [request.worker_type for request in requests],
+                "objectives": [request.objective for request in requests],
+            },
+            input_artifacts=[
+                artifact
+                for artifacts in proposed_artifacts
+                for artifact in artifacts
+            ],
+        )
 
         try:
             validate_parallel_jobs(task, proposed_jobs)
         except SchedulerGuardViolation as exc:
-            return self._guard_rejected_result(tool_name, task, exc)
+            result = self._guard_rejected_result(tool_name, task, exc)
+            self._record_tool_result(tool_name, result)
+            return result
 
         worker_inputs: list[WorkerInput] = []
         for request, artifacts in zip(requests, proposed_artifacts, strict=True):
@@ -299,7 +333,7 @@ class AgentToolService:
                     )
                 )
             except WorkerInputBuildError as exc:
-                return self._rejected_result(
+                result = self._rejected_result(
                     tool_name=tool_name,
                     task_id=task_id,
                     task=task,
@@ -307,13 +341,15 @@ class AgentToolService:
                     message=str(exc),
                     details={"worker_type": request.worker_type},
                 )
+                self._record_tool_result(tool_name, result)
+                return result
 
         results = [
             self._dispatch_worker_input(tool_name=tool_name, worker_input=worker_input)
             for worker_input in worker_inputs
         ]
         latest = self._get_task(task_id)
-        return AgentToolResult(
+        result = AgentToolResult(
             tool=tool_name,
             task_id=task_id,
             status=(
@@ -326,6 +362,8 @@ class AgentToolService:
             failures=_failure_summaries(latest.failures),
             results=results,
         )
+        self._record_tool_result(tool_name, result)
+        return result
 
     def read_artifact(
         self,
@@ -418,17 +456,29 @@ class AgentToolService:
             artifact=read_summary,
         )
 
-    def run_quality_gate(self, task_id: str) -> AgentToolResult:
+    def run_quality_gate(
+        self,
+        task_id: str,
+        *,
+        rationale_summary: str | None = None,
+    ) -> AgentToolResult:
+        self._record_tool_call(
+            tool_name="run_quality_gate",
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={"task_id": task_id},
+        )
         result = QualityGateService(
             session=self.context.session,
             artifact_root=self.context.artifact_root,
         ).run_quality_gate(task_id)
+        self._checkpoint()
         failed_gates = [
             outcome.gate_type
             for outcome in result.assessment.outcomes
             if outcome.blocking
         ]
-        return AgentToolResult(
+        tool_result = AgentToolResult(
             tool="run_quality_gate",
             task_id=task_id,
             status=ToolStatus.APPLIED,
@@ -442,29 +492,74 @@ class AgentToolService:
                 "failed_gates": failed_gates,
             },
         )
+        self._record_tool_result("run_quality_gate", tool_result)
+        return tool_result
 
     def finish_task(
         self,
         task_id: str,
         *,
         final_status: TaskStatus | str = TaskStatus.SUCCEEDED.value,
+        rationale_summary: str | None = None,
     ) -> AgentToolResult:
         tool_name = "finish_task"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={"task_id": task_id, "final_status": _value(final_status)},
+        )
         task = self._get_task(task_id)
         status_value = _value(final_status)
+        if _value(task.status) in TERMINAL_EVENT_BY_STATUS:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                task=task,
+                code="terminal_task",
+                message=f"cannot finish terminal task: {task_id}",
+                details={"status": _value(task.status)},
+            )
+            self._record_tool_result(tool_name, result)
+            return result
         if status_value not in TERMINAL_EVENT_BY_STATUS:
-            return self._rejected_result(
+            result = self._rejected_result(
                 tool_name=tool_name,
                 task_id=task_id,
                 task=task,
                 code="unsupported_final_status",
                 message=f"unsupported final status: {status_value!r}",
             )
+            self._record_tool_result(tool_name, result)
+            return result
 
         try:
             validate_finish_task(task, status_value)
         except SchedulerGuardViolation as exc:
-            return self._guard_rejected_result(tool_name, task, exc)
+            result = self._guard_rejected_result(tool_name, task, exc)
+            self._record_tool_result(tool_name, result)
+            return result
+
+        if self.context.report_first_finalization:
+            result = AgentToolResult(
+                tool=tool_name,
+                task_id=task_id,
+                status=ToolStatus.NOOP,
+                summary=(
+                    "Runtime report-first finalization is enabled. Return the "
+                    f"final structured output recommending {status_value}; Runtime "
+                    "will persist the final report before applying terminal status."
+                ),
+                failures=_failure_summaries(task.failures),
+                gate_state=_gate_state_summary(task),
+                next_recommended_action="return_final_output",
+                details={
+                    "final_status": status_value,
+                    "report_first_finalization": True,
+                },
+            )
+            self._record_tool_result(tool_name, result)
+            return result
 
         now = utc_now()
         updated = task.model_copy(
@@ -484,8 +579,9 @@ class AgentToolService:
                 created_at=now,
             )
         )
+        self._checkpoint()
         persisted = self._get_task(task_id)
-        return AgentToolResult(
+        result = AgentToolResult(
             tool=tool_name,
             task_id=task_id,
             status=ToolStatus.APPLIED,
@@ -494,6 +590,8 @@ class AgentToolService:
             gate_state=_gate_state_summary(persisted),
             details={"final_status": status_value},
         )
+        self._record_tool_result(tool_name, result)
+        return result
 
     def _call_worker_tool(
         self,
@@ -502,13 +600,27 @@ class AgentToolService:
         task_id: str,
         worker_type: str,
         objective: str | None,
+        rationale_summary: str | None,
     ) -> AgentToolResult:
         task = self._get_task(task_id)
         proposed_artifacts = _proposed_worker_input_artifacts(task, worker_type)
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={
+                "task_id": task_id,
+                "worker_type": worker_type,
+                "objective": objective,
+            },
+            input_artifacts=proposed_artifacts,
+        )
         try:
             validate_worker_call(task, worker_type, proposed_artifacts)
         except SchedulerGuardViolation as exc:
-            return self._guard_rejected_result(tool_name, task, exc)
+            result = self._guard_rejected_result(tool_name, task, exc)
+            self._record_tool_result(tool_name, result)
+            return result
 
         try:
             worker_input = build_worker_input(
@@ -520,7 +632,7 @@ class AgentToolService:
                 metadata={"source": "main_agent_function_tools"},
             )
         except WorkerInputBuildError as exc:
-            return self._rejected_result(
+            result = self._rejected_result(
                 tool_name=tool_name,
                 task_id=task_id,
                 task=task,
@@ -528,8 +640,15 @@ class AgentToolService:
                 message=str(exc),
                 details={"worker_type": worker_type},
             )
+            self._record_tool_result(tool_name, result)
+            return result
 
-        return self._dispatch_worker_input(tool_name=tool_name, worker_input=worker_input)
+        result = self._dispatch_worker_input(
+            tool_name=tool_name,
+            worker_input=worker_input,
+        )
+        self._record_tool_result(tool_name, result)
+        return result
 
     def _dispatch_worker_input(
         self,
@@ -544,9 +663,11 @@ class AgentToolService:
                 artifact_root=self.context.artifact_root,
                 mcp_mode=self.context.mcp_mode,
                 mock_scenario=self.context.mock_scenario,
+                checkpoint=self.context.checkpoint,
             ).call_worker(worker_input)
             handled = handle_worker_result(result, session=self.context.session)
             final_task = self._decrement_active_worker_counter(worker_input.task_id)
+            self._checkpoint()
             return _worker_result_to_tool_result(
                 tool_name=tool_name,
                 result=result,
@@ -559,6 +680,7 @@ class AgentToolService:
                 worker_job_id=worker_input.worker_job_id,
                 previous_task=predispatch,
             )
+            self._checkpoint()
             return self._failed_result(
                 tool_name=tool_name,
                 task_id=worker_input.task_id,
@@ -643,7 +765,40 @@ class AgentToolService:
         return self.task_repository.update_task_state(updated)
 
     def _get_task(self, task_id: str) -> TaskState:
+        if self.context.checkpoint is not None:
+            self.context.session.expire_all()
         return self.task_repository.get_task(task_id)
+
+    def _checkpoint(self) -> None:
+        if self.context.checkpoint is not None:
+            self.context.checkpoint()
+
+    def _record_tool_call(
+        self,
+        *,
+        tool_name: str,
+        task_id: str,
+        rationale_summary: str | None,
+        arguments: dict[str, Any],
+        input_artifacts: list[ArtifactRef] | None = None,
+    ) -> None:
+        recorder = self.context.observability_recorder
+        if recorder is None:
+            return
+        recorder.record_tool_call(
+            tool_name=tool_name,
+            rationale_summary=rationale_summary,
+            arguments=arguments,
+            input_artifact_ids=[
+                artifact.artifact_id for artifact in input_artifacts or []
+            ],
+        )
+
+    def _record_tool_result(self, tool_name: str, result: AgentToolResult) -> None:
+        recorder = self.context.observability_recorder
+        if recorder is None:
+            return
+        recorder.record_tool_result(tool_name=tool_name, result=result)
 
     def _guard_rejected_result(
         self,
@@ -712,12 +867,14 @@ def call_plc_dev(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
     objective: str | None = None,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Generate or update PLC implementation artifacts for a classified task."""
 
     return AgentToolService(ctx.context).call_plc_dev(
         task_id=task_id,
         objective=objective,
+        rationale_summary=rationale_summary,
     )
 
 
@@ -726,12 +883,14 @@ def call_plc_test(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
     objective: str | None = None,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Run PLC test worker for the task's current code and requirements."""
 
     return AgentToolService(ctx.context).call_plc_test(
         task_id=task_id,
         objective=objective,
+        rationale_summary=rationale_summary,
     )
 
 
@@ -740,12 +899,14 @@ def call_plc_formal(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
     objective: str | None = None,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Run formal verification worker for the current PLC code."""
 
     return AgentToolService(ctx.context).call_plc_formal(
         task_id=task_id,
         objective=objective,
+        rationale_summary=rationale_summary,
     )
 
 
@@ -754,12 +915,14 @@ def call_plc_repair(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
     objective: str | None = None,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Run PLC repair worker using current code and latest failure evidence."""
 
     return AgentToolService(ctx.context).call_plc_repair(
         task_id=task_id,
         objective=objective,
+        rationale_summary=rationale_summary,
     )
 
 
@@ -769,6 +932,7 @@ def run_parallel_workers(
     task_id: str,
     workers: list[str],
     objectives: list[str] | None = None,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Dispatch a guarded parallel batch of non-repair PLC workers."""
 
@@ -782,6 +946,7 @@ def run_parallel_workers(
     return AgentToolService(ctx.context).run_parallel_workers(
         task_id=task_id,
         requests=requests,
+        rationale_summary=rationale_summary,
     )
 
 
@@ -807,10 +972,14 @@ def read_artifact(
 def run_quality_gate(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Run and persist Quality Gate assessment for a task."""
 
-    return AgentToolService(ctx.context).run_quality_gate(task_id=task_id)
+    return AgentToolService(ctx.context).run_quality_gate(
+        task_id=task_id,
+        rationale_summary=rationale_summary,
+    )
 
 
 @function_tool
@@ -818,12 +987,14 @@ def finish_task(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
     final_status: str = TaskStatus.SUCCEEDED.value,
+    rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Finish a task through guarded terminal state transition."""
 
     return AgentToolService(ctx.context).finish_task(
         task_id=task_id,
         final_status=final_status,
+        rationale_summary=rationale_summary,
     )
 
 
