@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.agents.main_agent import MainAgentService
 from app.models.db_models import Base
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
@@ -179,6 +180,58 @@ def test_cancel_task_is_idempotent_when_already_cancelled(
 
     assert second == first
     assert [event.type for event in events] == ["task.created", "task.cancelled"]
+
+
+def test_cancel_task_refreshes_stale_session_after_background_event(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'router.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    artifact_root = tmp_path / "artifacts"
+    try:
+        with factory() as session:
+            task = TaskService(
+                session=session,
+                artifact_root=artifact_root,
+            ).create_task(message="Create pump logic.").task
+            session.commit()
+
+        stale_session = factory()
+        try:
+            stale_service = TaskService(
+                session=stale_session,
+                artifact_root=artifact_root,
+            )
+            stale_service.get_task(task.task_id)
+
+            with factory() as background_session:
+                MainAgentService(
+                    session=background_session,
+                    artifact_root=artifact_root,
+                ).start_main_agent_run(task.task_id)
+                background_session.commit()
+
+            cancelled = stale_service.cancel_task(task.task_id)
+            stale_session.commit()
+        finally:
+            stale_session.close()
+
+        with factory() as session:
+            restored = TaskRepository(session).get_task(task.task_id)
+            events = EventService(session).list_visible_events(task.task_id)
+
+        assert cancelled.status == "cancelled"
+        assert restored.status == "cancelled"
+        assert [event.type for event in events] == [
+            "task.created",
+            "main_agent.started",
+            "task.cancelled",
+        ]
+        assert [event.seq for event in events] == [1, 2, 3]
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_cancel_task_rejects_terminal_status(

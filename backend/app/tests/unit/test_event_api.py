@@ -10,9 +10,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api import events as event_api
 from app.core.config import Settings
 from app.core.database import get_engine_for_url, get_session_factory_for_url
+from app.core.time import utc_now
 from app.main import create_app
 from app.models.db_models import Base
-from app.models.router_schema import RouterEvent, TaskState
+from app.models.router_schema import (
+    EventCorrelation,
+    EventSeverity,
+    EventSource,
+    EventSourceType,
+    EventType,
+    EventVisibility,
+    RouterEvent,
+    TaskState,
+)
 from app.repositories.task_repo import TaskRepository
 from app.services import event_service as event_service_module
 from app.services.event_service import EventService
@@ -86,6 +96,45 @@ def router_event(
     payload["visibility"] = visibility
     payload["title"] = f"{event_type} {visibility}"
     return RouterEvent.model_validate(payload)
+
+
+def main_agent_event(
+    event_id: str,
+    *,
+    event_type: EventType | str,
+    payload: dict[str, Any] | None = None,
+    visibility: EventVisibility | str = EventVisibility.USER,
+) -> RouterEvent:
+    return RouterEvent(
+        schema_version="router.v1",
+        event_id=event_id,
+        task_id="task-001",
+        seq=0,
+        type=event_type,
+        source=EventSource(
+            type=EventSourceType.MAIN_AGENT,
+            id="main-agent-run-001",
+        ),
+        severity=EventSeverity.INFO,
+        visibility=visibility,
+        title=f"{event_type}",
+        message=None,
+        correlation=EventCorrelation(
+            openai_trace_id="trace-001",
+            main_agent_run_id="main-agent-run-001",
+            artifact_ids=(
+                [
+                    payload["final_report_artifact_id"],
+                    payload["main_agent_log_artifact_id"],
+                ]
+                if payload
+                and event_type == EventType.MAIN_AGENT_COMPLETED
+                else None
+            ),
+        ),
+        payload=payload or {"task_id": "task-001"},
+        created_at=utc_now(),
+    )
 
 
 def append_event(
@@ -200,6 +249,155 @@ def test_event_stream_after_seq_overrides_last_event_id(
     assert "event-001" not in body
     assert "event-002" not in body
     assert "event-003" in body
+
+
+def test_event_stream_replays_main_agent_observability_events(
+    api_context: tuple[Settings, sessionmaker[Session]],
+    limited_event_stream: None,
+) -> None:
+    settings, session_factory = api_context
+    task = create_task(session_factory)
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-turn",
+            event_type=EventType.MAIN_AGENT_TURN_STARTED,
+            payload={"task_id": task.task_id, "turn_index": 1, "phase": "orchestration"},
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-call",
+            event_type=EventType.MAIN_AGENT_TOOL_CALLED,
+            payload={
+                "task_id": task.task_id,
+                "turn_index": 1,
+                "tool_name": "call_plc_dev",
+                "rationale_summary": "No current code exists.",
+                "arguments": {"task_id": task.task_id},
+                "input_artifact_ids": ["artifact-raw-user-request"],
+            },
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-result",
+            event_type=EventType.MAIN_AGENT_TOOL_RESULT,
+            payload={
+                "task_id": task.task_id,
+                "turn_index": 1,
+                "tool_name": "call_plc_dev",
+                "status": "applied",
+                "summary": "PLC development completed.",
+                "artifact_ids": ["artifact-plc-code"],
+                "failure_ids": [],
+            },
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-completed",
+            event_type=EventType.MAIN_AGENT_COMPLETED,
+            payload={
+                "task_id": task.task_id,
+                "main_agent_run_id": "main-agent-run-001",
+                "final_task_status": "succeeded",
+                "summary": "Task completed.",
+                "final_report_artifact_id": "artifact-final-report",
+                "main_agent_log_artifact_id": "artifact-main-agent-log",
+            },
+        ),
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/api/tasks/{task.task_id}/events")
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event: main_agent.tool_called\n" in body
+    assert "event: main_agent.tool_result\n" in body
+    assert "event: main_agent.completed\n" in body
+    assert "event-main-agent-call" in body
+    assert "event-main-agent-result" in body
+    assert "event-main-agent-completed" in body
+
+
+def test_event_stream_last_event_id_resumes_across_main_agent_events(
+    api_context: tuple[Settings, sessionmaker[Session]],
+    limited_event_stream: None,
+) -> None:
+    settings, session_factory = api_context
+    task = create_task(session_factory)
+    turn = append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-turn",
+            event_type=EventType.MAIN_AGENT_TURN_STARTED,
+            payload={"task_id": task.task_id, "turn_index": 1, "phase": "orchestration"},
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-call",
+            event_type=EventType.MAIN_AGENT_TOOL_CALLED,
+            payload={
+                "task_id": task.task_id,
+                "turn_index": 1,
+                "tool_name": "call_plc_test",
+                "rationale_summary": "Current code is ready for validation.",
+                "arguments": {"task_id": task.task_id},
+                "input_artifact_ids": ["artifact-plc-code"],
+            },
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-result",
+            event_type=EventType.MAIN_AGENT_TOOL_RESULT,
+            payload={
+                "task_id": task.task_id,
+                "turn_index": 1,
+                "tool_name": "call_plc_test",
+                "status": "applied",
+                "summary": "PLC tests passed.",
+                "artifact_ids": ["artifact-test-report"],
+                "failure_ids": [],
+            },
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
+            "event-main-agent-completed",
+            event_type=EventType.MAIN_AGENT_COMPLETED,
+            payload={
+                "task_id": task.task_id,
+                "main_agent_run_id": "main-agent-run-001",
+                "final_task_status": "succeeded",
+                "summary": "Task completed.",
+                "final_report_artifact_id": "artifact-final-report",
+                "main_agent_log_artifact_id": "artifact-main-agent-log",
+            },
+        ),
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get(
+            f"/api/tasks/{task.task_id}/events",
+            headers={"Last-Event-ID": str(turn.seq)},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "event-main-agent-turn" not in body
+    assert "event-main-agent-call" in body
+    assert "event-main-agent-result" in body
+    assert "event-main-agent-completed" in body
 
 
 def test_event_stream_missing_task_returns_not_found(

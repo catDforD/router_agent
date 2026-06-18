@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.tools import (
     AgentToolContext,
     AgentToolService,
@@ -324,6 +325,47 @@ def test_call_plc_dev_invokes_mock_worker_and_returns_compact_refs(
     assert result.worker_job_id in updated.completed_worker_job_ids
 
 
+def test_worker_tool_rationale_is_observable_without_changing_worker_input(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    create_raw_artifact(db_session, tmp_path, task)
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-001",
+        openai_trace_id="trace-001",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.call_plc_dev(
+        task.task_id,
+        objective="Generate motor control code.",
+        rationale_summary="No current code exists, so start with PLC development.",
+    )
+    events = EventService(db_session).list_visible_events(task.task_id)
+    job = worker_job_rows(db_session)[0]
+
+    assert result.status == "applied"
+    assert "main_agent.tool_called" in [event.type for event in events]
+    assert "main_agent.tool_result" in [event.type for event in events]
+    tool_call = next(event for event in events if event.type == "main_agent.tool_called")
+    assert (
+        tool_call.payload["rationale_summary"]
+        == "No current code exists, so start with PLC development."
+    )
+    assert job.input_json["objective"] == "Generate motor control code."
+    assert "rationale_summary" not in job.input_json["metadata"]
+
+
 def test_call_plc_test_without_current_code_is_rejected_without_side_effects(
     db_session: Session,
     service: AgentToolService,
@@ -339,7 +381,43 @@ def test_call_plc_test_without_current_code_is_rejected_without_side_effects(
     assert updated.runtime_limits.worker_calls_used == 0
     assert updated.active_worker_jobs == []
     assert worker_job_rows(db_session) == []
-    assert EventService(db_session).list_visible_events(task.task_id) == []
+
+
+def test_guard_rejection_is_recorded_when_observability_is_enabled(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-001",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.call_plc_test(
+        task.task_id,
+        rationale_summary="Testing is required before final delivery.",
+    )
+    events = EventService(db_session).list_visible_events(task.task_id)
+    tool_result = next(event for event in events if event.type == "main_agent.tool_result")
+
+    assert result.status == "rejected"
+    assert [event.type for event in events] == [
+        "main_agent.turn_started",
+        "main_agent.tool_called",
+        "main_agent.tool_result",
+    ]
+    assert tool_result.payload["status"] == "rejected"
+    assert tool_result.payload["details"]["violation"]["code"] == "missing_current_code"
+    assert worker_job_rows(db_session) == []
 
 
 def test_call_plc_repair_without_failure_is_rejected_without_side_effects(
@@ -459,6 +537,32 @@ def test_finish_task_rejects_succeeded_without_quality_gate(
     assert updated.status == "running"
 
 
+def test_finish_task_is_noop_in_report_first_orchestration_context(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            report_first_finalization=True,
+        )
+    )
+    task = classified_task(db_session, qa=True)
+    create_raw_artifact(db_session, tmp_path, task)
+    service.run_quality_gate(task.task_id)
+
+    result = service.finish_task(task.task_id)
+    updated = TaskRepository(db_session).get_task(task.task_id)
+    events = EventService(db_session).list_visible_events(task.task_id)
+
+    assert result.status == "no-op"
+    assert result.details["report_first_finalization"] is True
+    assert result.next_recommended_action == "return_final_output"
+    assert updated.status == "running"
+    assert "task.succeeded" not in [event.type for event in events]
+
+
 def test_finish_task_marks_succeeded_after_quality_gate_passes(
     db_session: Session,
     tmp_path: Path,
@@ -477,3 +581,48 @@ def test_finish_task_marks_succeeded_after_quality_gate_passes(
     assert updated.phase == "completed"
     assert updated.completed_at is not None
     assert [event.type for event in events][-1] == "task.succeeded"
+
+
+def test_tool_checkpoint_callback_runs_after_gate_and_finish(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    checkpoints: list[str] = []
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            checkpoint=lambda: checkpoints.append("checkpoint"),
+        )
+    )
+    task = classified_task(db_session, qa=True)
+    create_raw_artifact(db_session, tmp_path, task)
+
+    service.run_quality_gate(task.task_id)
+    service.finish_task(task.task_id)
+
+    assert checkpoints == ["checkpoint", "checkpoint"]
+
+
+def test_finish_task_rejects_cancelled_task_without_overwrite(
+    db_session: Session,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    cancelled = task.model_copy(
+        deep=True,
+        update={
+            "status": TaskStatus.CANCELLED.value,
+            "phase": TaskPhase.COMPLETED.value,
+        },
+    )
+    TaskRepository(db_session).update_task_state(cancelled)
+
+    result = service.finish_task(task.task_id)
+    updated = TaskRepository(db_session).get_task(task.task_id)
+
+    assert result.status == "rejected"
+    assert result.violation is not None
+    assert result.violation.code == "terminal_task"
+    assert updated.status == "cancelled"
+    assert EventService(db_session).list_visible_events(task.task_id) == []

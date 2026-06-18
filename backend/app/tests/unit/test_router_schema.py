@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.models.router_schema import (
     Artifact,
+    EventType,
     RouterEvent,
     TaskState,
     WorkerInput,
@@ -85,3 +86,78 @@ def test_router_event_seq_must_be_integer() -> None:
 
     with pytest.raises(ValidationError):
         RouterEvent.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        EventType.MAIN_AGENT_TURN_STARTED,
+        EventType.MAIN_AGENT_TOOL_CALLED,
+        EventType.MAIN_AGENT_TOOL_RESULT,
+        EventType.MAIN_AGENT_COMPLETED,
+    ],
+)
+def test_main_agent_observability_event_types_validate(
+    event_type: EventType,
+) -> None:
+    payload = deepcopy(load_fixture("event.worker_started.valid.json"))
+    payload.update(
+        {
+            "event_id": f"event-{event_type.value.replace('.', '-')}",
+            "type": event_type.value,
+            "source": {"type": "main_agent", "id": "main-agent"},
+            "title": "Main Agent observability",
+            "message": "Main Agent observability event.",
+            "payload": {
+                "task_id": payload["task_id"],
+                "turn_index": 1,
+                "tool_name": "call_plc_dev",
+                "rationale_summary": "Start by generating PLC code.",
+                "final_report_artifact_id": "artifact-final-report-001",
+                "main_agent_log_artifact_id": "artifact-main-agent-log-001",
+                "final_task_status": "succeeded",
+            },
+            "correlation": {
+                "main_agent_run_id": "main-agent-run-001",
+                "artifact_ids": [
+                    "artifact-final-report-001",
+                    "artifact-main-agent-log-001",
+                ],
+            },
+        }
+    )
+
+    event = RouterEvent.model_validate(payload)
+
+    assert event.type == event_type
+
+
+def test_final_report_and_main_agent_log_artifact_types_validate() -> None:
+    base = load_fixture("artifact.plc_code.valid.json")
+
+    for artifact_type in ("final_report", "main_agent_log"):
+        payload = deepcopy(base)
+        payload.update(
+            {
+                "artifact_id": f"artifact-{artifact_type}",
+                "type": artifact_type,
+                "name": f"{artifact_type}.json",
+                "summary": f"{artifact_type} artifact.",
+                "storage": {
+                    **payload["storage"],
+                    "uri": (
+                        f"local://artifacts/task-001/{artifact_type}/v1/"
+                        f"artifact-{artifact_type}__{artifact_type}.json"
+                    ),
+                    "path": (
+                        f"task-001/{artifact_type}/v1/"
+                        f"artifact-{artifact_type}__{artifact_type}.json"
+                    ),
+                    "mime_type": "application/json",
+                },
+            }
+        )
+
+        artifact = Artifact.model_validate(payload)
+
+        assert artifact.type == artifact_type

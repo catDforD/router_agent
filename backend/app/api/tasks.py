@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
 from app.core.database import get_db_session
 from app.core.errors import (
     ArtifactStoreConflictError,
@@ -15,6 +16,7 @@ from app.core.errors import (
     RepositoryNotFoundError,
 )
 from app.models.router_schema import ProjectContext, TaskState
+from app.services.runtime_service import run_runtime_resume_task, run_runtime_start_task
 from app.services.task_service import (
     TaskMutationConflictError,
     TaskService,
@@ -80,6 +82,8 @@ def get_task_service(
 )
 def create_task(
     body: CreateTaskRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
     session: Session = Depends(get_request_db_session),
     service: TaskService = Depends(get_task_service),
 ) -> CreateTaskResponse:
@@ -96,6 +100,11 @@ def create_task(
         session.rollback()
         raise
 
+    _schedule_runtime_start(
+        background_tasks,
+        result.task.task_id,
+        settings=request.app.state.settings,
+    )
     return CreateTaskResponse(
         task_id=result.task.task_id,
         status=result.task.status,
@@ -118,6 +127,8 @@ def get_task(
 def append_user_message(
     task_id: str,
     body: AppendUserMessageRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
     session: Session = Depends(get_request_db_session),
     service: TaskService = Depends(get_task_service),
 ) -> UserMessageResponse:
@@ -137,6 +148,11 @@ def append_user_message(
         session.rollback()
         raise
 
+    _schedule_runtime_resume(
+        background_tasks,
+        task_id,
+        settings=request.app.state.settings,
+    )
     return _user_message_response(result)
 
 
@@ -170,3 +186,21 @@ def _user_message_response(result: UserMessageResult) -> UserMessageResponse:
         task=result.task,
         message_artifact_id=result.message_artifact_id,
     )
+
+
+def _schedule_runtime_start(
+    background_tasks: BackgroundTasks,
+    task_id: str,
+    *,
+    settings: Settings,
+) -> None:
+    background_tasks.add_task(run_runtime_start_task, task_id, settings)
+
+
+def _schedule_runtime_resume(
+    background_tasks: BackgroundTasks,
+    task_id: str,
+    *,
+    settings: Settings,
+) -> None:
+    background_tasks.add_task(run_runtime_resume_task, task_id, settings)

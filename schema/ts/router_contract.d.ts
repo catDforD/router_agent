@@ -769,6 +769,10 @@ export type EventType =
   | "main_agent.plan_updated"
   | "main_agent.clarification_requested"
   | "main_agent.finalizing"
+  | "main_agent.turn_started"
+  | "main_agent.tool_called"
+  | "main_agent.tool_result"
+  | "main_agent.completed"
 
   | "worker.job_created"
   | "worker.started"

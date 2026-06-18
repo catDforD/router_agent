@@ -199,7 +199,7 @@ class TaskService:
         )
 
     def cancel_task(self, task_id: str, *, user_id: str | None = None) -> TaskState:
-        task = self.task_repository.get_task(task_id)
+        task = self.task_repository.get_task_for_update(task_id)
         status = enum_value(task.status)
         if status == TaskStatus.CANCELLED.value:
             return task

@@ -23,6 +23,15 @@ class Settings(BaseSettings):
         validation_alias="ARTIFACT_ROOT",
     )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    main_agent_model: str | None = Field(
+        default=None,
+        validation_alias="MAIN_AGENT_MODEL",
+    )
+    main_agent_max_turns: int = Field(
+        default=20,
+        ge=1,
+        validation_alias="MAIN_AGENT_MAX_TURNS",
+    )
     mcp_mode: str = Field(default="mock", validation_alias="MCP_MODE")
     mock_scenario: str = Field(
         default="dev_test_pass",

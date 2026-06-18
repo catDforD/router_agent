@@ -53,6 +53,7 @@ from app.mcp.normalizer import (
 
 
 MockRunner = Callable[..., MockWorkerOutput]
+CheckpointCallback = Callable[[], None]
 
 EVIDENCE_ARTIFACT_TYPES = {
     ArtifactType.TEST_REPORT.value,
@@ -77,6 +78,7 @@ class McpAdapter:
         mcp_mode: str = "mock",
         mock_scenario: str = DEFAULT_MOCK_SCENARIO,
         mock_runner: MockRunner | None = None,
+        checkpoint: CheckpointCallback | None = None,
     ) -> None:
         self.session = session
         self.artifact_store = ArtifactStore(
@@ -88,6 +90,7 @@ class McpAdapter:
         self.mcp_mode = mcp_mode
         self.mock_scenario = mock_scenario
         self.mock_runner = mock_runner or run_mock_worker
+        self.checkpoint = checkpoint
 
     def call_worker(
         self,
@@ -121,6 +124,7 @@ class McpAdapter:
                 },
             )
         )
+        self._checkpoint()
 
         try:
             mock_output = self.mock_runner(worker_input, scenario=active_scenario)
@@ -150,6 +154,7 @@ class McpAdapter:
                     created_at=completed_at,
                 )
             )
+            self._checkpoint()
             return result
 
         except MockWorkerTimeout as exc:
@@ -172,6 +177,7 @@ class McpAdapter:
                     created_at=completed_at,
                 )
             )
+            self._checkpoint()
             return result
 
         except (MockWorkerSchemaInvalid, WorkerResultNormalizationError) as exc:
@@ -196,6 +202,7 @@ class McpAdapter:
                     created_at=completed_at,
                 )
             )
+            self._checkpoint()
             return result
 
         except MockWorkerExecutionError as exc:
@@ -233,6 +240,7 @@ class McpAdapter:
                     },
                 )
             )
+            self._checkpoint()
         return produced_refs
 
     def _build_success_result(
@@ -295,6 +303,7 @@ class McpAdapter:
                 created_at=completed_at,
             )
         )
+        self._checkpoint()
         return result
 
     def _terminal_worker_event(
@@ -381,6 +390,10 @@ class McpAdapter:
             payload=_json_payload(payload),
             created_at=created_at,
         )
+
+    def _checkpoint(self) -> None:
+        if self.checkpoint is not None:
+            self.checkpoint()
 
 
 def call_mcp_adapter(
