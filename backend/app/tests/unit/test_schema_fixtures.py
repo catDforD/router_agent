@@ -96,6 +96,7 @@ def test_typescript_contract_mentions_main_agent_observability_events() -> None:
 
     for event_type in (
         EventType.MAIN_AGENT_TURN_STARTED,
+        EventType.MAIN_AGENT_MESSAGE,
         EventType.MAIN_AGENT_TOOL_CALLED,
         EventType.MAIN_AGENT_TOOL_RESULT,
         EventType.MAIN_AGENT_COMPLETED,

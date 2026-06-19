@@ -11,6 +11,7 @@ from app.agents.main_agent import (
     MAIN_AGENT_TOOL_NAMES,
     MainAgentService,
     MaxTurnsExceeded,
+    ModelBehaviorError,
     OpenAIAgentsRunner,
     build_intake_agent,
     build_orchestration_agent,
@@ -165,6 +166,163 @@ class SucceededOutputRunner:
             next_recommended_action="none",
             summary="Runtime should persist this report before success.",
         )
+
+
+class TerminalOutputRunner:
+    def __init__(self, final_task_status: str) -> None:
+        self.final_task_status = final_task_status
+
+    def run_intake(
+        self,
+        *,
+        agent: Any,
+        input_text: str,
+        context: AgentToolContext,
+        max_turns: int,
+        run_config: Any,
+    ) -> IntakeClassificationOutput:
+        raise AssertionError("intake should not run for pre-classified task")
+
+    def run_orchestration(
+        self,
+        *,
+        agent: Any,
+        input_text: str,
+        context: AgentToolContext,
+        max_turns: int,
+        run_config: Any,
+    ) -> Any:
+        return MainAgentEpisodeOutput(
+            task_id=run_config.group_id,
+            main_agent_run_id="main-agent-run-001",
+            final_task_status=self.final_task_status,
+            phase="completed",
+            gate_summary=MainAgentGateSummary(
+                test_required=False,
+                formal_required=False,
+                regression_required=False,
+                formal_regression_required=False,
+                latest_test_passed=None,
+                latest_formal_passed=None,
+                has_blocking_failure=self.final_task_status != "succeeded",
+                can_finish_as_success=self.final_task_status == "succeeded",
+            ),
+            next_recommended_action="none",
+            summary=f"Runtime should persist report before {self.final_task_status}.",
+        )
+
+
+class ModelBehaviorErrorRunner:
+    def run_intake(
+        self,
+        *,
+        agent: Any,
+        input_text: str,
+        context: AgentToolContext,
+        max_turns: int,
+        run_config: Any,
+    ) -> IntakeClassificationOutput:
+        raise AssertionError("intake should not run for pre-classified task")
+
+    def run_orchestration(
+        self,
+        *,
+        agent: Any,
+        input_text: str,
+        context: AgentToolContext,
+        max_turns: int,
+        run_config: Any,
+    ) -> Any:
+        raise ModelBehaviorError("invalid final output")
+
+
+class ScriptedChatClient:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = list(responses)
+        self.requests: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        self.requests.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "model": model,
+                "stream": stream,
+            }
+        )
+        if not self.responses:
+            raise AssertionError("no scripted chat response remains")
+        return self.responses.pop(0)
+
+
+def chat_response(
+    *,
+    content: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls or [],
+                }
+            }
+        ]
+    }
+
+
+def streamed_chat_chunks(
+    *,
+    content: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    delta: dict[str, Any] = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_calls:
+        delta["tool_calls"] = [
+            {
+                "index": index,
+                "id": call["id"],
+                "function": {
+                    "name": call["function"]["name"],
+                    "arguments": call["function"]["arguments"],
+                },
+            }
+            for index, call in enumerate(tool_calls)
+        ]
+    return [{"choices": [{"delta": delta}]}]
+
+
+def tool_call(name: str, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": json.dumps(arguments),
+        },
+    }
+
+
+def raw_tool_call(name: str, arguments: str, *, call_id: str) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
 
 
 def signals(**updates: bool) -> dict[str, bool]:
@@ -585,7 +743,7 @@ def test_plan_and_finalizing_event_helpers_emit_correlated_events(
     assert finalizing_event.correlation.main_agent_run_id == started.trace.latest_main_agent_run_id
 
 
-def test_run_episode_classifies_before_orchestration(
+def test_run_episode_with_legacy_runner_classifies_before_orchestration(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -607,6 +765,306 @@ def test_run_episode_classifies_before_orchestration(
     assert output.task_id == task_id
     assert output.main_agent_run_id == task.trace.latest_main_agent_run_id
     assert row_count(db_session, WorkerJobRow) == 0
+
+
+def test_tool_loop_runner_plans_and_requests_clarification_without_intake(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="I will first capture the plan and check what is missing.",
+                tool_calls=[
+                    tool_call(
+                        "update_plan",
+                        {
+                            "task_id": task_id,
+                            "summary": "Plan created before worker dispatch.",
+                            "plan": [
+                                {
+                                    "order": 1,
+                                    "action": "Ask for missing IO details",
+                                    "status": "planned",
+                                }
+                            ],
+                            "normalized_goal": "Create motor logic after IO details are confirmed.",
+                            "task_type": "new_plc_development",
+                            "requires_test": True,
+                            "requires_formal": False,
+                        },
+                        call_id="call-plan",
+                    )
+                ],
+            ),
+            chat_response(
+                content="The IO list is required before safe worker dispatch.",
+                tool_calls=[
+                    tool_call(
+                        "request_clarification",
+                        {
+                            "task_id": task_id,
+                            "questions": [
+                                {
+                                    "question": "Which input and output tags should the logic use?",
+                                    "reason": "PLC code generation needs concrete IO names.",
+                                    "required": True,
+                                }
+                            ],
+                            "rationale_summary": "Missing IO details block safe PLC worker dispatch.",
+                        },
+                        call_id="call-clarify",
+                    )
+                ],
+            ),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    task = persisted_task(db_session, task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    types = [event.type for event in events]
+
+    assert output.final_task_status == "waiting_user"
+    assert task.status == "waiting_user"
+    assert task.phase == "clarifying"
+    assert task.unresolved_questions[0].status == "open"
+    assert "main_agent.message" in types
+    assert "main_agent.plan_updated" in types
+    assert "main_agent.clarification_requested" in types
+    assert "task.waiting_user" in types
+    assert row_count(db_session, WorkerJobRow) == 0
+    assert chat_client.requests[0]["model"] == "fake-main-agent"
+    assert chat_client.requests[0]["messages"][0]["role"] == "system"
+    assert chat_client.requests[0]["tools"][0]["type"] == "function"
+    assert "response_format" not in chat_client.requests[0]
+
+
+def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            streamed_chat_chunks(
+                content="I will capture a public plan.",
+                tool_calls=[
+                    tool_call(
+                        "update_plan",
+                        {
+                            "task_id": task_id,
+                            "summary": "Streaming plan captured.",
+                            "plan": [
+                                {
+                                    "order": 1,
+                                    "action": "Clarify platform",
+                                    "status": "planned",
+                                }
+                            ],
+                        },
+                        call_id="call-stream-plan",
+                    )
+                ],
+            ),
+            streamed_chat_chunks(
+                content="I need one user detail before dispatching workers.",
+                tool_calls=[
+                    tool_call(
+                        "request_clarification",
+                        {
+                            "task_id": task_id,
+                            "questions": ["Which PLC platform should be targeted?"],
+                        },
+                        call_id="call-stream-clarify",
+                    )
+                ],
+            ),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=True,
+    )
+
+    output = service.run_episode(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    message_event = next(event for event in events if event.type == "main_agent.message")
+
+    assert output.final_task_status == "waiting_user"
+    assert chat_client.requests[0]["stream"] is True
+    assert message_event.payload["content"] == "I will capture a public plan."
+    assert "main_agent.plan_updated" in [event.type for event in events]
+
+
+def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    prepare_report_ready_task(db_session, task_id)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="The task is ready for report-first finalization.",
+                tool_calls=[
+                    tool_call(
+                        "write_final_report",
+                        {
+                            "task_id": task_id,
+                            "final_status": "succeeded",
+                            "summary": "Validation passed and delivery is complete.",
+                            "plan": [
+                                {
+                                    "order": 1,
+                                    "action": "Finalize ready task",
+                                    "status": "completed",
+                                }
+                            ],
+                        },
+                        call_id="call-report",
+                    )
+                ],
+            ),
+            chat_response(
+                content="The report is durable, so I will apply terminal status.",
+                tool_calls=[
+                    tool_call(
+                        "finish_task",
+                        {
+                            "task_id": task_id,
+                            "final_status": "succeeded",
+                            "rationale_summary": "Final report exists and Quality Gate allows success.",
+                        },
+                        call_id="call-finish",
+                    )
+                ],
+            ),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    task = persisted_task(db_session, task_id)
+    types = event_types(db_session, task_id)
+
+    assert output.final_task_status == "succeeded"
+    assert task.status == "succeeded"
+    assert task.current_artifacts.final_report is not None
+    assert types.index("main_agent.completed") < types.index("task.succeeded")
+    assert any(
+        message["role"] == "tool" and message["tool_call_id"] == "call-report"
+        for message in chat_client.requests[1]["messages"]
+    )
+
+
+def test_tool_loop_records_malformed_tool_arguments_and_continues(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="I will update the plan.",
+                tool_calls=[
+                    raw_tool_call(
+                        "update_plan",
+                        "{",
+                        call_id="call-bad-plan",
+                    )
+                ],
+            ),
+            chat_response(
+                content="The previous tool arguments were invalid, so I will pause safely.",
+                tool_calls=[
+                    tool_call(
+                        "request_clarification",
+                        {
+                            "task_id": task_id,
+                            "questions": ["Which PLC platform should be targeted?"],
+                        },
+                        call_id="call-clarify-after-error",
+                    )
+                ],
+            ),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    failed_tool_result = next(
+        event
+        for event in events
+        if event.type == "main_agent.tool_result"
+        and event.payload["tool_name"] == "update_plan"
+    )
+
+    assert output.final_task_status == "waiting_user"
+    assert failed_tool_result.payload["status"] == "failed"
+    assert failed_tool_result.payload["details"]["error"]["error_code"] == (
+        "invalid_tool_arguments"
+    )
+    assert "task.succeeded" not in [event.type for event in events]
+
+
+def test_tool_loop_runner_max_turns_records_failure_without_success(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(content="I am still considering the next public step."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        max_turns=1,
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    task = persisted_task(db_session, task_id)
+    types = event_types(db_session, task_id)
+
+    assert output.error_code == "MAIN_AGENT_MAX_TURNS_EXCEEDED"
+    assert task.status == "failed"
+    assert "main_agent.message" in types
+    assert "task.succeeded" not in types
+    assert types[-1] == "task.failed"
 
 
 def test_run_episode_checkpoint_callback_runs_at_visible_milestones(
@@ -663,6 +1121,41 @@ def test_run_episode_persists_report_before_terminal_success(
     assert updated.current_artifacts.final_report is not None
 
 
+@pytest.mark.parametrize("final_status", ["partial_failed", "failed"])
+def test_run_episode_persists_report_before_non_success_terminal_status(
+    final_status: str,
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    prepare_report_ready_task(db_session, task_id)
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        runner=TerminalOutputRunner(final_status),
+    )
+
+    output = service.run_episode(task_id)
+    updated = TaskRepository(db_session).get_task(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    event_types = [event.type for event in events]
+
+    assert output.final_task_status == final_status
+    assert updated.status == final_status
+    assert updated.current_artifacts.final_report is not None
+    assert event_types.index("main_agent.completed") < event_types.index(
+        f"task.{final_status}"
+    )
+    report = ArtifactStore(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+    ).read_artifact_content(updated.current_artifacts.final_report.artifact_id)
+    report_content = json.loads(report.content)
+    assert report_content["report_version"] == 1
+    assert report_content["final_task_status"] == final_status
+
+
 def test_run_episode_report_persistence_failure_does_not_mark_success(
     monkeypatch: pytest.MonkeyPatch,
     db_session: Session,
@@ -691,6 +1184,39 @@ def test_run_episode_report_persistence_failure_does_not_mark_success(
     ]
 
     assert updated.status == "running"
+    assert "main_agent.completed" not in event_types
+    assert "task.succeeded" not in event_types
+
+
+def test_run_episode_model_behavior_error_does_not_write_final_report_or_terminalize(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    prepare_report_ready_task(db_session, task_id)
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        runner=ModelBehaviorErrorRunner(),
+    )
+
+    output = service.run_episode(task_id)
+    updated = TaskRepository(db_session).get_task(task_id)
+    event_types = [
+        event.type for event in EventService(db_session).list_visible_events(task_id)
+    ]
+    artifact_types = [
+        row.type
+        for row in db_session.execute(
+            select(ArtifactRow).where(ArtifactRow.task_id == task_id)
+        ).scalars()
+    ]
+
+    assert output.error_code == "MAIN_AGENT_MODEL_BEHAVIOR_ERROR"
+    assert updated.status == "running"
+    assert updated.current_artifacts.final_report is None
+    assert "final_report" not in artifact_types
     assert "main_agent.completed" not in event_types
     assert "task.succeeded" not in event_types
 
@@ -781,9 +1307,29 @@ def test_run_episode_records_max_turns_error_without_success(
     events = EventService(db_session).list_visible_events(task_id)
 
     assert output.error_code == "MAIN_AGENT_MAX_TURNS_EXCEEDED"
-    assert task.status != "succeeded"
-    assert events[-1].type == "main_agent.decision"
-    assert events[-1].severity == "error"
+    assert task.status == "failed"
+    assert task.phase == "completed"
+    assert task.completed_at is not None
+    assert task.current_artifacts.final_report is not None
+    assert [event.type for event in events[-3:]] == [
+        "main_agent.decision",
+        "main_agent.completed",
+        "task.failed",
+    ]
+    assert events[-3].severity == "error"
+    assert events[-2].payload["final_report_artifact_id"] == (
+        task.current_artifacts.final_report.artifact_id
+    )
+    assert events[-1].type == "task.failed"
+    report = ArtifactStore(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+    ).read_artifact_content(task.current_artifacts.final_report.artifact_id)
+    report_content = json.loads(report.content)
+    assert report_content["final_task_status"] == "failed"
+    assert report_content["main_agent_output_summary"]["error_code"] == (
+        "MAIN_AGENT_MAX_TURNS_EXCEEDED"
+    )
 
 
 def test_production_agent_builders_and_run_config(

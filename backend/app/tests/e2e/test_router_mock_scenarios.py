@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import json
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from app.models.router_schema import EventType, TaskState
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.gate_repo import GateResultRepository
 from app.repositories.task_repo import TaskRepository
+from app.services.artifact_store import ArtifactStore
 from app.services.event_service import EventService
 from app.services.runtime_service import RuntimeRunResult, RuntimeService
 
@@ -285,6 +287,17 @@ def test_simple_development_mock_e2e_succeeds(
             "task.succeeded",
         ],
     )
+    report = read_final_report(settings, session_factory, audit.task)
+    assert_delivery_report_refs_current_artifacts(
+        report,
+        audit.task,
+        expected_status="succeeded",
+    )
+    assert audit.task.current_artifacts.latest_test_report is not None
+    assert report["delivery_artifacts"]["test_report"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_test_report.artifact_id
+    )
+    assert report["unresolved_items"]["blocking_failure_count"] == 0
     assert_monotonic_event_sequences(audit.events)
 
 
@@ -341,6 +354,25 @@ def test_test_failure_repair_mock_e2e_succeeds(
             "task.succeeded",
         ],
     )
+    report = read_final_report(settings, session_factory, audit.task)
+    assert_delivery_report_refs_current_artifacts(
+        report,
+        audit.task,
+        expected_status="succeeded",
+    )
+    assert audit.task.current_artifacts.latest_test_report is not None
+    assert audit.task.current_artifacts.latest_patch is not None
+    assert audit.task.current_artifacts.latest_repair_summary is not None
+    assert report["delivery_artifacts"]["test_report"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_test_report.artifact_id
+    )
+    assert report["repair_summary"]["latest_patch"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_patch.artifact_id
+    )
+    assert report["repair_summary"]["latest_repair_summary"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_repair_summary.artifact_id
+    )
+    assert report["repair_summary"]["repair_rounds"] == 1
     assert_monotonic_event_sequences(audit.events)
 
 
@@ -420,6 +452,25 @@ def test_formal_failure_repair_mock_e2e_succeeds(
             "task.succeeded",
         ],
     )
+    report = read_final_report(settings, session_factory, audit.task)
+    assert_delivery_report_refs_current_artifacts(
+        report,
+        audit.task,
+        expected_status="succeeded",
+    )
+    assert audit.task.current_artifacts.latest_formal_report is not None
+    assert audit.task.current_artifacts.latest_patch is not None
+    assert audit.task.current_artifacts.latest_repair_summary is not None
+    assert report["delivery_artifacts"]["formal_report"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_formal_report.artifact_id
+    )
+    assert report["repair_summary"]["latest_patch"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_patch.artifact_id
+    )
+    assert report["repair_summary"]["latest_repair_summary"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_repair_summary.artifact_id
+    )
+    assert report["repair_summary"]["repair_rounds"] == 1
     assert_monotonic_event_sequences(audit.events)
 
 
@@ -543,6 +594,20 @@ def test_repair_budget_exhaustion_mock_e2e_partial_failed(
             "task.partial_failed",
         ],
     )
+    report = read_final_report(settings, session_factory, audit.task)
+    assert_delivery_report_refs_current_artifacts(
+        report,
+        audit.task,
+        expected_status="partial_failed",
+    )
+    assert audit.task.current_artifacts.latest_test_report is not None
+    assert report["delivery_artifacts"]["test_report"]["artifact_id"] == (
+        audit.task.current_artifacts.latest_test_report.artifact_id
+    )
+    assert report["repair_summary"]["repair_rounds"] == 3
+    assert report["repair_summary"]["repair_budget_exhausted"] is True
+    assert report["unresolved_items"]["blocking_failure_count"] >= 1
+    assert report["unresolved_items"]["open_failures"]
     assert_monotonic_event_sequences(audit.events)
 
 
@@ -616,6 +681,38 @@ def load_audit(
             events=EventService(session).list_visible_events(task_id),
             gate_results=GateResultRepository(session).list_results(task_id),
         )
+
+
+def read_final_report(
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+    task: TaskState,
+) -> dict[str, Any]:
+    assert task.current_artifacts.final_report is not None
+    with session_factory() as session:
+        stored = ArtifactStore(
+            session=session,
+            artifact_root=settings.artifact_root,
+        ).read_artifact_content(task.current_artifacts.final_report.artifact_id)
+    return json.loads(stored.content)
+
+
+def assert_delivery_report_refs_current_artifacts(
+    report: dict[str, Any],
+    task: TaskState,
+    *,
+    expected_status: str,
+) -> None:
+    assert report["report_version"] == 1
+    assert report["final_task_status"] == expected_status
+    assert task.current_artifacts.current_code is not None
+    assert task.current_artifacts.latest_gate_report is not None
+    assert report["delivery_artifacts"]["final_plc_code"]["artifact_id"] == (
+        task.current_artifacts.current_code.artifact_id
+    )
+    assert report["delivery_artifacts"]["gate_report"]["artifact_id"] == (
+        task.current_artifacts.latest_gate_report.artifact_id
+    )
 
 
 def assert_created_task_audit(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
@@ -72,6 +73,14 @@ class WorkerJobRepository:
         if row is None:
             raise RepositoryNotFoundError(f"worker job not found: {worker_job_id}")
         return self._record_from_row(row)
+
+    def list_task_jobs(self, task_id: str) -> list[WorkerJobRecord]:
+        rows = self.session.execute(
+            select(WorkerJobRow)
+            .where(WorkerJobRow.task_id == task_id)
+            .order_by(WorkerJobRow.created_at, WorkerJobRow.id)
+        ).scalars()
+        return [self._record_from_row(row) for row in rows]
 
     def complete_job(
         self,

@@ -92,6 +92,7 @@ def test_router_event_seq_must_be_integer() -> None:
     "event_type",
     [
         EventType.MAIN_AGENT_TURN_STARTED,
+        EventType.MAIN_AGENT_MESSAGE,
         EventType.MAIN_AGENT_TOOL_CALLED,
         EventType.MAIN_AGENT_TOOL_RESULT,
         EventType.MAIN_AGENT_COMPLETED,

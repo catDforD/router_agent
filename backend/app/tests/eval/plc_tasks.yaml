@@ -1,0 +1,337 @@
+{
+  "cases": [
+    {
+      "id": "qa_st_explain",
+      "title": "Simple ST code explanation",
+      "tags": ["qa"],
+      "message": "解释下面这段 ST 电机启停代码的行为和风险点。",
+      "scripted_classification": {
+        "task_type": "qa",
+        "difficulty_level": "L1",
+        "difficulty_score": 0.20,
+        "difficulty_reasons": ["Explanation-only task."],
+        "difficulty_signals": {"has_existing_code": true},
+        "requires_test": false,
+        "requires_formal": false
+      },
+      "scripted_sequence": ["finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L1",
+        "worker_sequence": [],
+        "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
+        "required_artifacts": ["raw_user_request", "gate_report", "final_report", "main_agent_log"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "motor_start_stop",
+      "title": "Motor start stop",
+      "tags": ["ordinary_development"],
+      "message": "帮我实现一个电机启动、停止和运行指示的 ST 控制逻辑。",
+      "scripted_sequence": ["dev", "test", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test"],
+        "required_artifacts": ["raw_user_request", "requirements_ir", "io_contract", "plc_code", "test_report", "gate_report", "final_report", "main_agent_log"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "motor_estop",
+      "title": "Motor start stop with emergency stop",
+      "tags": ["emergency_stop"],
+      "message": "帮我实现带急停的电机启停逻辑，急停必须立即断开输出。",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_score": 0.75,
+        "difficulty_reasons": ["Emergency stop requires formal verification."],
+        "difficulty_signals": {"has_emergency_stop": true, "has_safety_constraints": true},
+        "requires_formal": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report", "main_agent_log"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "fault_latch_reset",
+      "title": "Fault latch and reset",
+      "tags": ["fault_latch"],
+      "message": "实现故障锁存和复位逻辑，故障后必须保持停机直到复位。",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_reasons": ["Fault latching is safety critical."],
+        "difficulty_signals": {"has_fault_latching": true, "has_safety_constraints": true},
+        "requires_formal": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "dual_motor_interlock",
+      "title": "Dual motor interlock",
+      "tags": ["interlock"],
+      "message": "实现双电机互锁控制，两个电机不能同时运行。",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_reasons": ["Mutual exclusion requires formal verification."],
+        "difficulty_signals": {"has_interlock": true, "has_safety_constraints": true},
+        "requires_formal": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "auto_manual_mode",
+      "title": "Auto manual mode switching",
+      "tags": ["mode_switch"],
+      "message": "实现自动和手动模式切换，模式切换时输出不能抖动。",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_reasons": ["Mode switching needs formal safety checks."],
+        "difficulty_signals": {"has_mode_switching": true, "has_safety_constraints": true},
+        "requires_formal": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "conveyor_sequence",
+      "title": "Conveyor sequence control",
+      "tags": ["sequence"],
+      "message": "实现三段输送线顺序启动和顺序停止控制，包含状态机。",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_reasons": ["State machine sequencing needs formal checks."],
+        "difficulty_signals": {"has_state_machine": true, "multi_module": true, "has_safety_constraints": true},
+        "requires_formal": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "timer_control",
+      "title": "Timer based control",
+      "tags": ["timer"],
+      "message": "实现启动后延时 5 秒打开输出的定时器控制逻辑。",
+      "scripted_classification": {
+        "difficulty_reasons": ["Timer logic needs tests."],
+        "difficulty_signals": {"has_timing_logic": true}
+      },
+      "scripted_sequence": ["dev", "test", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "counter_control",
+      "title": "Counter based control",
+      "tags": ["counter"],
+      "message": "实现计数到 10 次后触发报警并可复位的计数器控制逻辑。",
+      "scripted_classification": {
+        "difficulty_reasons": ["Counter logic needs tests."]
+      },
+      "scripted_sequence": ["dev", "test", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "incomplete_io_clarify",
+      "title": "Incomplete request asks for clarification",
+      "tags": ["clarification"],
+      "message": "帮我写一段控制逻辑。",
+      "scripted_classification": {
+        "difficulty_level": "L1",
+        "difficulty_score": 0.25,
+        "difficulty_reasons": ["I/O and platform details are missing."],
+        "difficulty_signals": {"requirement_incomplete": true},
+        "requires_test": false,
+        "requires_formal": false,
+        "need_clarification": true,
+        "clarification_questions": [
+          {
+            "question": "Which PLC platform and I/O names should be used?",
+            "reason": "The worker needs concrete target details.",
+            "required": true
+          }
+        ]
+      },
+      "scripted_sequence": [],
+      "expected": {
+        "final_status": ["waiting_user"],
+        "min_difficulty": "L1",
+        "worker_sequence": [],
+        "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
+        "required_artifacts": ["raw_user_request"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "main_agent.decision", "main_agent.clarification_requested", "task.waiting_user"],
+        "invariants": ["no_worker_for_clarification"]
+      }
+    },
+    {
+      "id": "modify_existing_code",
+      "title": "Modify existing PLC code",
+      "tags": ["modify_existing_code"],
+      "message": "基于已有 ST 代码增加故障复位输入，并保持原有启动停止行为。",
+      "scripted_classification": {
+        "task_type": "modify_existing_code",
+        "difficulty_reasons": ["Existing code modification needs regression tests."],
+        "difficulty_signals": {"has_existing_code": true}
+      },
+      "scripted_sequence": ["dev", "test", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "test_failure_repair",
+      "title": "Test failure repair",
+      "tags": ["test_failure_repair"],
+      "message": "实现急停逻辑，并在测试失败后自动修复再回归测试。",
+      "mock_scenario": "test_failed_then_repair_pass",
+      "scripted_classification": {
+        "requires_repair_loop": true
+      },
+      "scripted_sequence": ["dev", "test", "repair", "test", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-repair", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test", "plc-repair"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
+        "artifact_versions": {"plc_code": [1, 2], "test_report": [1, 2]},
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["repair_requires_regression", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "formal_counterexample_repair",
+      "title": "Formal counterexample repair",
+      "tags": ["formal_counterexample_repair"],
+      "message": "实现带急停的逻辑，如果形式化验证给出反例，需要修复并重新验证。",
+      "mock_scenario": "formal_failed_then_repair_pass",
+      "scripted_classification": {
+        "difficulty_level": "L3",
+        "difficulty_reasons": ["Formal counterexample repair is safety critical."],
+        "difficulty_signals": {"has_emergency_stop": true, "has_safety_constraints": true},
+        "requires_formal": true,
+        "requires_repair_loop": true
+      },
+      "scripted_sequence": ["dev", "test", "formal", "repair", "test", "formal", "finalizing", "gate"],
+      "expected": {
+        "final_status": ["succeeded"],
+        "min_difficulty": "L3",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-formal", "plc-repair", "plc-test", "plc-formal"],
+        "required_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "counterexample", "patch", "repair_summary", "gate_report", "final_report"],
+        "artifact_versions": {"plc_code": [1, 2], "formal_report": [1, 2]},
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "invariants": ["l3_requires_formal", "repair_requires_regression", "formal_repair_requires_formal_regression", "no_success_without_quality_gate", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "repair_budget_exhausted",
+      "title": "Repair budget exhaustion",
+      "tags": ["repair_budget_exhausted"],
+      "message": "实现急停逻辑，但测试持续失败时最多修复三轮并给出部分失败报告。",
+      "mock_scenario": "test_failed_repair_exhausted",
+      "scripted_classification": {
+        "requires_repair_loop": true
+      },
+      "scripted_sequence": ["dev", "test", "repair", "test", "repair", "test", "repair", "test", "repair_limit_rejected", "finalizing", "gate"],
+      "scripted_final_status": "partial_failed",
+      "expected": {
+        "final_status": ["partial_failed"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev", "plc-test", "plc-repair", "plc-test", "plc-repair", "plc-test", "plc-repair", "plc-test"],
+        "required_workers": ["plc-dev", "plc-test", "plc-repair"],
+        "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
+        "artifact_versions": {"plc_code": [1, 2, 3, 4], "test_report": [1, 2, 3, 4]},
+        "required_event_subsequence": ["task.created", "main_agent.started", "gate.failed", "main_agent.completed", "task.partial_failed"],
+        "expected_rejections": {"repair_limit_rejected": "repair_limit_reached"},
+        "invariants": ["repair_requires_regression", "no_fourth_repair_round", "final_report_before_terminal_event"]
+      }
+    },
+    {
+      "id": "worker_timeout_visible",
+      "title": "Worker timeout is visible",
+      "tags": ["worker_timeout"],
+      "message": "运行一个会超时的 PLC 开发任务，确认不会被误标记为成功。",
+      "mock_scenario": "worker_timeout",
+      "scripted_sequence": ["dev"],
+      "scripted_final_status": "running",
+      "expected": {
+        "final_status": ["running"],
+        "min_difficulty": "L2",
+        "worker_sequence": ["plc-dev"],
+        "required_workers": ["plc-dev"],
+        "forbidden_workers": ["plc-test", "plc-formal", "plc-repair"],
+        "required_artifacts": ["raw_user_request", "final_report", "main_agent_log"],
+        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.timeout", "main_agent.completed"],
+        "expected_execution_statuses": {"dev": "timeout"},
+        "invariants": ["no_false_success_on_worker_error"]
+      }
+    }
+  ]
+}

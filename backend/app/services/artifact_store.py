@@ -33,12 +33,19 @@ from app.models.router_schema import (
     ArtifactStorageProvider,
     ArtifactType,
     ArtifactVisibility,
+    TaskStatus,
 )
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 
 
 LOCAL_URI_PREFIX = "local://artifacts/"
+TERMINAL_STATUSES = {
+    TaskStatus.SUCCEEDED.value,
+    TaskStatus.PARTIAL_FAILED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
 
 ARTIFACT_POINTER_FIELD_BY_TYPE: dict[str, str] = {
     ArtifactType.RAW_USER_REQUEST.value: "raw_user_request",
@@ -267,6 +274,8 @@ class ArtifactStore:
 
     def _update_task_artifacts(self, artifact: Artifact) -> None:
         task_state = self.task_repository.get_task(artifact.task_id)
+        if _value(task_state.status) in TERMINAL_STATUSES:
+            return
         artifact_ref = self.get_artifact_ref(artifact.artifact_id)
         current_artifacts = task_state.current_artifacts
         all_artifact_ids = list(current_artifacts.all_artifact_ids)

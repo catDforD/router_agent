@@ -11,8 +11,13 @@ ENV_KEYS = (
     "DATABASE_URL",
     "ARTIFACT_ROOT",
     "OPENAI_API_KEY",
+    "MAIN_AGENT_PROVIDER",
+    "MAIN_AGENT_API_KEY",
+    "MAIN_AGENT_BASE_URL",
     "MAIN_AGENT_MODEL",
     "MAIN_AGENT_MAX_TURNS",
+    "MAIN_AGENT_TIMEOUT_SECONDS",
+    "MAIN_AGENT_STREAM",
     "MCP_MODE",
     "PLC_WORKER_MCP_URL",
     "PLC_WORKER_TIMEOUT_SECONDS",
@@ -49,8 +54,13 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.database_url == "postgresql+psycopg://router:router@localhost:5432/router"
     assert settings.artifact_root == Path("data/artifacts")
     assert settings.openai_api_key is None
+    assert settings.main_agent_provider == "openai_compatible"
+    assert settings.main_agent_api_key is None
+    assert settings.main_agent_base_url is None
     assert settings.main_agent_model is None
     assert settings.main_agent_max_turns == 20
+    assert settings.main_agent_timeout_seconds == 120
+    assert settings.main_agent_stream is True
     assert settings.mcp_mode == "mock"
     assert settings.plc_worker_mcp_url == "http://localhost:9000/mcp"
     assert settings.plc_worker_timeout_seconds == 300
@@ -72,8 +82,13 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@db:5432/router_test")
     monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/router-artifacts")
+    monkeypatch.setenv("MAIN_AGENT_PROVIDER", "OPENAI_COMPATIBLE")
+    monkeypatch.setenv("MAIN_AGENT_API_KEY", "main-agent-secret")
+    monkeypatch.setenv("MAIN_AGENT_BASE_URL", "https://user:pass@main-agent.example/v1")
     monkeypatch.setenv("MAIN_AGENT_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("MAIN_AGENT_MAX_TURNS", "12")
+    monkeypatch.setenv("MAIN_AGENT_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("MAIN_AGENT_STREAM", "false")
     monkeypatch.setenv("MCP_MODE", "HYBRID")
     monkeypatch.setenv("PLC_WORKER_MCP_URL", "http://worker.example/mcp")
     monkeypatch.setenv("PLC_WORKER_TIMEOUT_SECONDS", "45")
@@ -95,8 +110,13 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.app_env == "test"
     assert settings.database_url == "postgresql+psycopg://test:test@db:5432/router_test"
     assert settings.artifact_root == Path("/tmp/router-artifacts")
+    assert settings.main_agent_provider == "openai_compatible"
+    assert settings.main_agent_api_key == "main-agent-secret"
+    assert settings.main_agent_base_url == "https://user:pass@main-agent.example/v1"
     assert settings.main_agent_model == "gpt-4.1-mini"
     assert settings.main_agent_max_turns == 12
+    assert settings.main_agent_timeout_seconds == 90
+    assert settings.main_agent_stream is False
     assert settings.mcp_mode == "hybrid"
     assert settings.plc_worker_mcp_url == "http://worker.example/mcp"
     assert settings.plc_worker_timeout_seconds == 45
@@ -127,17 +147,28 @@ def test_invalid_modes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="PLC worker mode"):
         Settings()
 
+    monkeypatch.setenv("PLC_DEV_MODE", "mock")
+    monkeypatch.setenv("MAIN_AGENT_PROVIDER", "unsupported")
+    with pytest.raises(ValueError, match="main_agent_provider"):
+        Settings()
+
 
 def test_redacted_diagnostics_do_not_expose_secrets() -> None:
     settings = Settings(
         openai_api_key="openai-secret-value",
+        main_agent_api_key="main-agent-secret-value",
+        main_agent_base_url="https://user:password@main-agent.example/v1",
         deepseek_api_key="deepseek-secret-value",
     )
 
     diagnostics = settings.redacted_diagnostics()
 
     assert diagnostics["openai_api_key"] == "open...alue"
+    assert diagnostics["main_agent_api_key"] == "main...alue"
+    assert diagnostics["main_agent_base_url"] == "https://[redacted]@main-agent.example/v1"
     assert diagnostics["deepseek_api_key"] == "deep...alue"
     assert "openai-secret-value" not in str(diagnostics)
+    assert "main-agent-secret-value" not in str(diagnostics)
+    assert "user:password" not in str(diagnostics)
     assert "deepseek-secret-value" not in str(diagnostics)
     assert diagnostics["deepseek_model"] == "deepseek-chat"

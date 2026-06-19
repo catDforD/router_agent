@@ -18,8 +18,11 @@ def test_intake_instructions_cover_classification_policy() -> None:
 def test_orchestration_instructions_cover_guarded_finalization() -> None:
     instructions = build_orchestration_instructions()
 
+    assert "Start by calling update_plan" in instructions
     assert "Always run run_quality_gate before successful completion" in instructions
-    assert "Runtime persists the final report" in instructions
+    assert "call write_final_report" in instructions
+    assert "Then call finish_task" in instructions
+    assert "Assistant text alone never completes the task" in instructions
     assert "Do not recommend success" in instructions
     assert "guard violations" in instructions
     assert "blocking failures" in instructions

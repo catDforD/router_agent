@@ -268,6 +268,20 @@ def test_event_stream_replays_main_agent_observability_events(
     append_event(
         session_factory,
         main_agent_event(
+            "event-main-agent-message",
+            event_type=EventType.MAIN_AGENT_MESSAGE,
+            payload={
+                "task_id": task.task_id,
+                "turn_index": 1,
+                "phase": "orchestration",
+                "visibility": "public",
+                "content": "I am preparing the worker call.",
+            },
+        ),
+    )
+    append_event(
+        session_factory,
+        main_agent_event(
             "event-main-agent-call",
             event_type=EventType.MAIN_AGENT_TOOL_CALLED,
             payload={
@@ -317,9 +331,11 @@ def test_event_stream_replays_main_agent_observability_events(
 
     assert response.status_code == 200
     body = response.text
+    assert "event: main_agent.message\n" in body
     assert "event: main_agent.tool_called\n" in body
     assert "event: main_agent.tool_result\n" in body
     assert "event: main_agent.completed\n" in body
+    assert "event-main-agent-message" in body
     assert "event-main-agent-call" in body
     assert "event-main-agent-result" in body
     assert "event-main-agent-completed" in body

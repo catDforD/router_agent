@@ -1,7 +1,8 @@
 import pytest
 
 from app.mcp.draft import McpDraftValidationError, validate_worker_draft_output
-from app.models.router_schema import ArtifactType, WorkerType
+from app.models.router_schema import ArtifactType, TraceContext, WorkerType
+from app.services.trace_summary import TraceSummaryService
 
 from real_mcp_helpers import (
     FakeMcpClient,
@@ -39,13 +40,36 @@ def test_real_mcp_contract_dispatches_valid_worker_input(
         task.raw_user_request,
     )
     payload = worker_input(task, WorkerType.PLC_DEV, [raw])
+    payload = payload.model_copy(
+        deep=True,
+        update={
+            "trace_context": TraceContext(
+                openai_trace_id="trace-real-001",
+                main_agent_run_id="main-agent-run-real-001",
+                worker_job_id=payload.worker_job_id,
+            )
+        },
+    )
 
     result = real_adapter(db_session, tmp_path, client).call_worker(payload)
+    summary = TraceSummaryService(db_session).get_task_trace_summary(task.task_id)
+    worker_summary = next(
+        job for job in summary.worker_jobs if job.worker_job_id == payload.worker_job_id
+    )
 
     assert result.execution_status == "completed"
     assert client.calls[0][0] == "plc_dev.run"
     assert client.calls[0][1].worker_input.worker_job_id == payload.worker_job_id
     assert client.calls[0][1].input_artifacts[0].content is not None
+    assert result.trace_context.mcp_request_id is not None
+    assert worker_summary.mcp_request_id == result.trace_context.mcp_request_id
+    assert worker_summary.openai_trace_id == "trace-real-001"
+    assert worker_summary.main_agent_run_id == "main-agent-run-real-001"
+    assert any(
+        event.correlation.mcp_request_id == result.trace_context.mcp_request_id
+        for event in summary.events
+        if event.type == "worker.completed"
+    )
 
 
 def test_real_mcp_contract_rejects_invalid_draft(

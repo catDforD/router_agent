@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -11,9 +12,11 @@ from app.core.config import Settings
 from app.core.database import get_engine_for_url, get_session_factory_for_url
 from app.main import create_app
 from app.models.db_models import Base
+from app.models.router_schema import ArtifactType
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.services import event_service as event_service_module
+from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 from app.services.task_service import TaskService
 
@@ -181,6 +184,74 @@ def test_get_task_endpoint_missing_task_returns_not_found(
         response = client.get("/api/tasks/missing-task")
 
     assert response.status_code == 404
+
+
+def test_get_task_trace_endpoint_returns_compact_summary(
+    api_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, session_factory = api_context
+    task_id = create_task(settings, session_factory, message="Create pump logic.")
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/api/tasks/{task_id}/trace")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"] == task_id
+    assert payload["main_agent_run_ids"] == []
+    assert [event["type"] for event in payload["events"]] == ["task.created"]
+    assert payload["events"][0]["payload_keys"] == [
+        "raw_user_request_artifact_id",
+        "status",
+        "task_id",
+    ]
+    assert payload["artifacts"][0]["type"] == "raw_user_request"
+    assert "inline_content" not in payload["artifacts"][0]
+
+
+def test_get_task_trace_endpoint_missing_task_returns_not_found(
+    api_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, _session_factory = api_context
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/tasks/missing-task/trace")
+
+    assert response.status_code == 404
+
+
+def test_get_task_trace_endpoint_omits_artifact_content(
+    api_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, session_factory = api_context
+    secret = "DO-NOT-EMBED-TRACE-CONTENT"
+    task_id = create_task(settings, session_factory, message="Create pump logic.")
+    with session_factory() as session:
+        ArtifactStore(
+            session=session,
+            artifact_root=settings.artifact_root,
+        ).write_artifact_content(
+            ArtifactContentWrite(
+                task_id=task_id,
+                artifact_type=ArtifactType.MAIN_AGENT_LOG,
+                version=1,
+                name="main_agent_log.json",
+                content={"secret": secret},
+                summary="Internal replay log.",
+                visibility="internal",
+                metadata={"tags": ["trace_test"]},
+                mime_type="application/json",
+            )
+        )
+        session.commit()
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get(f"/api/tasks/{task_id}/trace")
+
+    assert response.status_code == 200
+    payload_text = json.dumps(response.json())
+    assert "main_agent_log" in payload_text
+    assert secret not in payload_text
 
 
 def test_append_user_message_endpoint_stores_artifact_and_event(

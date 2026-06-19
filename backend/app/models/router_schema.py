@@ -278,6 +278,7 @@ class EventType(str, Enum):
     MAIN_AGENT_CLARIFICATION_REQUESTED = "main_agent.clarification_requested"
     MAIN_AGENT_FINALIZING = "main_agent.finalizing"
     MAIN_AGENT_TURN_STARTED = "main_agent.turn_started"
+    MAIN_AGENT_MESSAGE = "main_agent.message"
     MAIN_AGENT_TOOL_CALLED = "main_agent.tool_called"
     MAIN_AGENT_TOOL_RESULT = "main_agent.tool_result"
     MAIN_AGENT_COMPLETED = "main_agent.completed"

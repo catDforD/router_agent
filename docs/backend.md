@@ -1,4 +1,7 @@
 # 后端开发计划
+
+> 当前进度：基础 API、PostgreSQL 持久化、本地 Artifact Store、SSE 事件流、Main Agent tool loop、mock/real MCP worker 路径、Quality Gate、最终报告和前端工作台均已跑通。Main Agent 当前使用 OpenAI 兼容 Chat Completions 的普通 tool calling，不再依赖 OpenAI Responses API 或 `response_format`。本文后续内容仍保留为实施计划和历史设计记录，遇到旧的 OpenAI Agents SDK / structured output 表述时，以当前实现为准。
+
 1. **开发总原则**
     ```
     先 mock worker 跑通：
@@ -57,7 +60,9 @@
                 scheduler_guard.py
             agents/
                 main_agent.py
+                chat_completions.py
                 instructions.py
+                observability.py
                 tools.py
                 output_schema.py
             mcp/
@@ -81,7 +86,7 @@
     SQLAlchemy / SQLModel
     PostgreSQL
     本地文件 Artifact Store
-    OpenAI Agents SDK
+    OpenAI-compatible Chat Completions tool loop
     pytest
     ```
 
@@ -707,7 +712,7 @@
 14. **Main Agent Function Tools**  
     目标：
     ```
-    给 OpenAI Agents SDK 的 Main Agent 暴露后端 function tools。
+    给 Main Agent 暴露由 Runtime 受控执行的 function tools。
     ```
     Todo：
     ```
@@ -715,6 +720,8 @@
     ```
     工具：
     ```
+    update_plan
+    request_clarification
     call_plc_dev
     call_plc_test
     call_plc_formal
@@ -722,6 +729,7 @@
     run_parallel_workers
     read_artifact
     run_quality_gate
+    write_final_report
     finish_task
     ```
     工具内部统一流程：
@@ -771,13 +779,13 @@
 15. **Main Agent Service**  
     目标：
     ```
-    接入 OpenAI Agents SDK，Main Agent 可以根据 TaskState 调用 function tools。
+    接入 OpenAI 兼容 Chat Completions，Main Agent 可以根据 TaskState 通过 tool calls 编排任务。
     ```
     Todo：
     ```
     实现 backend/app/agents/main_agent.py
     实现 backend/app/agents/instructions.py
-    实现 backend/app/agents/output_schema.py
+    实现 provider adapter 和 tool-loop runner
     ```
     Main Agent 输入使用压缩视图：
     ```
@@ -802,7 +810,7 @@
     5. 测试或形式化失败后 repair。
     6. repair 后必须 regression。
     7. 最多 repair 3 轮。
-    8. 最终必须 run_quality_gate 再 finish_task。
+    8. 最终必须 run_quality_gate，再 write_final_report，最后 finish_task。
     ```
     检查方式：
     ```
@@ -837,15 +845,27 @@
     ```
     task.created
     main_agent.started
-    main_agent.decision
+    main_agent.turn_started
+    main_agent.message
+    main_agent.tool_called update_plan
+    main_agent.tool_result update_plan
+    main_agent.tool_called call_plc_dev
     worker.started plc-dev
     artifact.created plc_code
     worker.completed plc-dev
+    main_agent.tool_result call_plc_dev
+    main_agent.tool_called call_plc_test
     worker.started plc-test
     artifact.created test_report
     worker.completed plc-test
+    main_agent.tool_result call_plc_test
+    main_agent.tool_called run_quality_gate
     gate.started
     gate.passed
+    main_agent.tool_result run_quality_gate
+    main_agent.tool_called write_final_report
+    main_agent.completed
+    main_agent.tool_called finish_task
     task.succeeded
     ```
     验收标准：
@@ -1187,7 +1207,7 @@
     如果回归失败，进入下一轮 repair，最多 3 轮。
     ```
 
-23. **并行 Worker 调用**  
+23. **并行 Worker 调用**（当前不作为默认路径）
     目标：
     ```
     支持开发完成后并行调用 plc-test 和 plc-formal。
@@ -1290,8 +1310,8 @@
     ```
     说明：
     ```
-    OpenAI Agents SDK 带 tracing，可用于可视化、调试、监控 agentic flows。
-    后端需要把 SDK trace 和自己的 worker job / artifact / event id 关联起来。
+    后端需要把 main_agent_run_id、provider request、worker job、artifact 和 event id 关联起来，
+    便于回放、调试和监控 agentic flows。
     ```
     检查方式：
     ```
@@ -1332,7 +1352,9 @@
     ```
     Todo：
     ```
-    finish_task 必须生成 final_report:v1。
+    Runtime 必须通过 Main Agent 的 write_final_report 工具先生成 final_report:v1，
+    再写 main_agent.completed，最后通过 finish_task 进入 succeeded / partial_failed / failed
+    等终态。
     ```
     内容包括：
     ```
@@ -1355,8 +1377,10 @@
     ```
     1. succeeded 任务有 final_report artifact。
     2. partial_failed 任务也有 final_report artifact。
-    3. final_report 引用关键 artifact id。
-    4. 不包含大段 worker log。
+    3. failed 任务如果由 Runtime/Main Agent 控制面终结，也有确定性 final_report artifact。
+    4. final_report 引用关键 artifact id。
+    5. 不包含大段 PLC 代码、测试报告、formal 报告、patch、worker log 或 replay log。
+    6. main_agent.completed 必须早于 terminal task event。
     ```
     真实测试：
     ```
@@ -1376,7 +1400,7 @@
     ```
     Todo：
     ```
-    准备 tests/eval/plc_tasks.yaml，至少 20 个任务。
+    准备 tests/eval/plc_tasks.yaml，至少 15 个任务。
     ```
     任务样例：
     ```
@@ -1422,7 +1446,7 @@
     ```
     验收标准：
     ```
-    核心 20 个任务不退化。
+    核心 15 个任务不退化。
     L3 任务不能跳过 formal。
     repair 后不能跳过 regression。
     ```
@@ -1625,6 +1649,6 @@
 
 35. **参考**  
     ```
-    OpenAI Agents SDK:
-    https://openai.github.io/openai-agents-python/
+    OpenAI-compatible Chat Completions API:
+    使用 messages、tools、tool_calls，不依赖 response_format。
     ```

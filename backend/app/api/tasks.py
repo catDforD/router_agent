@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
@@ -15,6 +16,7 @@ from app.core.errors import (
     RepositoryConflictError,
     RepositoryNotFoundError,
 )
+from app.core.logging import log_with_context
 from app.models.router_schema import ProjectContext, TaskState
 from app.services.runtime_service import run_runtime_resume_task, run_runtime_start_task
 from app.services.task_service import (
@@ -22,9 +24,11 @@ from app.services.task_service import (
     TaskService,
     UserMessageResult,
 )
+from app.services.trace_summary import TaskTraceSummary, TraceSummaryService
 
 
 router = APIRouter(tags=["tasks"])
+LOGGER = logging.getLogger(__name__)
 
 
 class CreateTaskRequest(BaseModel):
@@ -121,6 +125,26 @@ def get_task(
         return service.get_task(task_id)
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/tasks/{task_id}/trace", response_model=TaskTraceSummary)
+def get_task_trace(
+    task_id: str,
+    session: Session = Depends(get_request_db_session),
+) -> TaskTraceSummary:
+    try:
+        return TraceSummaryService(session).get_task_trace_summary(task_id)
+    except RepositoryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        log_with_context(
+            LOGGER,
+            logging.ERROR,
+            "Trace summary projection failed",
+            task_id=task_id,
+            exception_type=type(exc).__name__,
+        )
+        raise
 
 
 @router.post("/api/tasks/{task_id}/messages", response_model=UserMessageResponse)

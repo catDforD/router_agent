@@ -61,6 +61,13 @@ EVIDENCE_ARTIFACT_TYPES = {
     ArtifactType.COUNTEREXAMPLE.value,
 }
 
+TERMINAL_STATUSES = {
+    TaskStatus.SUCCEEDED.value,
+    TaskStatus.PARTIAL_FAILED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
+
 
 class WorkerResultHandlerError(Exception):
     """Base class for worker result handling failures."""
@@ -105,6 +112,16 @@ class WorkerResultHandler:
         task = self._get_task(result.task_id)
         job = self._get_worker_job(result.worker_job_id)
         self._validate_identity(result, job)
+
+        if _value(task.status) in TERMINAL_STATUSES:
+            return WorkerResultHandleResult(
+                task=task,
+                applied=False,
+                summary=(
+                    "Worker result retained for audit only because task is "
+                    f"terminal: {result.worker_job_id}"
+                ),
+            )
 
         if result.worker_job_id in task.completed_worker_job_ids:
             return WorkerResultHandleResult(

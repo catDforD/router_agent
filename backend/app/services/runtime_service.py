@@ -417,6 +417,8 @@ class RuntimeService:
             mock_scenario=self.mock_scenario,
             model=self.model,
             max_turns=self.max_turns,
+            provider=self.settings.main_agent_provider,
+            stream=self.settings.main_agent_stream,
             runner=self.runner,
             checkpoint=lambda: self._checkpoint_session(session),
         )

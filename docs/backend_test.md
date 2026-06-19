@@ -1,5 +1,39 @@
 # Backend Test Guide
 
+## 后端评测集
+
+默认后端评测集使用固定 PLC 任务集和 mock worker，不需要真实 OpenAI、DeepSeek 或 MCP 服务。
+
+运行：
+
+```bash
+uv run pytest backend/app/tests/eval/test_eval_tasks.py -q
+```
+
+任务定义：
+
+```text
+backend/app/tests/eval/plc_tasks.yaml
+```
+
+输出：
+
+```text
+eval_report.md
+```
+
+可通过环境变量改写报告路径：
+
+```bash
+ROUTER_EVAL_REPORT_PATH=/tmp/router_eval_report.md uv run pytest backend/app/tests/eval/test_eval_tasks.py -q
+```
+
+默认 live provider 评测不会运行。如需后续启用真实 provider 评测，使用显式环境开关：
+
+```bash
+ROUTER_LIVE_EVAL=1 uv run pytest backend/app/tests/eval/test_eval_tasks.py -q
+```
+
 ## Event Service 和 SSE 真实测试
 
 本节用于真实验证 `GET /api/tasks/{task_id}/events` 是否能通过 SSE 实时输出 Router 事件。适用于 WSL 本地已经安装 PostgreSQL 的开发环境。

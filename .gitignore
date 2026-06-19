@@ -21,10 +21,16 @@ env/
 # Build artifacts
 build/
 dist/
+frontend/dist/
 *.egg-info/
+
+# Frontend dependencies
+frontend/node_modules/
 
 # Local runtime data
 data/
+eval_report.md
+output/
 
 # Local configuration and secrets
 .env

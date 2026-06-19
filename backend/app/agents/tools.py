@@ -22,13 +22,24 @@ except ImportError:  # pragma: no cover - exercised only when SDK is absent loca
         return func
 
 from app.core.errors import RepositoryNotFoundError
-from app.core.ids import new_event_id
+from app.agents.observability import MainAgentObservabilityRecorder
+from app.agents.output_schema import (
+    MainAgentArtifactReference,
+    MainAgentDecision,
+    MainAgentEpisodeOutput,
+    MainAgentGateSummary,
+    MainAgentPlanStep,
+)
+from app.core.ids import new_event_id, prefixed_id
 from app.core.time import utc_now
 from app.mcp.adapter import McpAdapter
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     Artifact,
+    ArtifactCreatorType,
     ArtifactRef,
+    ArtifactType,
+    ClarificationQuestion,
     EventCorrelation,
     EventSeverity,
     EventSource,
@@ -40,6 +51,7 @@ from app.models.router_schema import (
     TaskPhase,
     TaskState,
     TaskStatus,
+    TaskType,
     TraceContext,
     WorkerExecutionStatus,
     WorkerInput,
@@ -205,6 +217,288 @@ class AgentToolService:
             artifact_root=context.artifact_root,
         )
         self.event_service = EventService(context.session)
+
+    def update_plan(
+        self,
+        task_id: str,
+        *,
+        summary: str,
+        plan: list[dict[str, Any]] | None = None,
+        normalized_goal: str | None = None,
+        task_type: str | None = None,
+        requires_test: bool | None = None,
+        requires_formal: bool | None = None,
+    ) -> AgentToolResult:
+        tool_name = "update_plan"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=summary,
+            arguments={
+                "task_id": task_id,
+                "summary": summary,
+                "plan": plan or [],
+                "normalized_goal": normalized_goal,
+                "task_type": task_type,
+                "requires_test": requires_test,
+                "requires_formal": requires_formal,
+            },
+        )
+        task = self._get_task(task_id)
+        if _value(task.status) in TERMINAL_EVENT_BY_STATUS:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                task=task,
+                code="terminal_task",
+                message=f"cannot update plan for terminal task: {task_id}",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+
+        now = utc_now()
+        selected_task_type = _normalized_task_type_from_tool(
+            task_type,
+            current_task_type=_value(task.task_type),
+        )
+        difficulty = task.difficulty.model_copy(
+            update={
+                "requires_test": (
+                    requires_test
+                    if requires_test is not None
+                    else task.difficulty.requires_test
+                ),
+                "requires_formal": (
+                    requires_formal
+                    if requires_formal is not None
+                    else task.difficulty.requires_formal
+                ),
+                "need_clarification": False,
+            }
+        )
+        gates = task.gates.model_copy(
+            update={
+                "test_required": (
+                    requires_test
+                    if requires_test is not None
+                    else task.gates.test_required
+                ),
+                "formal_required": (
+                    requires_formal
+                    if requires_formal is not None
+                    else task.gates.formal_required
+                ),
+                "can_finish_as_success": False,
+            }
+        )
+        updated = task.model_copy(
+            deep=True,
+            update={
+                "normalized_goal": normalized_goal or task.normalized_goal or task.raw_user_request,
+                "task_type": selected_task_type,
+                "difficulty": difficulty,
+                "gates": gates,
+                "status": TaskStatus.RUNNING.value,
+                "phase": TaskPhase.PLANNING.value,
+                "updated_at": now,
+            },
+        )
+        self.task_repository.update_task_state(updated)
+        self.event_service.append_event(
+            _build_main_agent_event(
+                task=updated,
+                event_type=EventType.MAIN_AGENT_PLAN_UPDATED,
+                title="Main Agent plan updated",
+                message=summary,
+                payload={
+                    "task_id": task_id,
+                    "summary": summary,
+                    "plan": plan or [],
+                },
+                created_at=now,
+            )
+        )
+        self._checkpoint()
+        persisted = self._get_task(task_id)
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=summary,
+            failures=_failure_summaries(persisted.failures),
+            gate_state=_gate_state_summary(persisted),
+            details={"plan": plan or []},
+        )
+        self._record_tool_result(tool_name, result)
+        return result
+
+    def request_clarification(
+        self,
+        task_id: str,
+        *,
+        questions: list[dict[str, Any]] | list[str],
+        rationale_summary: str | None = None,
+    ) -> AgentToolResult:
+        tool_name = "request_clarification"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={"task_id": task_id, "questions": questions},
+        )
+        task = self._get_task(task_id)
+        if not questions:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                task=task,
+                code="missing_clarification_questions",
+                message="request_clarification requires at least one question",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        now = utc_now()
+        clarification_questions = [
+            _clarification_question_from_tool(item, now=now)
+            for item in questions
+        ]
+        updated = task.model_copy(
+            deep=True,
+            update={
+                "status": TaskStatus.WAITING_USER.value,
+                "phase": TaskPhase.CLARIFYING.value,
+                "difficulty": task.difficulty.model_copy(
+                    update={"need_clarification": True}
+                ),
+                "unresolved_questions": [
+                    *task.unresolved_questions,
+                    *clarification_questions,
+                ],
+                "updated_at": now,
+            },
+        )
+        self.task_repository.update_task_state(updated)
+        question_ids = [question.question_id for question in clarification_questions]
+        self.event_service.append_event(
+            _build_main_agent_event(
+                task=updated,
+                event_type=EventType.MAIN_AGENT_CLARIFICATION_REQUESTED,
+                title="Main Agent requested clarification",
+                message=rationale_summary or "Main Agent paused for user clarification.",
+                payload={"task_id": task_id, "question_ids": question_ids},
+                created_at=now,
+            )
+        )
+        self.event_service.append_event(
+            _build_task_event(
+                task=updated,
+                event_type=EventType.TASK_WAITING_USER,
+                title="Task waiting for user",
+                message="The task needs user clarification before workers can run.",
+                payload={
+                    "task_id": task_id,
+                    "status": TaskStatus.WAITING_USER.value,
+                    "phase": TaskPhase.CLARIFYING.value,
+                    "question_ids": question_ids,
+                },
+                created_at=now,
+            )
+        )
+        self._checkpoint()
+        persisted = self._get_task(task_id)
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary="Task paused for user clarification.",
+            failures=_failure_summaries(persisted.failures),
+            gate_state=_gate_state_summary(persisted),
+            next_recommended_action="ask_user",
+            details={"question_ids": question_ids},
+        )
+        self._record_tool_result(tool_name, result)
+        return result
+
+    def write_final_report(
+        self,
+        task_id: str,
+        *,
+        final_status: str,
+        summary: str,
+        rationale_summary: str | None = None,
+        decisions: list[dict[str, Any]] | None = None,
+        plan: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentToolResult:
+        tool_name = "write_final_report"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary or summary,
+            arguments={
+                "task_id": task_id,
+                "final_status": final_status,
+                "summary": summary,
+                "decisions": decisions or [],
+                "plan": plan or [],
+                "metadata": metadata or {},
+            },
+        )
+        task = self._get_task(task_id)
+        output = MainAgentEpisodeOutput(
+            task_id=task_id,
+            main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+            final_task_status=final_status,
+            phase=_value(task.phase),
+            decisions=_main_agent_decisions_from_tool(decisions),
+            plan=_main_agent_plan_from_tool(plan),
+            artifact_refs=_main_agent_artifact_refs(task),
+            gate_summary=MainAgentGateSummary.model_validate(
+                task.gates.model_dump(mode="json")
+            ),
+            open_clarification_question_ids=[
+                question.question_id
+                for question in task.unresolved_questions
+                if _value(question.status) == "open"
+            ],
+            summary=summary,
+            metadata=metadata or {},
+        )
+        recorder = self.context.observability_recorder or MainAgentObservabilityRecorder(
+            session=self.context.session,
+            artifact_root=self.context.artifact_root,
+            task_id=task_id,
+            openai_trace_id=task.trace.openai_trace_id,
+            main_agent_run_id=task.trace.latest_main_agent_run_id,
+            checkpoint=self.context.checkpoint,
+        )
+        final_report = recorder.write_final_report(output)
+        replay_log = recorder.write_replay_log(final_output=output)
+        recorder.record_completed(
+            output=output,
+            final_report=final_report,
+            replay_log=replay_log,
+        )
+        self._checkpoint()
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary="Final report written.",
+            artifact_refs=[
+                _artifact_ref_summary(final_report),
+                _artifact_ref_summary(replay_log),
+            ],
+            failures=_failure_summaries(task.failures),
+            gate_state=_gate_state_summary(task),
+            details={
+                "final_status": final_status,
+                "final_report_artifact_id": final_report.artifact_id,
+                "main_agent_log_artifact_id": replay_log.artifact_id,
+            },
+        )
+        self._record_tool_result(tool_name, result)
+        return result
 
     def call_plc_dev(
         self,
@@ -540,23 +834,14 @@ class AgentToolService:
             self._record_tool_result(tool_name, result)
             return result
 
-        if self.context.report_first_finalization:
-            result = AgentToolResult(
-                tool=tool_name,
+        if not self._has_final_report_artifact(task_id):
+            result = self._rejected_result(
+                tool_name=tool_name,
                 task_id=task_id,
-                status=ToolStatus.NOOP,
-                summary=(
-                    "Runtime report-first finalization is enabled. Return the "
-                    f"final structured output recommending {status_value}; Runtime "
-                    "will persist the final report before applying terminal status."
-                ),
-                failures=_failure_summaries(task.failures),
-                gate_state=_gate_state_summary(task),
-                next_recommended_action="return_final_output",
-                details={
-                    "final_status": status_value,
-                    "report_first_finalization": True,
-                },
+                task=task,
+                code="final_report_required",
+                message="finish_task requires a durable final_report artifact",
+                details={"final_status": status_value},
             )
             self._record_tool_result(tool_name, result)
             return result
@@ -576,6 +861,8 @@ class AgentToolService:
             _build_terminal_task_event(
                 task_id=task_id,
                 final_status=status_value,
+                openai_trace_id=updated.trace.openai_trace_id,
+                main_agent_run_id=updated.trace.latest_main_agent_run_id,
                 created_at=now,
             )
         )
@@ -592,6 +879,12 @@ class AgentToolService:
         )
         self._record_tool_result(tool_name, result)
         return result
+
+    def _has_final_report_artifact(self, task_id: str) -> bool:
+        return any(
+            _value(artifact.type) == ArtifactType.FINAL_REPORT.value
+            for artifact in self.artifact_repository.list_task_artifacts(task_id)
+        )
 
     def _call_worker_tool(
         self,
@@ -862,7 +1155,71 @@ class AgentToolService:
         )
 
 
-@function_tool
+@function_tool(strict_mode=False)
+def update_plan(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    summary: str,
+    plan: list[dict[str, Any]] | None = None,
+    normalized_goal: str | None = None,
+    task_type: str | None = None,
+    requires_test: bool | None = None,
+    requires_formal: bool | None = None,
+) -> AgentToolResult:
+    """Persist a public Main Agent plan and move the task into planning."""
+
+    return AgentToolService(ctx.context).update_plan(
+        task_id=task_id,
+        summary=summary,
+        plan=plan,
+        normalized_goal=normalized_goal,
+        task_type=task_type,
+        requires_test=requires_test,
+        requires_formal=requires_formal,
+    )
+
+
+@function_tool(strict_mode=False)
+def request_clarification(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    questions: list[dict[str, Any]] | list[str],
+    rationale_summary: str | None = None,
+) -> AgentToolResult:
+    """Pause a task and persist user clarification questions."""
+
+    return AgentToolService(ctx.context).request_clarification(
+        task_id=task_id,
+        questions=questions,
+        rationale_summary=rationale_summary,
+    )
+
+
+@function_tool(strict_mode=False)
+def write_final_report(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    final_status: str,
+    summary: str,
+    rationale_summary: str | None = None,
+    decisions: list[dict[str, Any]] | None = None,
+    plan: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> AgentToolResult:
+    """Write final report and replay artifacts before terminal status."""
+
+    return AgentToolService(ctx.context).write_final_report(
+        task_id=task_id,
+        final_status=final_status,
+        summary=summary,
+        rationale_summary=rationale_summary,
+        decisions=decisions,
+        plan=plan,
+        metadata=metadata,
+    )
+
+
+@function_tool(strict_mode=False)
 def call_plc_dev(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -878,7 +1235,7 @@ def call_plc_dev(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def call_plc_test(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -894,7 +1251,7 @@ def call_plc_test(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def call_plc_formal(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -910,7 +1267,7 @@ def call_plc_formal(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def call_plc_repair(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -926,7 +1283,7 @@ def call_plc_repair(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def run_parallel_workers(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -950,7 +1307,7 @@ def run_parallel_workers(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def read_artifact(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -968,7 +1325,7 @@ def read_artifact(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def run_quality_gate(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -982,7 +1339,7 @@ def run_quality_gate(
     )
 
 
-@function_tool
+@function_tool(strict_mode=False)
 def finish_task(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -1002,6 +1359,8 @@ def get_main_agent_tools() -> list[Any]:
     """Return SDK function tools for Main Agent registration."""
 
     return [
+        update_plan,
+        request_clarification,
         call_plc_dev,
         call_plc_test,
         call_plc_formal,
@@ -1009,8 +1368,198 @@ def get_main_agent_tools() -> list[Any]:
         run_parallel_workers,
         read_artifact,
         run_quality_gate,
+        write_final_report,
         finish_task,
     ]
+
+
+def get_main_agent_tool_specs() -> list[dict[str, Any]]:
+    """Return OpenAI-compatible Chat Completions tool definitions."""
+
+    return [
+        _tool_spec(
+            "update_plan",
+            "Persist a public execution plan and move the task into planning.",
+            {
+                "task_id": {"type": "string"},
+                "summary": {"type": "string"},
+                "plan": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                },
+                "normalized_goal": {"type": "string"},
+                "task_type": {
+                    "type": "string",
+                    "enum": [
+                        TaskType.QA.value,
+                        TaskType.NEW_PLC_DEVELOPMENT.value,
+                        TaskType.MODIFY_EXISTING_CODE.value,
+                        TaskType.TEST_EXISTING_CODE.value,
+                        TaskType.FORMAL_VERIFY_EXISTING_CODE.value,
+                        TaskType.REPAIR_EXISTING_CODE.value,
+                        TaskType.PROJECT_LEVEL_DEVELOPMENT.value,
+                    ],
+                },
+                "requires_test": {"type": "boolean"},
+                "requires_formal": {"type": "boolean"},
+            },
+            ["task_id", "summary"],
+        ),
+        _tool_spec(
+            "request_clarification",
+            "Persist required user clarification questions and pause the task.",
+            {
+                "task_id": {"type": "string"},
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                    "required": {"type": "boolean"},
+                                },
+                                "required": ["question"],
+                                "additionalProperties": False,
+                            },
+                        ]
+                    },
+                },
+                "rationale_summary": {"type": "string"},
+            },
+            ["task_id", "questions"],
+        ),
+        _worker_tool_spec("call_plc_dev", "Generate or update PLC artifacts."),
+        _worker_tool_spec("call_plc_test", "Run PLC tests for current code."),
+        _worker_tool_spec("call_plc_formal", "Run formal verification for current code."),
+        _worker_tool_spec("call_plc_repair", "Repair current code using failure evidence."),
+        _tool_spec(
+            "run_parallel_workers",
+            "Dispatch a guarded batch of non-repair PLC workers.",
+            {
+                "task_id": {"type": "string"},
+                "workers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "objectives": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "rationale_summary": {"type": "string"},
+            },
+            ["task_id", "workers"],
+        ),
+        _tool_spec(
+            "read_artifact",
+            "Read artifact metadata or bounded UTF-8 content.",
+            {
+                "task_id": {"type": "string"},
+                "artifact_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["summary", "full"]},
+                "max_chars": {"type": "integer", "minimum": 1},
+            },
+            ["task_id", "artifact_id"],
+        ),
+        _tool_spec(
+            "run_quality_gate",
+            "Run and persist Quality Gate assessment.",
+            {
+                "task_id": {"type": "string"},
+                "rationale_summary": {"type": "string"},
+            },
+            ["task_id"],
+        ),
+        _tool_spec(
+            "write_final_report",
+            "Write final report and Main Agent replay artifacts.",
+            {
+                "task_id": {"type": "string"},
+                "final_status": {"type": "string"},
+                "summary": {"type": "string"},
+                "rationale_summary": {"type": "string"},
+                "decisions": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+                "plan": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+                "metadata": {"type": "object", "additionalProperties": True},
+            },
+            ["task_id", "final_status", "summary"],
+        ),
+        _tool_spec(
+            "finish_task",
+            "Apply terminal task status after report and guard checks.",
+            {
+                "task_id": {"type": "string"},
+                "final_status": {"type": "string"},
+                "rationale_summary": {"type": "string"},
+            },
+            ["task_id"],
+        ),
+    ]
+
+
+def call_main_agent_tool(
+    context: AgentToolContext,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> AgentToolResult:
+    """Invoke a Main Agent tool by Chat Completions tool-call name."""
+
+    service = AgentToolService(context)
+    tool_arguments = dict(arguments)
+    if tool_name == "update_plan":
+        return service.update_plan(**tool_arguments)
+    if tool_name == "request_clarification":
+        return service.request_clarification(**tool_arguments)
+    if tool_name == "call_plc_dev":
+        return service.call_plc_dev(**tool_arguments)
+    if tool_name == "call_plc_test":
+        return service.call_plc_test(**tool_arguments)
+    if tool_name == "call_plc_formal":
+        return service.call_plc_formal(**tool_arguments)
+    if tool_name == "call_plc_repair":
+        return service.call_plc_repair(**tool_arguments)
+    if tool_name == "run_parallel_workers":
+        workers = tool_arguments.pop("workers")
+        objectives = tool_arguments.pop("objectives", None)
+        return service.run_parallel_workers(
+            requests=[
+                ParallelWorkerRequest(
+                    worker_type=worker,
+                    objective=objectives[index] if objectives and index < len(objectives) else None,
+                )
+                for index, worker in enumerate(workers)
+            ],
+            **tool_arguments,
+        )
+    if tool_name == "read_artifact":
+        return service.read_artifact(**tool_arguments)
+    if tool_name == "run_quality_gate":
+        return service.run_quality_gate(**tool_arguments)
+    if tool_name == "write_final_report":
+        return service.write_final_report(**tool_arguments)
+    if tool_name == "finish_task":
+        return service.finish_task(**tool_arguments)
+    return AgentToolResult(
+        tool=tool_name,
+        status=ToolStatus.REJECTED,
+        summary=f"Unknown Main Agent tool: {tool_name}",
+        violation=ToolViolation(
+            code="unknown_tool",
+            message=f"Unknown Main Agent tool: {tool_name}",
+        ),
+    )
 
 
 def _proposed_worker_input_artifacts(
@@ -1044,6 +1593,273 @@ def _proposed_worker_input_artifacts(
             if artifact is not None
         ]
     return []
+
+
+def _tool_spec(
+    name: str,
+    description: str,
+    properties: dict[str, Any],
+    required: list[str],
+) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _worker_tool_spec(name: str, description: str) -> dict[str, Any]:
+    return _tool_spec(
+        name,
+        description,
+        {
+            "task_id": {"type": "string"},
+            "objective": {"type": "string"},
+            "rationale_summary": {"type": "string"},
+        },
+        ["task_id"],
+    )
+
+
+def _clarification_question_from_tool(
+    value: dict[str, Any] | str,
+    *,
+    now: Any,
+) -> ClarificationQuestion:
+    if isinstance(value, str):
+        question = value
+        reason = "Main Agent requested clarification before continuing."
+        required = True
+    else:
+        question = str(value.get("question") or "").strip()
+        reason = str(
+            value.get("reason")
+            or "Main Agent requested clarification before continuing."
+        )
+        required = bool(value.get("required", True))
+    return ClarificationQuestion(
+        question_id=prefixed_id("question"),
+        question=question,
+        reason=reason,
+        required=required,
+        status="open",
+        asked_at=now,
+    )
+
+
+def _normalized_task_type_from_tool(
+    value: str | None,
+    *,
+    current_task_type: str,
+) -> str:
+    allowed = {item.value for item in TaskType}
+    if value in allowed and value != TaskType.UNKNOWN.value:
+        return str(value)
+
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "qa": TaskType.QA.value,
+        "question_answering": TaskType.QA.value,
+        "analysis": TaskType.QA.value,
+        "development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "plc_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "new_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "l0_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "l1_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "l2_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "l3_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "l4_development": TaskType.NEW_PLC_DEVELOPMENT.value,
+        "modify": TaskType.MODIFY_EXISTING_CODE.value,
+        "modification": TaskType.MODIFY_EXISTING_CODE.value,
+        "test": TaskType.TEST_EXISTING_CODE.value,
+        "testing": TaskType.TEST_EXISTING_CODE.value,
+        "formal": TaskType.FORMAL_VERIFY_EXISTING_CODE.value,
+        "formal_verification": TaskType.FORMAL_VERIFY_EXISTING_CODE.value,
+        "repair": TaskType.REPAIR_EXISTING_CODE.value,
+        "fix": TaskType.REPAIR_EXISTING_CODE.value,
+        "project": TaskType.PROJECT_LEVEL_DEVELOPMENT.value,
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    if "repair" in normalized or "fix" in normalized:
+        return TaskType.REPAIR_EXISTING_CODE.value
+    if "formal" in normalized:
+        return TaskType.FORMAL_VERIFY_EXISTING_CODE.value
+    if "test" in normalized:
+        return TaskType.TEST_EXISTING_CODE.value
+    if "modify" in normalized or "change" in normalized:
+        return TaskType.MODIFY_EXISTING_CODE.value
+    if "develop" in normalized or "plc" in normalized:
+        return TaskType.NEW_PLC_DEVELOPMENT.value
+    if current_task_type in allowed and current_task_type != TaskType.UNKNOWN.value:
+        return current_task_type
+    return TaskType.NEW_PLC_DEVELOPMENT.value
+
+
+def _main_agent_artifact_refs(task: TaskState) -> list[MainAgentArtifactReference]:
+    refs = [
+        artifact
+        for artifact in (
+            task.current_artifacts.raw_user_request,
+            task.current_artifacts.requirements_ir,
+            task.current_artifacts.current_code,
+            task.current_artifacts.current_io_contract,
+            task.current_artifacts.latest_test_cases,
+            task.current_artifacts.latest_test_report,
+            task.current_artifacts.latest_failing_trace,
+            task.current_artifacts.latest_formal_properties,
+            task.current_artifacts.latest_formal_report,
+            task.current_artifacts.latest_counterexample,
+            task.current_artifacts.latest_patch,
+            task.current_artifacts.latest_repair_summary,
+            task.current_artifacts.latest_gate_report,
+        )
+        if artifact is not None
+    ]
+    seen: set[str] = set()
+    output: list[MainAgentArtifactReference] = []
+    for ref in refs:
+        if ref.artifact_id in seen:
+            continue
+        seen.add(ref.artifact_id)
+        output.append(
+            MainAgentArtifactReference(
+                artifact_id=ref.artifact_id,
+                type=_value(ref.type),
+                version=ref.version,
+                uri=ref.uri,
+                summary=ref.summary,
+                content_hash=ref.content_hash,
+            )
+        )
+    return output
+
+
+def _main_agent_decisions_from_tool(
+    decisions: list[dict[str, Any]] | None,
+) -> list[MainAgentDecision]:
+    output: list[MainAgentDecision] = []
+    for index, decision in enumerate(decisions or [], start=1):
+        if not isinstance(decision, dict):
+            decision = {"summary": str(decision)}
+        normalized = {
+            "decision_type": str(
+                decision.get("decision_type")
+                or decision.get("type")
+                or "tool_loop_decision"
+            ),
+            "summary": str(
+                decision.get("summary")
+                or decision.get("message")
+                or decision.get("action")
+                or f"Decision {index}"
+            ),
+            "action": decision.get("action"),
+            "tool_name": decision.get("tool_name") or decision.get("tool"),
+            "artifact_refs": decision.get("artifact_refs") or [],
+            "details": _json_object(decision.get("details") or {}),
+        }
+        output.append(MainAgentDecision.model_validate(normalized))
+    return output
+
+
+def _main_agent_plan_from_tool(
+    plan: list[dict[str, Any]] | None,
+) -> list[MainAgentPlanStep]:
+    output: list[MainAgentPlanStep] = []
+    for index, step in enumerate(plan or [], start=1):
+        if not isinstance(step, dict):
+            step = {"action": str(step)}
+        normalized = {
+            "order": step.get("order") or index,
+            "action": str(
+                step.get("action")
+                or step.get("summary")
+                or step.get("title")
+                or f"Plan step {index}"
+            ),
+            "status": str(step.get("status") or "planned"),
+            "reason": step.get("reason"),
+            "worker_type": step.get("worker_type"),
+            "tool_name": step.get("tool_name") or step.get("tool"),
+        }
+        output.append(MainAgentPlanStep.model_validate(normalized))
+    return output
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _json_value(value)}
+    return {str(key): _json_value(item) for key, item in value.items()}
+
+
+def _build_main_agent_event(
+    *,
+    task: TaskState,
+    event_type: EventType,
+    title: str,
+    message: str,
+    payload: dict[str, Any],
+    created_at: Any,
+) -> RouterEvent:
+    return RouterEvent(
+        schema_version="router.v1",
+        event_id=new_event_id(),
+        task_id=task.task_id,
+        seq=0,
+        type=event_type,
+        source=EventSource(
+            type=EventSourceType.MAIN_AGENT,
+            id=task.trace.latest_main_agent_run_id,
+        ),
+        severity=EventSeverity.INFO,
+        visibility=EventVisibility.USER,
+        title=title,
+        message=message,
+        correlation=EventCorrelation(
+            openai_trace_id=task.trace.openai_trace_id,
+            main_agent_run_id=task.trace.latest_main_agent_run_id,
+        ),
+        payload=payload,
+        created_at=created_at,
+    )
+
+
+def _build_task_event(
+    *,
+    task: TaskState,
+    event_type: EventType,
+    title: str,
+    message: str,
+    payload: dict[str, Any],
+    created_at: Any,
+) -> RouterEvent:
+    return RouterEvent(
+        schema_version="router.v1",
+        event_id=new_event_id(),
+        task_id=task.task_id,
+        seq=0,
+        type=event_type,
+        source=EventSource(type=EventSourceType.RUNTIME),
+        severity=EventSeverity.INFO,
+        visibility=EventVisibility.USER,
+        title=title,
+        message=message,
+        correlation=EventCorrelation(
+            openai_trace_id=task.trace.openai_trace_id,
+            main_agent_run_id=task.trace.latest_main_agent_run_id,
+        ),
+        payload=payload,
+        created_at=created_at,
+    )
 
 
 def _worker_result_to_tool_result(
@@ -1162,6 +1978,8 @@ def _build_terminal_task_event(
     *,
     task_id: str,
     final_status: str,
+    openai_trace_id: str | None = None,
+    main_agent_run_id: str | None = None,
     created_at: Any,
 ) -> RouterEvent:
     event_type = TERMINAL_EVENT_BY_STATUS[final_status]
@@ -1180,7 +1998,10 @@ def _build_terminal_task_event(
         visibility=EventVisibility.USER,
         title=f"Task {final_status}",
         message=f"The task was marked {final_status}.",
-        correlation=EventCorrelation(),
+        correlation=EventCorrelation(
+            openai_trace_id=openai_trace_id,
+            main_agent_run_id=main_agent_run_id,
+        ),
         payload={"task_id": task_id, "status": final_status},
         created_at=created_at,
     )
@@ -1190,3 +2011,23 @@ def _value(value: Any) -> str:
     if isinstance(value, Enum):
         return str(value.value)
     return str(value)
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    try:
+        import json
+
+        json.dumps(value)
+    except TypeError:
+        return str(value)
+    return value
