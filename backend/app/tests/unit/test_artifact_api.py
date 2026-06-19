@@ -84,9 +84,32 @@ def create_main_agent_artifacts(
 ) -> tuple[str, str, str]:
     final_report_content = {
         "kind": "main_agent_final_report",
+        "schema_version": "router.v1",
+        "report_version": 1,
         "task_id": task.task_id,
         "main_agent_run_id": "main-agent-run-001",
-        "output": {
+        "final_task_status": "succeeded",
+        "user_goal": {"raw_user_request": task.raw_user_request},
+        "classification": {
+            "task_type": "new_plc_development",
+            "difficulty": {"level": "L2"},
+        },
+        "delivery_artifacts": {
+            "final_plc_code": {"artifact_id": "artifact-code-api"},
+            "test_report": {"artifact_id": "artifact-test-report-api"},
+            "all": [
+                {"artifact_id": "artifact-code-api"},
+                {"artifact_id": "artifact-test-report-api"},
+            ],
+        },
+        "validation_summary": {"latest_test_passed": True},
+        "repair_summary": {"repair_rounds": 0},
+        "assumptions": [],
+        "unresolved_items": {"blocking_failure_count": 0},
+        "gate_summary": {},
+        "trace_refs": {"main_agent_run_ids": ["main-agent-run-001"]},
+        "summary": "Main Agent completed the PLC delivery.",
+        "main_agent_output_summary": {
             "final_task_status": "succeeded",
             "summary": "Main Agent completed the PLC delivery.",
         },
@@ -223,7 +246,14 @@ def test_final_report_artifact_is_readable_and_replay_log_stays_artifact_backed(
     report_payload = report_response.json()
     report_content = json.loads(report_payload["content"])
     assert report_payload["artifact"]["type"] == "final_report"
-    assert report_content["output"]["summary"] == "Main Agent completed the PLC delivery."
+    assert report_payload["artifact"]["visibility"] == "user"
+    assert report_content["schema_version"] == "router.v1"
+    assert report_content["report_version"] == 1
+    assert report_content["summary"] == "Main Agent completed the PLC delivery."
+    assert report_content["delivery_artifacts"]["final_plc_code"]["artifact_id"] == (
+        "artifact-code-api"
+    )
+    assert report_content["unresolved_items"]["blocking_failure_count"] == 0
 
     assert log_response.status_code == 200
     log_content = json.loads(log_response.json()["content"])

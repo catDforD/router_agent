@@ -29,6 +29,7 @@ from app.models.router_schema import (
     TaskPhase,
     TaskState,
     TaskStatus,
+    TaskTrace,
     WorkerType,
 )
 from app.repositories.task_repo import TaskRepository
@@ -260,6 +261,8 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
     tools = get_main_agent_tools()
 
     assert [tool.name for tool in tools] == [
+        "update_plan",
+        "request_clarification",
         "call_plc_dev",
         "call_plc_test",
         "call_plc_formal",
@@ -267,8 +270,26 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
         "run_parallel_workers",
         "read_artifact",
         "run_quality_gate",
+        "write_final_report",
         "finish_task",
     ]
+
+
+def test_update_plan_normalizes_provider_task_type_alias(
+    db_session: Session,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session, qa=True)
+
+    result = service.update_plan(
+        task.task_id,
+        summary="Provider supplied a non-contract task type alias.",
+        task_type="L0_development",
+    )
+    updated = TaskRepository(db_session).get_task(task.task_id)
+
+    assert result.status == "applied"
+    assert updated.task_type == "new_plc_development"
 
 
 def test_worker_input_builder_selects_validator_inputs(
@@ -537,7 +558,7 @@ def test_finish_task_rejects_succeeded_without_quality_gate(
     assert updated.status == "running"
 
 
-def test_finish_task_is_noop_in_report_first_orchestration_context(
+def test_finish_task_rejects_without_durable_final_report_after_gate(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
@@ -556,9 +577,9 @@ def test_finish_task_is_noop_in_report_first_orchestration_context(
     updated = TaskRepository(db_session).get_task(task.task_id)
     events = EventService(db_session).list_visible_events(task.task_id)
 
-    assert result.status == "no-op"
-    assert result.details["report_first_finalization"] is True
-    assert result.next_recommended_action == "return_final_output"
+    assert result.status == "rejected"
+    assert result.violation is not None
+    assert result.violation.code == "final_report_required"
     assert updated.status == "running"
     assert "task.succeeded" not in [event.type for event in events]
 
@@ -569,18 +590,38 @@ def test_finish_task_marks_succeeded_after_quality_gate_passes(
     service: AgentToolService,
 ) -> None:
     task = classified_task(db_session, qa=True)
+    task = TaskRepository(db_session).update_task_state(
+        task.model_copy(
+            deep=True,
+            update={
+                "trace": TaskTrace(
+                    openai_trace_id="trace-001",
+                    main_agent_run_ids=["main-agent-run-001"],
+                    latest_main_agent_run_id="main-agent-run-001",
+                )
+            },
+        )
+    )
     create_raw_artifact(db_session, tmp_path, task)
     service.run_quality_gate(task.task_id)
+    report_result = service.write_final_report(
+        task.task_id,
+        final_status="succeeded",
+        summary="QA task passed Quality Gate.",
+    )
 
     result = service.finish_task(task.task_id)
     updated = TaskRepository(db_session).get_task(task.task_id)
     events = EventService(db_session).list_visible_events(task.task_id)
 
+    assert report_result.status == "applied"
     assert result.status == "applied"
     assert updated.status == "succeeded"
     assert updated.phase == "completed"
     assert updated.completed_at is not None
     assert [event.type for event in events][-1] == "task.succeeded"
+    assert events[-1].correlation.openai_trace_id == "trace-001"
+    assert events[-1].correlation.main_agent_run_id == "main-agent-run-001"
 
 
 def test_tool_checkpoint_callback_runs_after_gate_and_finish(
@@ -599,9 +640,15 @@ def test_tool_checkpoint_callback_runs_after_gate_and_finish(
     create_raw_artifact(db_session, tmp_path, task)
 
     service.run_quality_gate(task.task_id)
+    service.write_final_report(
+        task.task_id,
+        final_status="succeeded",
+        summary="QA task passed Quality Gate.",
+    )
     service.finish_task(task.task_id)
 
-    assert checkpoints == ["checkpoint", "checkpoint"]
+    assert len(checkpoints) >= 3
+    assert set(checkpoints) == {"checkpoint"}
 
 
 def test_finish_task_rejects_cancelled_task_without_overwrite(

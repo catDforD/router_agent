@@ -29,6 +29,7 @@ from app.models.router_schema import (
 )
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
+from app.services.final_report import build_final_report_payload
 
 
 MAX_RATIONALE_CHARS = 800
@@ -65,6 +66,30 @@ class MainAgentObservabilityRecorder:
             payload=payload,
         )
         return self.turn_index
+
+    def record_message(
+        self,
+        *,
+        content: str,
+        phase: str = "orchestration",
+        turn_index: int | None = None,
+    ) -> RouterEvent:
+        index = turn_index or self._ensure_turn()
+        message = _bounded_text(content, limit=MAX_SUMMARY_CHARS) or ""
+        payload = {
+            "task_id": self.task_id,
+            "turn_index": index,
+            "phase": phase,
+            "visibility": "public",
+            "content": message,
+        }
+        self._record_entry("message", payload)
+        return self._append_event(
+            event_type=EventType.MAIN_AGENT_MESSAGE,
+            title="Main Agent message",
+            message=message,
+            payload=payload,
+        )
 
     def record_tool_call(
         self,
@@ -160,14 +185,14 @@ class MainAgentObservabilityRecorder:
         self,
         output: MainAgentEpisodeOutput,
     ) -> ArtifactRef:
-        content = {
-            "kind": "main_agent_final_report",
-            "schema_version": "router.v1",
-            "created_at": utc_now().isoformat(),
-            "task_id": self.task_id,
-            "main_agent_run_id": self.main_agent_run_id,
-            "output": output.model_dump(mode="json"),
-        }
+        created_at = utc_now()
+        content = build_final_report_payload(
+            session=self.session,
+            task_id=self.task_id,
+            output=output,
+            main_agent_run_id=self.main_agent_run_id,
+            created_at=created_at,
+        )
         result = ArtifactStore(
             session=self.session,
             artifact_root=self.artifact_root,
@@ -188,6 +213,7 @@ class MainAgentObservabilityRecorder:
                 },
                 metadata={"tags": ["main_agent", "final_report"]},
                 mime_type="application/json",
+                created_at=created_at,
             )
         )
         self._checkpoint()

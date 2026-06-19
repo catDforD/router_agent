@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.ids import new_artifact_id, new_event_id, prefixed_id
+from app.core.logging import log_with_context
 from app.core.time import utc_now
 from app.mcp.client import (
     PlcMcpClient,
@@ -73,6 +75,7 @@ from app.mcp.normalizer import (
 MockRunner = Callable[..., MockWorkerOutput]
 CheckpointCallback = Callable[[], None]
 RealWorkerMode = str
+LOGGER = logging.getLogger(__name__)
 
 EVIDENCE_ARTIFACT_TYPES = {
     ArtifactType.TEST_REPORT.value,
@@ -166,6 +169,19 @@ class McpAdapter:
                     )
                 },
             )
+        log_with_context(
+            LOGGER,
+            logging.INFO,
+            "Worker dispatch started",
+            task_id=worker_input.task_id,
+            openai_trace_id=worker_input.trace_context.openai_trace_id,
+            main_agent_run_id=worker_input.trace_context.main_agent_run_id,
+            worker_job_id=worker_input.worker_job_id,
+            worker_type=worker_input.worker_type,
+            mcp_tool=worker_input.mcp_tool,
+            mcp_request_id=worker_input.trace_context.mcp_request_id,
+            worker_route=route,
+        )
         started_at = utc_now()
         self.worker_job_repository.create_job(worker_input, started_at=started_at)
         self.event_service.append_event(
@@ -340,6 +356,18 @@ class McpAdapter:
             url=self.plc_worker_mcp_url,
             timeout_seconds=self.plc_worker_timeout_seconds,
         )
+        log_with_context(
+            LOGGER,
+            logging.INFO,
+            "MCP worker request sent",
+            task_id=worker_input.task_id,
+            openai_trace_id=worker_input.trace_context.openai_trace_id,
+            main_agent_run_id=worker_input.trace_context.main_agent_run_id,
+            worker_job_id=worker_input.worker_job_id,
+            worker_type=worker_input.worker_type,
+            mcp_tool=worker_input.mcp_tool,
+            mcp_request_id=worker_input.trace_context.mcp_request_id,
+        )
         return client.call_worker_tool(
             _value(worker_input.mcp_tool),
             McpWorkerRequest(
@@ -503,6 +531,21 @@ class McpAdapter:
         )
         artifact_ids = [artifact.artifact_id for artifact in result.produced_artifacts]
         failure_ids = [failure.failure_id for failure in result.failures]
+        log_with_context(
+            LOGGER,
+            logging.INFO if severity == EventSeverity.INFO else logging.ERROR,
+            "Worker dispatch completed",
+            task_id=worker_input.task_id,
+            openai_trace_id=worker_input.trace_context.openai_trace_id,
+            main_agent_run_id=worker_input.trace_context.main_agent_run_id,
+            worker_job_id=worker_input.worker_job_id,
+            worker_type=worker_input.worker_type,
+            mcp_tool=worker_input.mcp_tool,
+            mcp_request_id=worker_input.trace_context.mcp_request_id,
+            execution_status=execution_status,
+            outcome_status=result.outcome.status,
+            error_code=result.error.error_code if result.error else None,
+        )
         return self._build_worker_event(
             worker_input=worker_input,
             event_type=event_type,
@@ -553,6 +596,8 @@ class McpAdapter:
             title=title,
             message=message,
             correlation=EventCorrelation(
+                openai_trace_id=worker_input.trace_context.openai_trace_id,
+                main_agent_run_id=worker_input.trace_context.main_agent_run_id,
                 worker_job_id=worker_input.worker_job_id,
                 mcp_request_id=worker_input.trace_context.mcp_request_id,
                 artifact_ids=list(artifact_ids) if artifact_ids else None,

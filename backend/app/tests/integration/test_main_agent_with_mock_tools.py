@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -28,7 +29,9 @@ from app.models.db_models import ArtifactRow, Base, WorkerJobRow
 from app.models.router_schema import EventType, TaskState
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
+from app.services.artifact_store import ArtifactStore
 from app.services.task_service import TaskService
+from app.services.trace_summary import TraceSummaryService
 
 
 @pytest.fixture()
@@ -290,6 +293,18 @@ def run_with_sequence(
     return task_id, service.run_episode(task_id)
 
 
+def read_report_content(
+    db_session: Session,
+    tmp_path: Path,
+    artifact_id: str,
+) -> dict[str, Any]:
+    stored = ArtifactStore(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+    ).read_artifact_content(artifact_id)
+    return json.loads(stored.content)
+
+
 def test_ordinary_l2_development_completes_with_dev_test_gate_finish(
     db_session: Session,
     tmp_path: Path,
@@ -369,6 +384,73 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     assert event_types.index("main_agent.completed") < event_types.index(
         "task.succeeded"
     )
+    assert task.current_artifacts.final_report is not None
+    report = read_report_content(
+        db_session,
+        tmp_path,
+        task.current_artifacts.final_report.artifact_id,
+    )
+    assert report["report_version"] == 1
+    assert report["final_task_status"] == "succeeded"
+    assert report["delivery_artifacts"]["final_plc_code"]["artifact_id"] == (
+        task.current_artifacts.current_code.artifact_id
+    )
+    assert report["delivery_artifacts"]["test_report"]["artifact_id"] == (
+        task.current_artifacts.latest_test_report.artifact_id
+    )
+    assert report["delivery_artifacts"]["gate_report"]["artifact_id"] == (
+        task.current_artifacts.latest_gate_report.artifact_id
+    )
+    assert report["unresolved_items"]["blocking_failure_count"] == 0
+
+
+def test_report_first_partial_failed_report_records_unresolved_failures(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    runner = ToolSequenceRunner(
+        classification=classification(requires_repair_loop=True),
+        sequence=["dev", "test", "finalizing", "gate"],
+        final_task_status="partial_failed",
+    )
+
+    task_id, output = run_with_sequence(
+        db_session,
+        tmp_path,
+        task_service,
+        runner=runner,
+        mock_scenario=SCENARIO_TEST_FAILED_THEN_REPAIR_PASS,
+    )
+    task = TaskRepository(db_session).get_task(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    event_types = [event.type for event in events]
+
+    assert output.final_task_status == "partial_failed"
+    assert task.status == "partial_failed"
+    assert task.gates.has_blocking_failure is True
+    assert any(failure.status == "open" for failure in task.failures)
+    assert task.current_artifacts.final_report is not None
+    assert event_types.index("main_agent.completed") < event_types.index(
+        "task.partial_failed"
+    )
+    report = read_report_content(
+        db_session,
+        tmp_path,
+        task.current_artifacts.final_report.artifact_id,
+    )
+    assert report["final_task_status"] == "partial_failed"
+    assert report["delivery_artifacts"]["final_plc_code"]["artifact_id"] == (
+        task.current_artifacts.current_code.artifact_id
+    )
+    assert report["delivery_artifacts"]["test_report"]["artifact_id"] == (
+        task.current_artifacts.latest_test_report.artifact_id
+    )
+    assert report["delivery_artifacts"]["gate_report"]["artifact_id"] == (
+        task.current_artifacts.latest_gate_report.artifact_id
+    )
+    assert report["unresolved_items"]["blocking_failure_count"] >= 1
+    assert report["unresolved_items"]["open_failures"]
 
 
 def test_guard_rejection_is_visible_through_main_agent_tool_result(
@@ -575,6 +657,24 @@ def test_worker_inputs_inherit_main_agent_trace_context(
     assert trace_context["openai_trace_id"] == task.trace.openai_trace_id
     assert trace_context["main_agent_run_id"] == task.trace.latest_main_agent_run_id
     assert trace_context["worker_job_id"] == dev_job.id
+
+    summary = TraceSummaryService(db_session).get_task_trace_summary(task_id)
+    dev_summary = next(
+        job for job in summary.worker_jobs if job.worker_job_id == dev_job.id
+    )
+    assert summary.openai_trace_id == task.trace.openai_trace_id
+    assert summary.latest_main_agent_run_id == task.trace.latest_main_agent_run_id
+    assert summary.main_agent_runs[0].started_event_id is not None
+    assert summary.main_agent_runs[0].final_report_artifact_id is not None
+    assert dev_summary.openai_trace_id == task.trace.openai_trace_id
+    assert dev_summary.main_agent_run_id == task.trace.latest_main_agent_run_id
+    assert dev_summary.produced_artifact_ids
+    assert any(
+        event.correlation.openai_trace_id == task.trace.openai_trace_id
+        and event.correlation.main_agent_run_id == task.trace.latest_main_agent_run_id
+        for event in summary.events
+        if event.type == "worker.started"
+    )
 
 
 def test_main_agent_events_are_visible_in_orchestration_timeline(

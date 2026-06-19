@@ -182,9 +182,14 @@ def test_recorder_writes_report_log_and_completed_event(
         db_session.execute(select(ArtifactRow).order_by(ArtifactRow.created_at)).scalars()
     )
     restored = TaskRepository(db_session).get_task(task.task_id)
+    report_content = json.loads(stored_report.content)
 
     assert [row.type for row in artifact_rows] == ["final_report", "main_agent_log"]
-    assert json.loads(stored_report.content)["output"]["summary"] == "Task completed."
+    assert report_content["report_version"] == 1
+    assert report_content["summary"] == "Task completed."
+    assert report_content["main_agent_output_summary"]["final_task_status"] == (
+        "succeeded"
+    )
     assert completed.type == "main_agent.completed"
     assert completed.correlation.artifact_ids == [
         final_report.artifact_id,

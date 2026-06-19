@@ -205,6 +205,16 @@ def test_plc_dev_returns_completed_result_and_persists_requirements_and_code(
     task: TaskState,
 ) -> None:
     payload = worker_input(task, WorkerType.PLC_DEV, [raw_ref()])
+    payload = payload.model_copy(
+        deep=True,
+        update={
+            "trace_context": TraceContext(
+                openai_trace_id="trace-001",
+                main_agent_run_id="main-agent-run-001",
+                worker_job_id=payload.worker_job_id,
+            )
+        },
+    )
 
     result = adapter(db_session, tmp_path).call_worker(payload)
 
@@ -218,6 +228,19 @@ def test_plc_dev_returns_completed_result_and_persists_requirements_and_code(
         ArtifactType.REQUIREMENTS_IR.value,
         ArtifactType.PLC_CODE.value,
     }
+    events = EventService(db_session).list_visible_events(task.task_id)
+    correlated = [
+        event
+        for event in events
+        if event.type in {"worker.started", "artifact.created", "worker.completed"}
+    ]
+    assert correlated
+    assert all(event.correlation.openai_trace_id == "trace-001" for event in correlated)
+    assert all(
+        event.correlation.main_agent_run_id == "main-agent-run-001"
+        for event in correlated
+    )
+    assert all(event.correlation.worker_job_id == payload.worker_job_id for event in correlated)
 
 
 def test_plc_test_pass_returns_test_report_and_metrics(

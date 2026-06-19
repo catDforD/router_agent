@@ -1,4 +1,7 @@
 # 总体思路
+
+> 当前状态：后端已经从早期的 OpenAI Agents SDK / structured final output 方案，切换为 OpenAI 兼容 Chat Completions tool loop。Main Agent 通过普通 `messages + tools + tool_calls` 运行，不依赖 `response_format`；前端通过 SSE 消费公开的 `main_agent.message`、`main_agent.tool_called`、`main_agent.tool_result` 等事件。
+
 1. **方向**  
     ```
     Main Agent 负责理解、规划、调度、循环、追问和综合；plc-dev、plc-test、plc-formal、plc-repair 是外部 worker，不作为 Router 内部 handoff agent，而是通过 MCP tools 调用。
@@ -26,10 +29,11 @@
     │     - fetch artifacts                         │
     │                                               │
     │  2. Main Agent Service                        │
-    │     - OpenAI Agents SDK                       │
+    │     - OpenAI-compatible Chat Completions      │
+    │     - tool loop                               │
     │     - instructions                            │
     │     - function tools                          │
-    │     - structured final output                 │
+    │     - public messages and tool events         │
     │                                               │
     │  3. Runtime / Scheduler Guard                 │
     │     - TaskState                               │ 
@@ -89,14 +93,13 @@
     后续是肯定会将每一个 subagent 都拆成一个 mcp server 的，具体看每个 subagent 中的功能多不多。
 
 5. **Main Agent 编排模式**  
-    OpenAI Agents SDK
-    - manager agent：通过 agents-as-tools 调用 specialist，同时保留最终回答控制权。
-    - handoff：让 specialist 接管后续交互。  
+    当前选择 Main Agent 自己掌控编排：模型每轮输出公开消息和 tool calls，后端执行工具、写事件和 artifact，再把 compact tool result 回灌给模型继续下一轮。外部 worker 仍然只是工具，不接管会话。
 
-    这里应该是计划选择 manager agent 模式：
     ```
     Main Agent:
     tools = [
+        update_plan,
+        request_clarification,
         call_plc_dev,
         call_plc_test,
         call_plc_formal,
@@ -104,6 +107,7 @@
         run_parallel_workers,
         read_artifact,
         run_quality_gate,
+        write_final_report,
         finish_task
     ]
     ```
@@ -132,17 +136,21 @@
         展示代码、测试报告、形式化验证报告、patch、final report
         ```
         这些接口都将提供给前端进行调用，前端只能走这些接口调用相关能力。
+
+        前端集成时请以 [Frontend API Usage Guide](frontend-api.md) 为调用手册；
+        该文档补充了任务创建、SSE 事件流、Artifact 读取、最终报告和 trace summary 的使用细节。
     - **后端实现（Main Agent Service）**  
         后端服务主要负责：
         ```
-        1. 构造 OpenAI Agents SDK Agent
+        1. 构造 OpenAI 兼容 Chat Completions 请求
         2. 注入 instructions
-        3. 注册 function tools
-        4. 运行 Runner
-        5. 处理 structured final output
-        6. 把 trace_id / task_id / worker_job_id 关联起来
+        3. 注册 function tool schemas
+        4. 执行 tool loop
+        5. 写入 main_agent.message / tool_called / tool_result 事件
+        6. 通过 write_final_report 写最终报告 artifact
+        7. 通过 finish_task 做受控终态变更
+        8. 把 trace_id / task_id / worker_job_id 关联起来
         ```
-        OpenAI Agents SDK 自带 tracing，可以记录 LLM generation、tool calls、handoffs、guardrails 和自定义事件，用于开发和生产环境调试、可视化和监控。  
         Main Agent Instructions 示例：
         ```
         你是 PLC 超级智能体，负责根据用户任务调度外部 worker 完成 PLC 开发、测试、形式化验证和修复。
@@ -155,7 +163,8 @@
             - run_parallel_workers：并行调用多个 worker
             - read_artifact：读取必要 artifact 摘要或内容
             - run_quality_gate：检查当前任务是否满足交付条件
-            - finish_task：生成最终交付结果
+            - write_final_report：写最终报告 artifact
+            - finish_task：执行受控终态变更
 
         调度规则：
             1. 需求不完整时，先追问用户。
@@ -453,7 +462,7 @@
     ```
     1. FastAPI / Node 后端骨架
     2. TaskState / WorkerJob / Artifact / Event 数据模型
-    3. OpenAI Agents SDK Main Agent
+    3. OpenAI-compatible tool-loop Main Agent
     4. function tools 封装
     5. Scheduler Guard
     6. Quality Gate
@@ -483,7 +492,7 @@
     ```
     Backend:
     - Python + FastAPI
-    - OpenAI Agents SDK
+    - OpenAI-compatible Chat Completions provider
     - PostgreSQL
     - Redis，可选，用于事件和运行中状态
     - SQLAlchemy / SQLModel

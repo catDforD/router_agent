@@ -17,6 +17,7 @@ from app.models.router_schema import (
     FailureReproduction,
     GateState,
     TaskState,
+    TaskTrace,
 )
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.gate_repo import GateResultRepository
@@ -306,7 +307,16 @@ def test_persisted_passing_run_writes_audit_records_and_success_marker(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
-    state = gate_task(task_id="task-passing")
+    state = gate_task(task_id="task-passing").model_copy(
+        deep=True,
+        update={
+            "trace": TaskTrace(
+                openai_trace_id="trace-001",
+                main_agent_run_ids=["main-agent-run-001"],
+                latest_main_agent_run_id="main-agent-run-001",
+            )
+        },
+    )
     TaskRepository(db_session).create_task(state)
 
     result = QualityGateService(
@@ -327,6 +337,10 @@ def test_persisted_passing_run_writes_audit_records_and_success_marker(
     assert gate_report.type == "gate_report"
     assert len(gate_results) == len(QUALITY_GATE_TYPES)
     assert [event.type for event in events] == ["gate.started", "gate.passed"]
+    assert events[0].correlation.openai_trace_id == "trace-001"
+    assert events[0].correlation.main_agent_run_id == "main-agent-run-001"
+    assert events[-1].correlation.openai_trace_id == "trace-001"
+    assert events[-1].correlation.main_agent_run_id == "main-agent-run-001"
     assert events[-1].correlation.artifact_ids == [gate_report.artifact_id]
 
 

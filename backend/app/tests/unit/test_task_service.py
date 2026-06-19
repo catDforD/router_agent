@@ -156,8 +156,13 @@ def test_append_user_message_stores_artifact_and_task_updated_event(
 def test_cancel_task_updates_state_and_emits_event(
     db_session: Session,
     service: TaskService,
+    tmp_path: Path,
 ) -> None:
     task = service.create_task(message="Create pump logic.").task
+    started = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+    ).start_main_agent_run(task.task_id)
 
     cancelled = service.cancel_task(task.task_id)
     events = EventService(db_session).list_visible_events(task.task_id)
@@ -165,7 +170,16 @@ def test_cancel_task_updates_state_and_emits_event(
     assert cancelled.status == "cancelled"
     assert cancelled.phase == "completed"
     assert cancelled.completed_at is not None
-    assert [event.type for event in events] == ["task.created", "task.cancelled"]
+    assert [event.type for event in events] == [
+        "task.created",
+        "main_agent.started",
+        "task.cancelled",
+    ]
+    assert events[-1].correlation.openai_trace_id == started.trace.openai_trace_id
+    assert (
+        events[-1].correlation.main_agent_run_id
+        == started.trace.latest_main_agent_run_id
+    )
 
 
 def test_cancel_task_is_idempotent_when_already_cancelled(

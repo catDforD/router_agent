@@ -71,7 +71,7 @@ class GateResultRepository:
         rows = self.session.execute(
             select(GateResultRow)
             .where(GateResultRow.task_id == task_id)
-            .order_by(GateResultRow.created_at)
+            .order_by(GateResultRow.created_at, GateResultRow.id)
         ).scalars()
         return [self._record_from_row(row) for row in rows]
 

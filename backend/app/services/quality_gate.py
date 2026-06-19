@@ -190,7 +190,7 @@ class QualityGateService:
 
     def run_quality_gate(self, task_id: str) -> QualityGateRunResult:
         started_at = utc_now()
-        self.task_repository.get_task(task_id)
+        task = self.task_repository.get_task(task_id)
         self.event_service.append_event(
             _build_gate_event(
                 task_id=task_id,
@@ -199,6 +199,8 @@ class QualityGateService:
                 message="Quality Gate started evaluating final delivery readiness.",
                 created_at=started_at,
                 artifact_ids=None,
+                openai_trace_id=task.trace.openai_trace_id,
+                main_agent_run_id=task.trace.latest_main_agent_run_id,
                 payload={"task_id": task_id},
             )
         )
@@ -242,6 +244,8 @@ class QualityGateService:
                 message=assessment.message,
                 created_at=started_at,
                 artifact_ids=[report_artifact.artifact_id],
+                openai_trace_id=task_after_report.trace.openai_trace_id,
+                main_agent_run_id=task_after_report.trace.latest_main_agent_run_id,
                 payload={
                     "task_id": task_id,
                     "status": assessment.status,
@@ -562,6 +566,8 @@ def _build_gate_event(
     created_at: datetime,
     artifact_ids: list[str] | None,
     payload: dict[str, Any],
+    openai_trace_id: str | None = None,
+    main_agent_run_id: str | None = None,
     severity: EventSeverity = EventSeverity.INFO,
 ) -> Any:
     from app.models.router_schema import RouterEvent
@@ -577,7 +583,11 @@ def _build_gate_event(
         visibility=EventVisibility.USER,
         title=title,
         message=message,
-        correlation=EventCorrelation(artifact_ids=artifact_ids),
+        correlation=EventCorrelation(
+            openai_trace_id=openai_trace_id,
+            main_agent_run_id=main_agent_run_id,
+            artifact_ids=artifact_ids,
+        ),
         payload=payload,
         created_at=created_at,
     )

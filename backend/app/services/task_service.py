@@ -210,11 +210,16 @@ class TaskService:
 
         now = utc_now()
         cancelled = task.model_copy(
+            deep=True,
             update={
                 "status": TaskStatus.CANCELLED.value,
                 "phase": TaskPhase.COMPLETED.value,
                 "updated_at": now,
                 "completed_at": now,
+                "active_worker_jobs": [],
+                "runtime_limits": task.runtime_limits.model_copy(
+                    update={"active_parallel_workers": 0}
+                ),
             }
         )
         self.task_repository.update_task_state(cancelled)
@@ -231,6 +236,8 @@ class TaskService:
                     "status": TaskStatus.CANCELLED.value,
                 },
                 source_id=user_id,
+                openai_trace_id=task.trace.openai_trace_id,
+                main_agent_run_id=task.trace.latest_main_agent_run_id,
             )
         )
         return self.task_repository.get_task(task_id)
@@ -319,6 +326,8 @@ class TaskService:
         artifact_ids: list[str] | None,
         payload: dict[str, Any],
         source_id: str | None,
+        openai_trace_id: str | None = None,
+        main_agent_run_id: str | None = None,
     ) -> RouterEvent:
         return RouterEvent(
             schema_version="router.v1",
@@ -331,7 +340,11 @@ class TaskService:
             visibility=EventVisibility.USER,
             title=title,
             message=message,
-            correlation=EventCorrelation(artifact_ids=artifact_ids),
+            correlation=EventCorrelation(
+                openai_trace_id=openai_trace_id,
+                main_agent_run_id=main_agent_run_id,
+                artifact_ids=artifact_ids,
+            ),
             payload=payload,
             created_at=created_at,
         )

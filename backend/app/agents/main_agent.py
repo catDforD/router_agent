@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 import json
+import logging
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -52,6 +53,12 @@ from app.agents.instructions import (
     build_orchestration_instructions,
     build_state_view_prompt,
 )
+from app.agents.chat_completions import (
+    MainAgentChatClient,
+    MainAgentProviderConfigurationError,
+    MainAgentProviderError,
+    OpenAICompatibleChatClient,
+)
 from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.output_schema import (
     IntakeClassificationOutput,
@@ -60,8 +67,17 @@ from app.agents.output_schema import (
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
 )
-from app.agents.tools import AgentToolContext, get_main_agent_tools
+from app.agents.tools import (
+    AgentToolContext,
+    AgentToolResult,
+    ToolError,
+    ToolStatus,
+    call_main_agent_tool,
+    get_main_agent_tool_specs,
+    get_main_agent_tools,
+)
 from app.core.ids import new_event_id, prefixed_id
+from app.core.logging import log_with_context
 from app.core.time import utc_now
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
@@ -91,6 +107,7 @@ from app.services.scheduler_guard import SchedulerGuardViolation, validate_finis
 
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
+LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
     TaskStatus.PARTIAL_FAILED.value,
@@ -123,6 +140,8 @@ DIFFICULTY_BY_RANK = {
     for level, rank in DIFFICULTY_RANK.items()
 }
 MAIN_AGENT_TOOL_NAMES = (
+    "update_plan",
+    "request_clarification",
     "call_plc_dev",
     "call_plc_test",
     "call_plc_formal",
@@ -130,6 +149,7 @@ MAIN_AGENT_TOOL_NAMES = (
     "run_parallel_workers",
     "read_artifact",
     "run_quality_gate",
+    "write_final_report",
     "finish_task",
 )
 
@@ -145,17 +165,6 @@ class MainAgentRunnerUnavailableError(MainAgentServiceError):
 class MainAgentRunner(Protocol):
     """Runner boundary used by production SDK calls and deterministic tests."""
 
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        """Return structured intake classification output."""
-
     def run_orchestration(
         self,
         *,
@@ -166,6 +175,166 @@ class MainAgentRunner(Protocol):
         run_config: Any,
     ) -> MainAgentEpisodeOutput:
         """Return structured orchestration episode output."""
+
+
+@dataclass(frozen=True)
+class ToolLoopAgent:
+    """Minimal agent descriptor for the Chat Completions tool-loop runner."""
+
+    name: str
+    instructions: str
+    model: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolLoopRunConfig:
+    """Run metadata shape shared with deterministic runner tests."""
+
+    workflow_name: str
+    trace_id: str | None
+    group_id: str
+    trace_metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ChatToolCall:
+    tool_call_id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class _AssistantTurn:
+    content: str | None
+    tool_calls: list[_ChatToolCall]
+
+
+class OpenAICompatibleToolLoopRunner:
+    """Production Main Agent runner using OpenAI-compatible Chat Completions."""
+
+    uses_tool_loop_side_effects = True
+
+    def __init__(
+        self,
+        *,
+        chat_client: MainAgentChatClient | None = None,
+        stream: bool = True,
+    ) -> None:
+        self.chat_client = chat_client or OpenAICompatibleChatClient.from_settings()
+        self.stream = stream
+
+    def run_orchestration(
+        self,
+        *,
+        agent: Any,
+        input_text: str,
+        context: AgentToolContext,
+        max_turns: int,
+        run_config: Any,
+    ) -> MainAgentEpisodeOutput:
+        model = getattr(agent, "model", None)
+        if not model:
+            raise MainAgentProviderConfigurationError(
+                "MAIN_AGENT_MODEL is required for Main Agent execution"
+            )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": getattr(agent, "instructions", "")},
+            {"role": "user", "content": input_text},
+        ]
+        tools = get_main_agent_tool_specs()
+        recorder = context.observability_recorder
+        task_id = run_config.group_id
+
+        for _ in range(max_turns):
+            turn_index = (
+                recorder.start_turn(phase="orchestration")
+                if recorder is not None
+                else None
+            )
+            assistant_turn = self._complete_turn(
+                messages=messages,
+                tools=tools,
+                model=model,
+                recorder=recorder,
+            )
+            assistant_message = _assistant_message_for_history(assistant_turn)
+            messages.append(assistant_message)
+
+            if assistant_turn.content and recorder is not None:
+                recorder.record_message(
+                    content=assistant_turn.content,
+                    turn_index=turn_index,
+                )
+
+            for tool_call in assistant_turn.tool_calls:
+                tool_result = _execute_tool_call(
+                    context=context,
+                    task_id=task_id,
+                    tool_call=tool_call,
+                    recorder=recorder,
+                    turn_index=turn_index,
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.tool_call_id,
+                        "content": _tool_result_content(tool_result),
+                    }
+                )
+                current = TaskRepository(context.session).get_task(task_id)
+                if _is_terminal(current) or _value(current.status) == (
+                    TaskStatus.WAITING_USER.value
+                ):
+                    return episode_output_from_task(
+                        current,
+                        main_agent_run_id=(
+                            current.trace.latest_main_agent_run_id or "not-started"
+                        ),
+                        summary=_episode_summary_from_tool_result(tool_result),
+                    )
+
+        if recorder is not None:
+            recorder.record_error(
+                error_code="MAIN_AGENT_MAX_TURNS_EXCEEDED",
+                message=f"Main Agent exceeded max turn limit ({max_turns}).",
+            )
+        raise MaxTurnsExceeded(f"Main Agent exceeded max turn limit ({max_turns})")
+
+    def _complete_turn(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        recorder: MainAgentObservabilityRecorder | None,
+    ) -> _AssistantTurn:
+        try:
+            response = self.chat_client.complete(
+                messages=messages,
+                tools=tools,
+                model=model,
+                stream=self.stream,
+            )
+        except MainAgentProviderError:
+            if not self.stream:
+                raise
+            if recorder is not None:
+                recorder.record_error(
+                    error_code="MAIN_AGENT_STREAMING_FALLBACK",
+                    message=(
+                        "Streaming Main Agent request failed; retrying the same "
+                        "turn without streaming."
+                    ),
+                )
+            response = self.chat_client.complete(
+                messages=messages,
+                tools=tools,
+                model=model,
+                stream=False,
+            )
+
+        return _assistant_turn_from_response(response)
 
 
 class OpenAIAgentsRunner:
@@ -291,6 +460,9 @@ class MainAgentService:
         mock_scenario: str = DEFAULT_MOCK_SCENARIO,
         model: str | None = None,
         max_turns: int = DEFAULT_MAIN_AGENT_MAX_TURNS,
+        provider: str = "openai_compatible",
+        stream: bool = True,
+        chat_client: MainAgentChatClient | None = None,
         runner: MainAgentRunner | None = None,
         checkpoint: Callable[[], None] | None = None,
     ) -> None:
@@ -300,7 +472,13 @@ class MainAgentService:
         self.mock_scenario = mock_scenario
         self.model = model
         self.max_turns = max_turns
-        self.runner = runner or OpenAIAgentsRunner()
+        self.provider = provider
+        self.stream = stream
+        self.runner = runner or _default_runner(
+            provider=provider,
+            stream=stream,
+            chat_client=chat_client,
+        )
         self.checkpoint = checkpoint
         self.task_repository = TaskRepository(session)
         self.event_service = EventService(session)
@@ -321,6 +499,14 @@ class MainAgentService:
                 main_agent_run_id=started.trace.latest_main_agent_run_id or "not-started",
                 summary="Terminal task was not re-run.",
             )
+        log_with_context(
+            LOGGER,
+            logging.INFO,
+            "Main Agent episode started",
+            task_id=task_id,
+            openai_trace_id=started.trace.openai_trace_id,
+            main_agent_run_id=started.trace.latest_main_agent_run_id,
+        )
 
         context = AgentToolContext(
             session=self.session,
@@ -342,43 +528,99 @@ class MainAgentService:
 
         try:
             current = started
-            if _needs_classification(current):
+            legacy_structured_runner = _uses_legacy_structured_runner(self.runner)
+            if legacy_structured_runner and _needs_classification(current):
                 current = self._run_and_apply_intake(current, context).task
                 if current.status == TaskStatus.WAITING_USER.value:
-                    return episode_output_from_task(
+                    output = episode_output_from_task(
                         current,
                         main_agent_run_id=current.trace.latest_main_agent_run_id
                         or "not-started",
                         summary="Task is waiting for user clarification.",
                     )
+                    log_with_context(
+                        LOGGER,
+                        logging.INFO,
+                        "Main Agent episode paused",
+                        task_id=task_id,
+                        openai_trace_id=current.trace.openai_trace_id,
+                        main_agent_run_id=current.trace.latest_main_agent_run_id,
+                        status=current.status,
+                    )
+                    return output
 
             if _is_terminal(current):
-                return episode_output_from_task(
+                output = episode_output_from_task(
                     current,
                     main_agent_run_id=current.trace.latest_main_agent_run_id
                     or "not-started",
                     summary="Task reached a terminal state during intake.",
                 )
+                log_with_context(
+                    LOGGER,
+                    logging.INFO,
+                    "Main Agent episode completed during intake",
+                    task_id=task_id,
+                    openai_trace_id=current.trace.openai_trace_id,
+                    main_agent_run_id=current.trace.latest_main_agent_run_id,
+                    status=current.status,
+                )
+                return output
 
             state_view = build_state_view(current)
             output = self.runner.run_orchestration(
-                agent=build_orchestration_agent(model=self.model),
+                agent=(
+                    build_orchestration_agent(model=self.model)
+                    if legacy_structured_runner
+                    else build_tool_loop_agent(model=self.model)
+                ),
                 input_text=build_state_view_prompt(state_view),
                 context=context,
                 max_turns=self.max_turns,
-                run_config=build_run_config(current, phase="orchestration"),
+                run_config=(
+                    build_run_config(current, phase="orchestration")
+                    if legacy_structured_runner
+                    else build_tool_loop_run_config(current, phase="orchestration")
+                ),
             )
-            return self._persist_orchestration_output(output, recorder)
+            persisted_output = (
+                output
+                if getattr(self.runner, "uses_tool_loop_side_effects", False)
+                else self._persist_orchestration_output(output, recorder)
+            )
+            log_with_context(
+                LOGGER,
+                logging.INFO,
+                "Main Agent episode completed",
+                task_id=task_id,
+                openai_trace_id=current.trace.openai_trace_id,
+                main_agent_run_id=current.trace.latest_main_agent_run_id,
+                final_task_status=persisted_output.final_task_status,
+            )
+            return persisted_output
         except MaxTurnsExceeded as exc:
             return self._record_agent_error(
                 task_id=task_id,
                 error_code="MAIN_AGENT_MAX_TURNS_EXCEEDED",
                 message=str(exc),
+                terminal_status=TaskStatus.FAILED.value,
             )
         except ModelBehaviorError as exc:
             return self._record_agent_error(
                 task_id=task_id,
                 error_code="MAIN_AGENT_MODEL_BEHAVIOR_ERROR",
+                message=str(exc),
+            )
+        except MainAgentProviderConfigurationError as exc:
+            return self._record_agent_error(
+                task_id=task_id,
+                error_code="MAIN_AGENT_PROVIDER_CONFIGURATION_ERROR",
+                message=str(exc),
+            )
+        except MainAgentProviderError as exc:
+            return self._record_agent_error(
+                task_id=task_id,
+                error_code="MAIN_AGENT_PROVIDER_ERROR",
                 message=str(exc),
             )
 
@@ -706,9 +948,20 @@ class MainAgentService:
         task_id: str,
         error_code: str,
         message: str,
+        terminal_status: str | None = None,
     ) -> MainAgentEpisodeOutput:
         task = self._fresh_task(task_id)
         if _is_terminal(task):
+            log_with_context(
+                LOGGER,
+                logging.ERROR,
+                "Main Agent error observed after terminal task",
+                task_id=task_id,
+                openai_trace_id=task.trace.openai_trace_id,
+                main_agent_run_id=task.trace.latest_main_agent_run_id,
+                error_code=error_code,
+                error_message=message,
+            )
             return episode_output_from_task(
                 task,
                 main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
@@ -717,6 +970,16 @@ class MainAgentService:
                 error_message=message,
             )
 
+        log_with_context(
+            LOGGER,
+            logging.ERROR,
+            "Main Agent episode failed",
+            task_id=task_id,
+            openai_trace_id=task.trace.openai_trace_id,
+            main_agent_run_id=task.trace.latest_main_agent_run_id,
+            error_code=error_code,
+            error_message=message,
+        )
         self.event_service.append_event(
             build_main_agent_event(
                 task_id=task_id,
@@ -734,6 +997,64 @@ class MainAgentService:
                 created_at=utc_now(),
             )
         )
+        if terminal_status is not None:
+            output = episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary=message or error_code,
+                final_task_status=terminal_status,
+                error_code=error_code,
+                error_message=message,
+            )
+            recorder = MainAgentObservabilityRecorder(
+                session=self.session,
+                artifact_root=self.artifact_root,
+                task_id=task_id,
+                openai_trace_id=task.trace.openai_trace_id,
+                main_agent_run_id=task.trace.latest_main_agent_run_id,
+                checkpoint=self.checkpoint,
+            )
+            final_report = recorder.write_final_report(output)
+            replay_log = recorder.write_replay_log(
+                final_output=output,
+                error={
+                    "error_code": error_code,
+                    "error_message": message,
+                },
+            )
+            recorder.record_completed(
+                output=output,
+                final_report=final_report,
+                replay_log=replay_log,
+            )
+            task = self._fresh_task_for_update(task_id)
+            now = utc_now()
+            updated = task.model_copy(
+                deep=True,
+                update={
+                    "status": terminal_status,
+                    "phase": TaskPhase.COMPLETED.value,
+                    "updated_at": now,
+                    "completed_at": now,
+                },
+            )
+            self.task_repository.update_task_state(updated)
+            self.event_service.append_event(
+                build_task_event(
+                    task_id=task_id,
+                    event_type=TERMINAL_EVENT_BY_STATUS[terminal_status],
+                    title=_terminal_event_title(terminal_status),
+                    message=f"The task was marked {terminal_status}.",
+                    openai_trace_id=updated.trace.openai_trace_id,
+                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
+                    payload={
+                        "task_id": task_id,
+                        "status": terminal_status,
+                        "error_code": error_code,
+                    },
+                    created_at=now,
+                )
+            )
         self._checkpoint()
         latest = self.task_repository.get_task(task_id)
         return episode_output_from_task(
@@ -769,6 +1090,14 @@ def build_intake_agent(*, model: str | None = None) -> Any:
     )
 
 
+def build_tool_loop_agent(*, model: str | None = None) -> ToolLoopAgent:
+    return ToolLoopAgent(
+        name=ORCHESTRATION_AGENT_NAME,
+        instructions=build_orchestration_instructions(),
+        model=model,
+    )
+
+
 def build_orchestration_agent(*, model: str | None = None) -> Any:
     _require_agents_sdk()
     return Agent(
@@ -787,6 +1116,20 @@ def _agent_output_schema(output_type: type[Any]) -> Any:
 def build_run_config(task: TaskState, *, phase: str) -> Any:
     _require_agents_sdk()
     return RunConfig(
+        workflow_name="Router Main Agent",
+        trace_id=task.trace.openai_trace_id,
+        group_id=task.task_id,
+        trace_metadata={
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "main_agent_run_id": task.trace.latest_main_agent_run_id or "",
+            "phase": phase,
+        },
+    )
+
+
+def build_tool_loop_run_config(task: TaskState, *, phase: str) -> ToolLoopRunConfig:
+    return ToolLoopRunConfig(
         workflow_name="Router Main Agent",
         trace_id=task.trace.openai_trace_id,
         group_id=task.task_id,
@@ -884,6 +1227,7 @@ def episode_output_from_task(
     summary: str,
     decisions: list[MainAgentDecision] | None = None,
     artifact_refs: list[MainAgentArtifactReference] | None = None,
+    final_task_status: TaskStatus | str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> MainAgentEpisodeOutput:
@@ -895,7 +1239,9 @@ def episode_output_from_task(
     return MainAgentEpisodeOutput(
         task_id=task.task_id,
         main_agent_run_id=main_agent_run_id,
-        final_task_status=task.status,
+        final_task_status=(
+            final_task_status if final_task_status is not None else task.status
+        ),
         phase=_value(task.phase),
         decisions=decisions or [],
         artifact_refs=artifact_refs or _all_artifact_refs(task.current_artifacts),
@@ -912,6 +1258,278 @@ def episode_output_from_task(
         error_code=error_code,
         error_message=error_message,
     )
+
+
+def _assistant_message_for_history(turn: _AssistantTurn) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant"}
+    if turn.content:
+        message["content"] = turn.content
+    if turn.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tool_call.tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                },
+            }
+            for tool_call in turn.tool_calls
+        ]
+    return message
+
+
+def _execute_tool_call(
+    *,
+    context: AgentToolContext,
+    task_id: str,
+    tool_call: _ChatToolCall,
+    recorder: MainAgentObservabilityRecorder | None,
+    turn_index: int | None,
+) -> AgentToolResult:
+    try:
+        arguments = _parse_tool_arguments(tool_call.arguments)
+    except ValueError as exc:
+        _record_unexecuted_tool_call(
+            recorder=recorder,
+            tool_call=tool_call,
+            arguments={"raw_arguments": tool_call.arguments},
+            turn_index=turn_index,
+            rationale_summary="Main Agent provided malformed tool arguments.",
+        )
+        result = AgentToolResult(
+            tool=tool_call.name or "unknown",
+            task_id=task_id,
+            status=ToolStatus.FAILED,
+            summary=str(exc),
+            error=ToolError(
+                error_code="invalid_tool_arguments",
+                message=str(exc),
+                retryable=True,
+            ),
+        )
+        if recorder is not None:
+            recorder.record_tool_result(
+                tool_name=tool_call.name or "unknown",
+                result=result,
+                turn_index=turn_index,
+            )
+        return result
+
+    unknown_tool = tool_call.name not in MAIN_AGENT_TOOL_NAMES
+    if unknown_tool:
+        _record_unexecuted_tool_call(
+            recorder=recorder,
+            tool_call=tool_call,
+            arguments=arguments,
+            turn_index=turn_index,
+            rationale_summary="Main Agent selected an unknown tool.",
+        )
+
+    try:
+        result = call_main_agent_tool(context, tool_call.name, arguments)
+        if unknown_tool and recorder is not None:
+            recorder.record_tool_result(
+                tool_name=tool_call.name or "unknown",
+                result=result,
+                turn_index=turn_index,
+            )
+        return result
+    except TypeError as exc:
+        _record_unexecuted_tool_call(
+            recorder=recorder,
+            tool_call=tool_call,
+            arguments=arguments,
+            turn_index=turn_index,
+            rationale_summary="Main Agent provided invalid tool arguments.",
+        )
+        result = AgentToolResult(
+            tool=tool_call.name,
+            task_id=task_id,
+            status=ToolStatus.REJECTED,
+            summary=f"Tool arguments failed validation: {exc}",
+            error=ToolError(
+                error_code="tool_argument_validation_error",
+                message=str(exc),
+                retryable=True,
+            ),
+        )
+    except Exception as exc:
+        _record_unexecuted_tool_call(
+            recorder=recorder,
+            tool_call=tool_call,
+            arguments=arguments,
+            turn_index=turn_index,
+            rationale_summary="Main Agent tool execution failed before applying side effects.",
+        )
+        result = AgentToolResult(
+            tool=tool_call.name,
+            task_id=task_id,
+            status=ToolStatus.FAILED,
+            summary=f"Tool execution failed: {exc}",
+            error=ToolError(
+                error_code=type(exc).__name__,
+                message=str(exc),
+                retryable=False,
+            ),
+        )
+
+    if recorder is not None:
+        recorder.record_tool_result(
+            tool_name=tool_call.name,
+            result=result,
+            turn_index=turn_index,
+        )
+    return result
+
+
+def _record_unexecuted_tool_call(
+    *,
+    recorder: MainAgentObservabilityRecorder | None,
+    tool_call: _ChatToolCall,
+    arguments: dict[str, Any],
+    turn_index: int | None,
+    rationale_summary: str,
+) -> None:
+    if recorder is None:
+        return
+    recorder.record_tool_call(
+        tool_name=tool_call.name or "unknown",
+        arguments=arguments,
+        rationale_summary=rationale_summary,
+        turn_index=turn_index,
+    )
+
+
+def _parse_tool_arguments(raw_arguments: str | None) -> dict[str, Any]:
+    if raw_arguments is None or raw_arguments == "":
+        return {}
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"tool arguments are not valid JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("tool arguments must decode to a JSON object")
+    return parsed
+
+
+def _tool_result_content(result: AgentToolResult) -> str:
+    return json.dumps(result.model_dump(mode="json"), ensure_ascii=True)
+
+
+def _episode_summary_from_tool_result(result: AgentToolResult) -> str:
+    if result.summary:
+        return result.summary
+    return f"Main Agent stopped after {result.tool}."
+
+
+def _assistant_turn_from_response(response: Any) -> _AssistantTurn:
+    if _has_choices(response):
+        return _assistant_turn_from_message(_first_choice_message(response))
+    return _assistant_turn_from_stream(response)
+
+
+def _assistant_turn_from_message(message: Any) -> _AssistantTurn:
+    return _AssistantTurn(
+        content=_content_to_text(_get_value(message, "content")),
+        tool_calls=[
+            _chat_tool_call_from_provider_call(call)
+            for call in (_get_value(message, "tool_calls") or [])
+        ],
+    )
+
+
+def _assistant_turn_from_stream(chunks: Any) -> _AssistantTurn:
+    content_parts: list[str] = []
+    tool_call_parts: dict[int, dict[str, str]] = {}
+    for chunk in chunks:
+        if not _has_choices(chunk):
+            continue
+        choice = _first_choice(chunk)
+        delta = _get_value(choice, "delta")
+        if delta is None:
+            continue
+        content = _content_to_text(_get_value(delta, "content"))
+        if content:
+            content_parts.append(content)
+        for call in _get_value(delta, "tool_calls") or []:
+            index = _get_value(call, "index")
+            if index is None:
+                index = len(tool_call_parts)
+            part = tool_call_parts.setdefault(
+                int(index),
+                {"id": "", "name": "", "arguments": ""},
+            )
+            call_id = _get_value(call, "id")
+            if call_id:
+                part["id"] = str(call_id)
+            function = _get_value(call, "function") or {}
+            name = _get_value(function, "name")
+            if name:
+                part["name"] += str(name)
+            arguments = _get_value(function, "arguments")
+            if arguments:
+                part["arguments"] += str(arguments)
+    return _AssistantTurn(
+        content="".join(content_parts).strip() or None,
+        tool_calls=[
+            _ChatToolCall(
+                tool_call_id=part["id"] or prefixed_id("tool-call"),
+                name=part["name"],
+                arguments=part["arguments"],
+            )
+            for _, part in sorted(tool_call_parts.items())
+        ],
+    )
+
+
+def _chat_tool_call_from_provider_call(call: Any) -> _ChatToolCall:
+    function = _get_value(call, "function") or {}
+    return _ChatToolCall(
+        tool_call_id=str(_get_value(call, "id") or prefixed_id("tool-call")),
+        name=str(_get_value(function, "name") or ""),
+        arguments=str(_get_value(function, "arguments") or "{}"),
+    )
+
+
+def _has_choices(value: Any) -> bool:
+    choices = _get_value(value, "choices")
+    return isinstance(choices, list) and bool(choices)
+
+
+def _first_choice_message(response: Any) -> Any:
+    return _get_value(_first_choice(response), "message")
+
+
+def _first_choice(response: Any) -> Any:
+    choices = _get_value(response, "choices")
+    if not isinstance(choices, list) or not choices:
+        raise MainAgentProviderError("Main Agent provider response has no choices")
+    return choices[0]
+
+
+def _get_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(field_name)
+    return getattr(value, field_name, None)
+
+
+def _content_to_text(content: Any) -> str | None:
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+        return "".join(parts).strip() or None
+    return str(content).strip() or None
 
 
 def build_main_agent_event(
@@ -1043,9 +1661,31 @@ def _available_tools(task: TaskState) -> list[str]:
         return []
     if _value(task.status) == TaskStatus.WAITING_USER.value:
         return []
-    if _needs_classification(task):
-        return ["intake_classification"]
     return list(MAIN_AGENT_TOOL_NAMES)
+
+
+def _default_runner(
+    *,
+    provider: str,
+    stream: bool,
+    chat_client: MainAgentChatClient | None,
+) -> MainAgentRunner:
+    if provider == "legacy_openai_agents":
+        return OpenAIAgentsRunner()
+    return OpenAICompatibleToolLoopRunner(
+        chat_client=chat_client,
+        stream=stream,
+    )
+
+
+def _uses_legacy_structured_runner(runner: MainAgentRunner) -> bool:
+    return (
+        isinstance(runner, OpenAIAgentsRunner)
+        or (
+            hasattr(runner, "run_intake")
+            and not getattr(runner, "uses_tool_loop_side_effects", False)
+        )
+    )
 
 
 def _needs_classification(task: TaskState) -> bool:

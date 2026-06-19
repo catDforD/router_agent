@@ -1,9 +1,11 @@
 # 湖州 Router 方案
 
+> 当前实现状态：Router Main Agent 已经改为 OpenAI 兼容 Chat Completions tool loop。它不依赖 OpenAI Responses API，也不依赖 `response_format` 结构化输出；最终报告和终态变更通过 `write_final_report`、`finish_task` 等工具完成。本文仍保留原始设计思路，但涉及 OpenAI Agents SDK 的描述应按这一实现状态理解。
+
 1.  **Agent + 外部 Worker 架构**
 
     :::
-    超级智能体 Main Agent：由 OpenAI Agents SDK 实现，像 Claude Code / Codex 的主线程
+    超级智能体 Main Agent：通过 OpenAI 兼容 Chat Completions + tool calling 实现，像 Claude Code / Codex 的主线程
 
       - 理解用户意图
 
@@ -26,7 +28,7 @@
       - plc-repair：基于测试失败/形式化反例做最小修复
     :::
 
-    这里需要明确边界：`plc-dev`、`plc-test`、`plc-formal`、`plc-repair` 不由 Router 直接实现，也不作为 OpenAI Agents SDK 里的 handoff agent。Router 只通过既有接口调用它们，最好封装为 MCP tools。Main Agent 负责规划和综合，外部 worker 负责专业能力。
+    这里需要明确边界：`plc-dev`、`plc-test`、`plc-formal`、`plc-repair` 不由 Router 直接实现，也不接管 Main Agent 会话。Router 只通过 MCP tools 调用它们。Main Agent 负责规划和综合，外部 worker 负责专业能力。
 
 2.  **架构设计**
 
@@ -42,7 +44,7 @@
     External Workers = plc-dev / plc-test / plc-formal / plc-repair
     :::
 
-    OpenAI Agents SDK 主要用于实现 Main Agent：包括工具调用、结构化输出、上下文管理和 trace。Backend Runtime 仍然由我们自己实现，负责把 Main Agent 的决策变成受控执行。
+    Main Agent 使用普通 tool calling 做多轮编排。Backend Runtime 仍然由我们自己实现，负责把 Main Agent 的决策变成受控执行、持久化事件和 artifact，并对关键状态变更做二次校验。
 
     理想的执行流程：
 
@@ -133,20 +135,20 @@
 
     ```typescript
     type MainAgentTool =
+      | "update_plan"
+      | "request_clarification"
       | "call_plc_dev"
       | "call_plc_test"
       | "call_plc_formal"
       | "call_plc_repair"
-      | "spawn_worker_jobs_parallel"
+      | "run_parallel_workers"
       | "read_artifact"
-      | "write_artifact"
-      | "compare_artifacts"
       | "run_quality_gate"
-      | "ask_user_clarification"
+      | "write_final_report"
       | "finish_task";
     ```
 
-    这些工具由 Backend Runtime 提供给 OpenAI Agents SDK。Main Agent 可以选择工具和参数，但并发上限、修复轮次、schema 校验、artifact 写入权限由 Runtime 强制执行。
+    这些工具由 Backend Runtime 提供给 Main Agent。Main Agent 可以选择工具和参数，但并发上限、修复轮次、schema 校验、artifact 写入权限由 Runtime 强制执行。
 
 5.  **Main Agent 调度策略**
 
@@ -269,4 +271,4 @@
 
     - `Trace Mapping`：把 OpenAI trace、worker job id、artifact id 关联起来，方便回放和审计
 
-    这样实现后，OpenAI Agents SDK 负责 Main Agent 的智能决策；Backend Runtime 负责工程上的确定性约束；外部 worker 通过 MCP tools 提供专业能力。
+    这样实现后，OpenAI 兼容 tool loop 负责 Main Agent 的智能决策；Backend Runtime 负责工程上的确定性约束；外部 worker 通过 MCP tools 提供专业能力。

@@ -23,6 +23,18 @@ class Settings(BaseSettings):
         validation_alias="ARTIFACT_ROOT",
     )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    main_agent_provider: str = Field(
+        default="openai_compatible",
+        validation_alias="MAIN_AGENT_PROVIDER",
+    )
+    main_agent_api_key: str | None = Field(
+        default=None,
+        validation_alias="MAIN_AGENT_API_KEY",
+    )
+    main_agent_base_url: str | None = Field(
+        default=None,
+        validation_alias="MAIN_AGENT_BASE_URL",
+    )
     main_agent_model: str | None = Field(
         default=None,
         validation_alias="MAIN_AGENT_MODEL",
@@ -31,6 +43,15 @@ class Settings(BaseSettings):
         default=20,
         ge=1,
         validation_alias="MAIN_AGENT_MAX_TURNS",
+    )
+    main_agent_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        validation_alias="MAIN_AGENT_TIMEOUT_SECONDS",
+    )
+    main_agent_stream: bool = Field(
+        default=True,
+        validation_alias="MAIN_AGENT_STREAM",
     )
     mcp_mode: str = Field(default="mock", validation_alias="MCP_MODE")
     plc_worker_mcp_url: str = Field(
@@ -91,6 +112,17 @@ class Settings(BaseSettings):
             raise ValueError("mcp_mode must be 'mock', 'real', or 'hybrid'")
         return normalized
 
+    @field_validator("main_agent_provider")
+    @classmethod
+    def normalize_main_agent_provider(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"openai_compatible", "legacy_openai_agents"}:
+            raise ValueError(
+                "main_agent_provider must be 'openai_compatible' or "
+                "'legacy_openai_agents'"
+            )
+        return normalized
+
     @field_validator(
         "plc_dev_mode",
         "plc_test_mode",
@@ -112,7 +144,7 @@ class Settings(BaseSettings):
             return self
         return self
 
-    def redacted_diagnostics(self) -> dict[str, str | int | None]:
+    def redacted_diagnostics(self) -> dict[str, str | int | bool | None]:
         """Return non-secret settings useful for local diagnostics."""
 
         return {
@@ -125,6 +157,13 @@ class Settings(BaseSettings):
             "plc_test_mode": self.plc_test_mode,
             "plc_formal_mode": self.plc_formal_mode,
             "plc_repair_mode": self.plc_repair_mode,
+            "main_agent_provider": self.main_agent_provider,
+            "main_agent_base_url": _redacted_url(self.main_agent_base_url),
+            "main_agent_model": self.main_agent_model,
+            "main_agent_timeout_seconds": self.main_agent_timeout_seconds,
+            "main_agent_max_turns": self.main_agent_max_turns,
+            "main_agent_stream": self.main_agent_stream,
+            "main_agent_api_key": _redacted(self.main_agent_api_key),
             "deepseek_base_url": self.deepseek_base_url,
             "deepseek_model": self.deepseek_model,
             "deepseek_timeout_seconds": self.deepseek_timeout_seconds,
@@ -147,3 +186,15 @@ def _redacted(value: str | None) -> str | None:
     if len(value) <= 8:
         return "***"
     return f"{value[:4]}...{value[-4:]}"
+
+
+def _redacted_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if "@" not in value:
+        return value
+    scheme, _, rest = value.partition("://")
+    if not rest:
+        return value
+    _, _, host_path = rest.rpartition("@")
+    return f"{scheme}://[redacted]@{host_path}" if scheme else f"[redacted]@{host_path}"
