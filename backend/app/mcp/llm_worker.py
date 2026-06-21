@@ -10,6 +10,8 @@ from typing import Any, Protocol
 from openai import OpenAI
 
 from app.core.config import Settings, get_settings
+from app.core.ids import prefixed_id
+from app.core.time import utc_now
 from app.mcp.draft import (
     LlmWorkerDraftOutput,
     McpDraftValidationError,
@@ -578,10 +580,6 @@ def _normalize_artifact_write(
 
 
 def _normalize_assumption(value: Any, worker_type: str) -> Any:
-    if not isinstance(value, dict):
-        return value
-    assumption = dict(value)
-    source = _value(assumption.get("source", worker_type))
     source_map = {
         "plc_dev": WorkerType.PLC_DEV.value,
         "plc_dev_agent": WorkerType.PLC_DEV.value,
@@ -592,7 +590,22 @@ def _normalize_assumption(value: Any, worker_type: str) -> Any:
         "plc_repair": WorkerType.PLC_REPAIR.value,
         "plc_repair_agent": WorkerType.PLC_REPAIR.value,
     }
+    now = utc_now()
+    if isinstance(value, str):
+        return {
+            "assumption_id": prefixed_id("assumption"),
+            "text": value,
+            "source": source_map.get(worker_type, worker_type),
+            "created_at": now,
+        }
+    if not isinstance(value, dict):
+        return value
+    assumption = dict(value)
+    source = _value(assumption.get("source", worker_type))
     assumption["source"] = source_map.get(source, source)
+    assumption.setdefault("assumption_id", prefixed_id("assumption"))
+    assumption.setdefault("text", assumption.get("summary") or assumption.get("message") or "")
+    assumption.setdefault("created_at", now)
     return assumption
 
 
