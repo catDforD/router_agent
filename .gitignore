@@ -31,6 +31,8 @@ frontend/node_modules/
 data/
 eval_report.md
 output/
+docs (2).zip
+docs/assets/
 
 # Local configuration and secrets
 .env
