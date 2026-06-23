@@ -331,10 +331,10 @@ def test_event_stream_replays_main_agent_observability_events(
 
     assert response.status_code == 200
     body = response.text
-    assert "event: main_agent.message\n" in body
-    assert "event: main_agent.tool_called\n" in body
-    assert "event: main_agent.tool_result\n" in body
-    assert "event: main_agent.completed\n" in body
+    assert "event: agent.message\n" in body
+    assert "event: agent.tool_called\n" in body
+    assert "event: agent.tool_result\n" in body
+    assert "event: agent.completed\n" in body
     assert "event-main-agent-message" in body
     assert "event-main-agent-call" in body
     assert "event-main-agent-result" in body

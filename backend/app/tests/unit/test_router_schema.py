@@ -47,7 +47,7 @@ def test_valid_task_state_can_be_created() -> None:
 )
 def test_invalid_schema_version_is_rejected(file_name: str, model: type) -> None:
     payload = load_fixture(file_name)
-    payload["schema_version"] = "router.v2"
+    payload["schema_version"] = "router.v3"
 
     with pytest.raises(ValidationError):
         model.model_validate(payload)

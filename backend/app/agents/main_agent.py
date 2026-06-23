@@ -74,6 +74,7 @@ from app.agents.tools import (
     ToolStatus,
     call_main_agent_tool,
     get_main_agent_tool_specs,
+    get_main_agent_tool_names,
     get_main_agent_tools,
 )
 from app.core.ids import new_event_id, prefixed_id
@@ -81,11 +82,14 @@ from app.core.logging import log_with_context
 from app.core.time import utc_now
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
+    AgentRunState,
     ArtifactRef,
     ClarificationQuestion,
     CurrentArtifacts,
+    DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
     DifficultyProfile,
+    ExecutionPolicy,
     EventCorrelation,
     EventSeverity,
     EventSource,
@@ -100,10 +104,11 @@ from app.models.router_schema import (
     TaskStatus,
     TaskTrace,
     TaskType,
+    WorkspaceContext,
 )
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
-from app.services.scheduler_guard import SchedulerGuardViolation, validate_finish_task
+from app.services.scheduler_guard import SchedulerGuardViolation
 
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
@@ -139,19 +144,7 @@ DIFFICULTY_BY_RANK = {
     rank: level
     for level, rank in DIFFICULTY_RANK.items()
 }
-MAIN_AGENT_TOOL_NAMES = (
-    "update_plan",
-    "request_clarification",
-    "call_plc_dev",
-    "call_plc_test",
-    "call_plc_formal",
-    "call_plc_repair",
-    "run_parallel_workers",
-    "read_artifact",
-    "run_quality_gate",
-    "write_final_report",
-    "finish_task",
-)
+MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
 
 
 class MainAgentServiceError(Exception):
@@ -462,6 +455,10 @@ class MainAgentService:
         max_turns: int = DEFAULT_MAIN_AGENT_MAX_TURNS,
         provider: str = "openai_compatible",
         stream: bool = True,
+        workspace_root: Path | None = None,
+        execution_mode: str = "disabled",
+        command_timeout_seconds: int = 120,
+        tool_output_max_chars: int = 12_000,
         chat_client: MainAgentChatClient | None = None,
         runner: MainAgentRunner | None = None,
         checkpoint: Callable[[], None] | None = None,
@@ -474,6 +471,10 @@ class MainAgentService:
         self.max_turns = max_turns
         self.provider = provider
         self.stream = stream
+        self.workspace_root = workspace_root
+        self.execution_mode = execution_mode
+        self.command_timeout_seconds = command_timeout_seconds
+        self.tool_output_max_chars = tool_output_max_chars
         self.runner = runner or _default_runner(
             provider=provider,
             stream=stream,
@@ -511,6 +512,10 @@ class MainAgentService:
         context = AgentToolContext(
             session=self.session,
             artifact_root=self.artifact_root,
+            workspace_root=_workspace_root_for_task(started, self.workspace_root),
+            execution_mode=self.execution_mode,
+            command_timeout_seconds=self.command_timeout_seconds,
+            tool_output_max_chars=self.tool_output_max_chars,
             mcp_mode=self.mcp_mode,
             mock_scenario=self.mock_scenario,
             report_first_finalization=True,
@@ -547,6 +552,7 @@ class MainAgentService:
                         main_agent_run_id=current.trace.latest_main_agent_run_id,
                         status=current.status,
                     )
+                    self._complete_latest_agent_run(task_id, "waiting_user")
                     return output
 
             if _is_terminal(current):
@@ -564,6 +570,10 @@ class MainAgentService:
                     openai_trace_id=current.trace.openai_trace_id,
                     main_agent_run_id=current.trace.latest_main_agent_run_id,
                     status=current.status,
+                )
+                self._complete_latest_agent_run(
+                    task_id,
+                    _agent_run_status_from_final_status(_value(current.status)),
                 )
                 return output
 
@@ -587,6 +597,12 @@ class MainAgentService:
                 output
                 if getattr(self.runner, "uses_tool_loop_side_effects", False)
                 else self._persist_orchestration_output(output, recorder)
+            )
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(
+                    _value(persisted_output.final_task_status)
+                ),
             )
             log_with_context(
                 LOGGER,
@@ -632,6 +648,21 @@ class MainAgentService:
         now = utc_now()
         openai_trace_id = task.trace.openai_trace_id or gen_trace_id()
         main_agent_run_id = new_main_agent_run_id()
+        workspace_root = _workspace_root_for_task(task, self.workspace_root)
+        workspace = (
+            WorkspaceContext(
+                root=str(workspace_root),
+                current_directory=str(workspace_root),
+                writable=self.execution_mode == "local_full_access",
+            )
+            if workspace_root is not None
+            else task.workspace
+        )
+        execution_policy = ExecutionPolicy(
+            mode=self.execution_mode,
+            command_timeout_seconds=self.command_timeout_seconds,
+            tool_output_max_chars=self.tool_output_max_chars,
+        )
         main_agent_run_ids = [
             *task.trace.main_agent_run_ids,
             main_agent_run_id,
@@ -644,6 +675,19 @@ class MainAgentService:
                     main_agent_run_ids=main_agent_run_ids,
                     latest_main_agent_run_id=main_agent_run_id,
                 ),
+                "workspace": workspace,
+                "execution_policy": execution_policy,
+                "agent_runs": [
+                    *task.agent_runs,
+                    AgentRunState(
+                        agent_run_id=main_agent_run_id,
+                        status="running",
+                        workspace=workspace,
+                        execution_policy=execution_policy,
+                        tool_calls=[],
+                        started_at=now,
+                    ),
+                ],
                 "started_at": task.started_at or now,
                 "updated_at": now,
             },
@@ -662,6 +706,12 @@ class MainAgentService:
                     "main_agent_run_id": main_agent_run_id,
                     "phase": _value(task.phase),
                     "status": _value(task.status),
+                    "workspace": (
+                        workspace.model_dump(mode="json")
+                        if workspace is not None
+                        else None
+                    ),
+                    "execution_policy": execution_policy.model_dump(mode="json"),
                 },
                 created_at=now,
             )
@@ -912,7 +962,6 @@ class MainAgentService:
         if _is_terminal(task) or final_status not in TERMINAL_EVENT_BY_STATUS:
             return task
 
-        validate_finish_task(task, final_status)
         now = utc_now()
         updated = task.model_copy(
             deep=True,
@@ -942,6 +991,34 @@ class MainAgentService:
         self._checkpoint()
         return self._fresh_task(output.task_id)
 
+    def _complete_latest_agent_run(
+        self,
+        task_id: str,
+        status: str,
+    ) -> TaskState:
+        task = self._fresh_task_for_update(task_id)
+        latest_run_id = task.trace.latest_main_agent_run_id
+        if latest_run_id is None:
+            return task
+
+        now = utc_now()
+        updated_runs = [
+            run.model_copy(update={"status": status, "completed_at": now})
+            if run.agent_run_id == latest_run_id
+            else run
+            for run in task.agent_runs
+        ]
+        updated = task.model_copy(
+            deep=True,
+            update={
+                "agent_runs": updated_runs,
+                "updated_at": now,
+            },
+        )
+        self.task_repository.update_task_state(updated)
+        self._checkpoint()
+        return self._fresh_task(task_id)
+
     def _record_agent_error(
         self,
         *,
@@ -952,6 +1029,10 @@ class MainAgentService:
     ) -> MainAgentEpisodeOutput:
         task = self._fresh_task(task_id)
         if _is_terminal(task):
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(_value(task.status)),
+            )
             log_with_context(
                 LOGGER,
                 logging.ERROR,
@@ -1055,6 +1136,12 @@ class MainAgentService:
                     created_at=now,
                 )
             )
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(terminal_status),
+            )
+        else:
+            self._complete_latest_agent_run(task_id, "failed")
         self._checkpoint()
         latest = self.task_repository.get_task(task_id)
         return episode_output_from_task(
@@ -1164,6 +1251,17 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
         },
         "gates": task.gates.model_dump(mode="json"),
         "current_artifacts": _current_artifact_view(task.current_artifacts),
+        "workspace": (
+            task.workspace.model_dump(mode="json")
+            if task.workspace is not None
+            else None
+        ),
+        "execution_policy": (
+            task.execution_policy.model_dump(mode="json")
+            if task.execution_policy is not None
+            else None
+        ),
+        "agent_runs": [run.model_dump(mode="json") for run in task.agent_runs],
         "open_failures": _failure_summaries(task.failures),
         "repair_rounds": (
             f"{task.runtime_limits.repair_rounds}/"
@@ -1183,6 +1281,27 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
         "available_tools": _available_tools(task),
         "trace": task.trace.model_dump(mode="json"),
     }
+
+
+def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
+    if task.workspace is not None:
+        return Path(task.workspace.root)
+    if task.project_context.workspace_root:
+        return Path(task.project_context.workspace_root)
+    return fallback
+
+
+def _agent_run_status_from_final_status(status: str) -> str:
+    if status in {
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.PARTIAL_FAILED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELLED.value,
+    }:
+        return status
+    if status == TaskStatus.WAITING_USER.value:
+        return status
+    return TaskStatus.FAILED.value
 
 
 def normalize_classification(
@@ -1547,7 +1666,7 @@ def build_main_agent_event(
     failure_ids: list[str] | None = None,
 ) -> RouterEvent:
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version=DEFAULT_SCHEMA_VERSION,
         event_id=new_event_id(),
         task_id=task_id,
         seq=0,
@@ -1583,7 +1702,7 @@ def build_task_event(
     created_at: Any,
 ) -> RouterEvent:
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version=DEFAULT_SCHEMA_VERSION,
         event_id=new_event_id(),
         task_id=task_id,
         seq=0,

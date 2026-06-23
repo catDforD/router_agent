@@ -19,6 +19,7 @@ from app.models.router_schema import (
     ArtifactRef,
     ArtifactType,
     ArtifactVisibility,
+    DEFAULT_SCHEMA_VERSION,
     EventCorrelation,
     EventSeverity,
     EventSource,
@@ -231,7 +232,7 @@ class MainAgentObservabilityRecorder:
     ) -> ArtifactRef:
         content = {
             "kind": "main_agent_replay_log",
-            "schema_version": "router.v1",
+            "schema_version": DEFAULT_SCHEMA_VERSION,
             "created_at": utc_now().isoformat(),
             "task_id": self.task_id,
             "main_agent_run_id": self.main_agent_run_id,
@@ -325,7 +326,7 @@ class MainAgentObservabilityRecorder:
         failure_ids: list[str] | None = None,
     ) -> RouterEvent:
         event = RouterEvent(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             event_id=new_event_id(),
             task_id=self.task_id,
             seq=0,

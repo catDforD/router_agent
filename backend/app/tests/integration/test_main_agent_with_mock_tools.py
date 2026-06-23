@@ -363,7 +363,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
     event_types = [event.type for event in events]
-    completed_event = next(event for event in events if event.type == "main_agent.completed")
+    completed_event = next(event for event in events if event.type == "agent.completed")
     artifact_rows = list(
         db_session.execute(select(ArtifactRow).where(ArtifactRow.task_id == task_id))
         .scalars()
@@ -381,7 +381,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     assert {"final_report", "main_agent_log"} <= {row.type for row in artifact_rows}
     assert completed_event.payload["final_report_artifact_id"] in artifact_ids
     assert completed_event.payload["main_agent_log_artifact_id"] in artifact_ids
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.succeeded"
     )
     assert task.current_artifacts.final_report is not None
@@ -431,7 +431,7 @@ def test_report_first_partial_failed_report_records_unresolved_failures(
     assert task.gates.has_blocking_failure is True
     assert any(failure.status == "open" for failure in task.failures)
     assert task.current_artifacts.final_report is not None
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.partial_failed"
     )
     report = read_report_content(
@@ -469,7 +469,7 @@ def test_guard_rejection_is_visible_through_main_agent_tool_result(
     )
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
-    tool_result = next(event for event in events if event.type == "main_agent.tool_result")
+    tool_result = next(event for event in events if event.type == "agent.tool_result")
 
     assert runner.calls == ["intake", "orchestration"]
     assert runner.tool_result is not None
@@ -697,10 +697,10 @@ def test_main_agent_events_are_visible_in_orchestration_timeline(
     )
     events = [event.type for event in EventService(db_session).list_visible_events(task_id)]
 
-    assert "main_agent.started" in events
-    assert "main_agent.decision" in events
-    assert "main_agent.finalizing" in events
-    assert "main_agent.completed" in events
+    assert "agent.started" in events
+    assert "agent.decision" in events
+    assert "agent.finalizing" in events
+    assert "agent.completed" in events
     assert "gate.passed" in events
     assert "task.succeeded" in events
 

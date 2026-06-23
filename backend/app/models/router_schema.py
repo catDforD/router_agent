@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 # 不直接传大段 PLC 代码、日志、trace 或报告正文。
 # ---------------------------------------------------------------------------
 
-SchemaVersion = Literal["router.v1"]
+DEFAULT_SCHEMA_VERSION = "router.v2"
+SchemaVersion = Literal["router.v2", "router.v1"]
 
 
 class RouterBaseModel(BaseModel):
@@ -272,16 +273,26 @@ class EventType(str, Enum):
     TASK_PARTIAL_FAILED = "task.partial_failed"
     TASK_FAILED = "task.failed"
     TASK_CANCELLED = "task.cancelled"
-    MAIN_AGENT_STARTED = "main_agent.started"
-    MAIN_AGENT_DECISION = "main_agent.decision"
-    MAIN_AGENT_PLAN_UPDATED = "main_agent.plan_updated"
-    MAIN_AGENT_CLARIFICATION_REQUESTED = "main_agent.clarification_requested"
-    MAIN_AGENT_FINALIZING = "main_agent.finalizing"
-    MAIN_AGENT_TURN_STARTED = "main_agent.turn_started"
-    MAIN_AGENT_MESSAGE = "main_agent.message"
-    MAIN_AGENT_TOOL_CALLED = "main_agent.tool_called"
-    MAIN_AGENT_TOOL_RESULT = "main_agent.tool_result"
-    MAIN_AGENT_COMPLETED = "main_agent.completed"
+    MAIN_AGENT_STARTED = "agent.started"
+    MAIN_AGENT_DECISION = "agent.decision"
+    MAIN_AGENT_PLAN_UPDATED = "agent.plan_updated"
+    MAIN_AGENT_CLARIFICATION_REQUESTED = "agent.clarification_requested"
+    MAIN_AGENT_FINALIZING = "agent.finalizing"
+    MAIN_AGENT_TURN_STARTED = "agent.turn_started"
+    MAIN_AGENT_MESSAGE = "agent.message"
+    MAIN_AGENT_TOOL_CALLED = "agent.tool_called"
+    MAIN_AGENT_TOOL_RESULT = "agent.tool_result"
+    MAIN_AGENT_COMPLETED = "agent.completed"
+    LEGACY_MAIN_AGENT_STARTED = "main_agent.started"
+    LEGACY_MAIN_AGENT_DECISION = "main_agent.decision"
+    LEGACY_MAIN_AGENT_PLAN_UPDATED = "main_agent.plan_updated"
+    LEGACY_MAIN_AGENT_CLARIFICATION_REQUESTED = "main_agent.clarification_requested"
+    LEGACY_MAIN_AGENT_FINALIZING = "main_agent.finalizing"
+    LEGACY_MAIN_AGENT_TURN_STARTED = "main_agent.turn_started"
+    LEGACY_MAIN_AGENT_MESSAGE = "main_agent.message"
+    LEGACY_MAIN_AGENT_TOOL_CALLED = "main_agent.tool_called"
+    LEGACY_MAIN_AGENT_TOOL_RESULT = "main_agent.tool_result"
+    LEGACY_MAIN_AGENT_COMPLETED = "main_agent.completed"
     WORKER_JOB_CREATED = "worker.job_created"
     WORKER_STARTED = "worker.started"
     WORKER_PROGRESS = "worker.progress"
@@ -481,6 +492,40 @@ class ProjectContext(RouterBaseModel):
     )
     coding_style_artifact_id: str | None = None
     project_memory_artifact_ids: list[str] | None = None
+    workspace_root: str | None = None
+
+
+class ExecutionPolicy(RouterBaseModel):
+    mode: Literal["disabled", "local_read_only", "local_full_access"] = "disabled"
+    command_timeout_seconds: int = Field(default=120, ge=1)
+    tool_output_max_chars: int = Field(default=12_000, ge=1)
+    allow_network: bool | None = None
+
+
+class WorkspaceContext(RouterBaseModel):
+    root: str
+    current_directory: str | None = None
+    writable: bool = False
+
+
+class AgentToolCallRecord(RouterBaseModel):
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, JsonValue]
+    status: Literal["queued", "running", "applied", "rejected", "failed", "no-op"]
+    summary: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
+class AgentRunState(RouterBaseModel):
+    agent_run_id: str
+    status: Literal["running", "waiting_user", "succeeded", "partial_failed", "failed", "cancelled"]
+    workspace: WorkspaceContext | None = None
+    execution_policy: ExecutionPolicy | None = None
+    tool_calls: list[AgentToolCallRecord]
+    started_at: datetime
+    completed_at: datetime | None = None
 
 
 class TaskTrace(RouterBaseModel):
@@ -506,6 +551,9 @@ class TaskState(RouterBaseModel):
     task_type: TaskType
     difficulty: DifficultyProfile
     project_context: ProjectContext
+    workspace: WorkspaceContext | None = None
+    execution_policy: ExecutionPolicy | None = None
+    agent_runs: list[AgentRunState] = Field(default_factory=list)
     runtime_limits: RuntimeLimits
     gates: GateState
     current_artifacts: CurrentArtifacts

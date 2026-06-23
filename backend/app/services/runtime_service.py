@@ -27,6 +27,7 @@ from app.models.router_schema import (
     Artifact,
     ClarificationQuestion,
     ClarificationStatus,
+    DEFAULT_SCHEMA_VERSION,
     EventCorrelation,
     EventSeverity,
     EventSource,
@@ -107,6 +108,10 @@ class RuntimeService:
         self.mock_scenario = mock_scenario or app_settings.mock_scenario
         self.model = model if model is not None else app_settings.main_agent_model
         self.max_turns = max_turns or app_settings.main_agent_max_turns
+        self.agent_workspace_root = app_settings.agent_workspace_root
+        self.agent_execution_mode = app_settings.agent_execution_mode
+        self.agent_command_timeout_seconds = app_settings.agent_command_timeout_seconds
+        self.agent_tool_output_max_chars = app_settings.agent_tool_output_max_chars
         self.runner = runner
         self.lease_seconds = lease_seconds
         self.lease_owner = lease_owner
@@ -419,6 +424,10 @@ class RuntimeService:
             max_turns=self.max_turns,
             provider=self.settings.main_agent_provider,
             stream=self.settings.main_agent_stream,
+            workspace_root=self.agent_workspace_root,
+            execution_mode=self.agent_execution_mode,
+            command_timeout_seconds=self.agent_command_timeout_seconds,
+            tool_output_max_chars=self.agent_tool_output_max_chars,
             runner=self.runner,
             checkpoint=lambda: self._checkpoint_session(session),
         )
@@ -644,7 +653,7 @@ def _build_runtime_event(
     payload: dict[str, Any],
 ) -> RouterEvent:
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version=DEFAULT_SCHEMA_VERSION,
         event_id=new_event_id(),
         task_id=task.task_id,
         seq=0,

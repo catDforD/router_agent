@@ -322,13 +322,13 @@ def test_checkpointed_progress_is_visible_from_separate_session(
     events = event_types(session_factory, task_id)
 
     assert result.status == "completed"
-    assert "main_agent.started" in events
+    assert "agent.started" in events
     assert "worker.started" in events
     assert "artifact.created" in events
     assert "worker.completed" in events
     assert "gate.passed" in events
     assert "task.succeeded" in events
-    assert "main_agent.completed" in events
+    assert "agent.completed" in events
 
 
 def test_cancelled_task_is_not_started_by_scheduled_runtime_job(
@@ -383,7 +383,7 @@ def test_cancellation_during_runtime_episode_preserves_cancelled_state(
     assert worker_jobs(session_factory) == []
     assert "task.cancelled" in events
     assert "worker.started" not in events
-    assert events.count("main_agent.started") == 1
+    assert events.count("agent.started") == 1
 
 
 def test_duplicate_runtime_trigger_skips_while_lease_is_active(

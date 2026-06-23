@@ -164,7 +164,7 @@ export function findFinalReportArtifact(
   }
   const completed = [...events]
     .reverse()
-    .find((event) => event.type === "main_agent.completed");
+    .find((event) => event.type === "agent.completed");
   const artifactId = completed?.payload.final_report_artifact_id;
   if (typeof artifactId !== "string") {
     return null;
@@ -187,8 +187,8 @@ export function shouldRefreshTask(event: RouterEvent): boolean {
     event.type.startsWith("worker.") ||
     event.type.startsWith("gate.") ||
     event.type.startsWith("repair.") ||
-    event.type === "main_agent.completed" ||
-    event.type === "main_agent.clarification_requested"
+    event.type === "agent.completed" ||
+    event.type === "agent.clarification_requested"
   );
 }
 
@@ -196,14 +196,14 @@ export function shouldRefreshArtifacts(event: RouterEvent): boolean {
   return (
     event.type.startsWith("artifact.") ||
     event.type === "worker.completed" ||
-    event.type === "main_agent.completed" ||
+    event.type === "agent.completed" ||
     event.type.startsWith("task.")
   );
 }
 
 export function shouldRefreshTrace(event: RouterEvent): boolean {
   return (
-    event.type.startsWith("main_agent.") ||
+    event.type.startsWith("agent.") ||
     event.type.startsWith("worker.") ||
     event.type.startsWith("gate.") ||
     event.type.startsWith("task.")

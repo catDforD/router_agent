@@ -93,10 +93,11 @@ Backend   http://127.0.0.1:8000
 OpenAPI   http://127.0.0.1:8000/docs
 ```
 
-如果不希望启动器管理 Docker PostgreSQL：
+启动器默认使用 `.env` 里的 `DATABASE_URL`，不会启动 Docker PostgreSQL。
+如果希望启动器管理 Docker PostgreSQL：
 
 ```bash
-uv run main.py --no-postgres
+uv run main.py --with-postgres
 ```
 
 ## 手动启动

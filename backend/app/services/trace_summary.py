@@ -265,8 +265,14 @@ def _main_agent_run_summaries(
             or event.source.id == run_id
             or event.payload.get("main_agent_run_id") == run_id
         ]
-        started = _first_event(run_events, "main_agent.started")
-        completed = _first_event(run_events, "main_agent.completed")
+        started = _first_event(run_events, "agent.started") or _first_event(
+            run_events,
+            "main_agent.started",
+        )
+        completed = _first_event(run_events, "agent.completed") or _first_event(
+            run_events,
+            "main_agent.completed",
+        )
         error_events = [
             event.event_id
             for event in run_events

@@ -709,7 +709,7 @@ def invariant_final_report_before_terminal_event(
         return
     if audit.task.current_artifacts.final_report is None:
         raise AssertionError("terminal task has no final report artifact")
-    assert_ordered_events(audit, "main_agent.completed", TERMINAL_EVENTS[audit.task.status])
+    assert_ordered_events(audit, "agent.completed", TERMINAL_EVENTS[audit.task.status])
 
 
 def invariant_no_worker_for_clarification(case: EvalCase, audit: AuditSnapshot) -> None:

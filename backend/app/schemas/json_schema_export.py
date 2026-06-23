@@ -1,4 +1,4 @@
-"""Export Router v1 Pydantic models as JSON Schema files."""
+"""Export Router v2 Pydantic models as JSON Schema files."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from pydantic import BaseModel
 from app.models.router_schema import ROUTER_V1_SCHEMA_MODELS
 
 
-SCHEMA_VERSION = "router.v1"
+SCHEMA_VERSION = "router.v2"
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-SCHEMA_ID_BASE = "https://schemas.router.local/router.v1"
+SCHEMA_ID_BASE = "https://schemas.router.local/router.v2"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SCHEMA_DIR = REPO_ROOT / "schema"
 

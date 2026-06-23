@@ -597,7 +597,10 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "router.v1",
+      "enum": [
+        "router.v2",
+        "router.v1"
+      ],
       "title": "Schema Version",
       "type": "string"
     },
@@ -728,6 +731,6 @@
   "title": "Artifact",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.router.local/router.v1/artifact.schema.json",
-  "x-schema-version": "router.v1"
+  "$id": "https://schemas.router.local/router.v2/artifact.schema.json",
+  "x-schema-version": "router.v2"
 }

@@ -14,6 +14,7 @@ from app.models.router_schema import (
     Artifact,
     ArtifactRef,
     CurrentArtifacts,
+    DEFAULT_SCHEMA_VERSION,
     Failure,
     TaskState,
 )
@@ -44,7 +45,7 @@ def build_final_report_payload(
 
     payload: dict[str, Any] = {
         "kind": "main_agent_final_report",
-        "schema_version": "router.v1",
+        "schema_version": DEFAULT_SCHEMA_VERSION,
         "report_version": REPORT_VERSION,
         "created_at": created_at.isoformat(),
         "task_id": task.task_id,

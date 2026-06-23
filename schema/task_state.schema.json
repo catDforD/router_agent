@@ -1,5 +1,152 @@
 {
   "$defs": {
+    "AgentRunState": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_run_id": {
+          "title": "Agent Run Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "running",
+            "waiting_user",
+            "succeeded",
+            "partial_failed",
+            "failed",
+            "cancelled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "execution_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/AgentToolCallRecord"
+          },
+          "title": "Tool Calls",
+          "type": "array"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        }
+      },
+      "required": [
+        "agent_run_id",
+        "status",
+        "tool_calls",
+        "started_at"
+      ],
+      "title": "AgentRunState",
+      "type": "object"
+    },
+    "AgentToolCallRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "tool_call_id": {
+          "title": "Tool Call Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "arguments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Arguments",
+          "type": "object"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "applied",
+            "rejected",
+            "failed",
+            "no-op"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        }
+      },
+      "required": [
+        "tool_call_id",
+        "tool_name",
+        "arguments",
+        "status",
+        "started_at"
+      ],
+      "title": "AgentToolCallRecord",
+      "type": "object"
+    },
     "ArtifactRef": {
       "additionalProperties": false,
       "properties": {
@@ -540,6 +687,47 @@
       "title": "DifficultySignals",
       "type": "object"
     },
+    "ExecutionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "disabled",
+          "enum": [
+            "disabled",
+            "local_read_only",
+            "local_full_access"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "command_timeout_seconds": {
+          "default": 120,
+          "minimum": 1,
+          "title": "Command Timeout Seconds",
+          "type": "integer"
+        },
+        "tool_output_max_chars": {
+          "default": 12000,
+          "minimum": 1,
+          "title": "Tool Output Max Chars",
+          "type": "integer"
+        },
+        "allow_network": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allow Network"
+        }
+      },
+      "title": "ExecutionPolicy",
+      "type": "object"
+    },
     "Failure": {
       "additionalProperties": false,
       "properties": {
@@ -898,6 +1086,18 @@
           ],
           "default": null,
           "title": "Project Memory Artifact Ids"
+        },
+        "workspace_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Root"
         }
       },
       "title": "ProjectContext",
@@ -1146,12 +1346,46 @@
       ],
       "title": "WorkerType",
       "type": "string"
+    },
+    "WorkspaceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "title": "Root",
+          "type": "string"
+        },
+        "current_directory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Directory"
+        },
+        "writable": {
+          "default": false,
+          "title": "Writable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "WorkspaceContext",
+      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "router.v1",
+      "enum": [
+        "router.v2",
+        "router.v1"
+      ],
       "title": "Schema Version",
       "type": "string"
     },
@@ -1254,6 +1488,35 @@
     "project_context": {
       "$ref": "#/$defs/ProjectContext"
     },
+    "workspace": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "execution_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "agent_runs": {
+      "items": {
+        "$ref": "#/$defs/AgentRunState"
+      },
+      "title": "Agent Runs",
+      "type": "array"
+    },
     "runtime_limits": {
       "$ref": "#/$defs/RuntimeLimits"
     },
@@ -1348,6 +1611,6 @@
   "title": "TaskState",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.router.local/router.v1/task_state.schema.json",
-  "x-schema-version": "router.v1"
+  "$id": "https://schemas.router.local/router.v2/task_state.schema.json",
+  "x-schema-version": "router.v2"
 }

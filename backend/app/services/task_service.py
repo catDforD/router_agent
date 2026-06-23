@@ -17,6 +17,7 @@ from app.models.router_schema import (
     ArtifactType,
     ArtifactVisibility,
     CurrentArtifacts,
+    DEFAULT_SCHEMA_VERSION,
     DifficultyProfile,
     DifficultySignals,
     EventCorrelation,
@@ -34,6 +35,7 @@ from app.models.router_schema import (
     TaskStatus,
     TaskTrace,
     TaskType,
+    WorkspaceContext,
 )
 from app.repositories._helpers import enum_value
 from app.repositories.task_repo import TaskRepository
@@ -251,7 +253,7 @@ class TaskService:
         now: datetime,
     ) -> TaskState:
         return TaskState(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             task_id=new_task_id(),
             session_id=new_session_id(),
             user_id=user_id,
@@ -287,6 +289,15 @@ class TaskService:
                 need_clarification=False,
             ),
             project_context=project_context,
+            workspace=(
+                WorkspaceContext(
+                    root=project_context.workspace_root,
+                    current_directory=project_context.workspace_root,
+                    writable=True,
+                )
+                if project_context.workspace_root is not None
+                else None
+            ),
             runtime_limits=RuntimeLimits(
                 max_repair_rounds=3,
                 repair_rounds=0,
@@ -330,7 +341,7 @@ class TaskService:
         main_agent_run_id: str | None = None,
     ) -> RouterEvent:
         return RouterEvent(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             event_id=new_event_id(),
             task_id=task_id,
             seq=0,
