@@ -52,6 +52,86 @@ class TaskRow(Base):
     )
 
 
+class AgentSessionRow(Base):
+    """Persisted conversation session spanning multiple task/run rows."""
+
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    latest_task_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    latest_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    event_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+    session_json: Mapped[dict[str, Any]] = mapped_column(json_type, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_agent_sessions_status_updated_at", "status", "updated_at"),
+        Index("ix_agent_sessions_user_id", "user_id"),
+    )
+
+
+class AgentSessionEventRow(Base):
+    """Session-scoped event mirror with monotonically increasing session seq."""
+
+    __tablename__ = "agent_session_events"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    type: Mapped[str] = mapped_column(String(128), nullable=False)
+    severity: Mapped[str] = mapped_column(String(64), nullable=False)
+    visibility: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_json: Mapped[dict[str, Any]] = mapped_column(json_type, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "seq", name="uq_agent_session_events_seq"),
+        Index("ix_agent_session_events_session_seq", "session_id", "seq"),
+        Index("ix_agent_session_events_task_id", "task_id"),
+        Index("ix_agent_session_events_type", "type"),
+    )
+
+
+class AgentRunRow(Base):
+    """One user prompt execution inside an AgentSession."""
+
+    __tablename__ = "agent_runs"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_message: Mapped[str] = mapped_column(String(4096), nullable=False)
+    final_response: Mapped[str | None] = mapped_column(String(12000), nullable=True)
+    run_json: Mapped[dict[str, Any]] = mapped_column(json_type, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_agent_runs_session_created_at", "session_id", "created_at"),
+        Index("ix_agent_runs_task_id", "task_id"),
+        Index("ix_agent_runs_status", "status"),
+    )
+
+
 class ArtifactRow(Base):
     """Persisted artifact metadata plus query projections."""
 

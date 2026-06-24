@@ -93,10 +93,11 @@ Backend   http://127.0.0.1:8000
 OpenAPI   http://127.0.0.1:8000/docs
 ```
 
-如果不希望启动器管理 Docker PostgreSQL：
+启动器默认使用 `.env` 里的 `DATABASE_URL`，不会启动 Docker PostgreSQL。
+如果希望启动器管理 Docker PostgreSQL：
 
 ```bash
-uv run main.py --no-postgres
+uv run main.py --with-postgres
 ```
 
 ## 手动启动
@@ -139,11 +140,9 @@ http://127.0.0.1:5173
 前端应看到：
 
 - Main Agent 公开消息
-- `update_plan`
-- `call_plc_dev` / `call_plc_test` 等工具步骤
-- `run_quality_gate`
-- `write_final_report`
-- `finish_task`
+- `list_files` / `read_file` / `apply_patch` / `exec_command` 等 workspace 工具步骤
+- `call_mcp_tool` 以及由它触发的 PLC worker 事件
+- runtime finalization 写入的最终报告
 - 最终报告和 artifacts
 
 ## 测试

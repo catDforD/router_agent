@@ -7,7 +7,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents.main_agent import episode_output_from_task
-from app.agents.output_schema import IntakeClassificationOutput
 from app.agents.tools import AgentToolContext
 from app.core.config import Settings
 from app.core.time import utc_now
@@ -45,28 +44,14 @@ class RecordingRunner:
     def __init__(
         self,
         *,
-        classification: IntakeClassificationOutput | None = None,
-        intake_error: Exception | None = None,
+        orchestration_error: Exception | None = None,
+        pause_for_clarification: bool = False,
         terminal_status: str | None = None,
     ) -> None:
-        self.classification = classification or classification_output()
-        self.intake_error = intake_error
+        self.orchestration_error = orchestration_error
+        self.pause_for_clarification = pause_for_clarification
         self.terminal_status = terminal_status
         self.calls: list[str] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        if self.intake_error is not None:
-            raise self.intake_error
-        return self.classification
 
     def run_orchestration(
         self,
@@ -78,9 +63,34 @@ class RecordingRunner:
         run_config: Any,
     ) -> Any:
         self.calls.append("orchestration")
+        if self.orchestration_error is not None:
+            raise self.orchestration_error
         repository = TaskRepository(context.session)
         task = repository.get_task(run_config.group_id)
-        if self.terminal_status is not None:
+        if self.pause_for_clarification:
+            task = repository.update_task_state(
+                task.model_copy(
+                    deep=True,
+                    update={
+                        "status": TaskStatus.WAITING_USER.value,
+                        "phase": TaskPhase.CLARIFYING.value,
+                        "difficulty": task.difficulty.model_copy(
+                            update={"need_clarification": True}
+                        ),
+                        "unresolved_questions": [
+                            ClarificationQuestion(
+                                question_id="question-runtime-001",
+                                question="Which PLC platform should be targeted?",
+                                reason="Platform details are required.",
+                                required=True,
+                                status="open",
+                                asked_at=task.created_at,
+                            )
+                        ],
+                    },
+                )
+            )
+        elif self.terminal_status is not None:
             now = utc_now()
             task = repository.update_task_state(
                 task.model_copy(
@@ -98,37 +108,6 @@ class RecordingRunner:
             main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
             summary="Fake runtime runner completed.",
         )
-
-
-def classification_output(**updates: Any) -> IntakeClassificationOutput:
-    values: dict[str, Any] = {
-        "normalized_goal": "Create tested motor start/stop PLC logic.",
-        "task_type": "new_plc_development",
-        "difficulty_level": "L2",
-        "difficulty_score": 0.5,
-        "difficulty_confidence": 0.85,
-        "difficulty_reasons": ["Requires PLC development and validation."],
-        "difficulty_signals": {
-            "has_existing_code": False,
-            "has_io_points": True,
-            "has_timing_logic": False,
-            "has_state_machine": False,
-            "has_safety_constraints": False,
-            "has_emergency_stop": False,
-            "has_interlock": False,
-            "has_fault_latching": False,
-            "has_mode_switching": False,
-            "multi_module": False,
-            "requirement_incomplete": False,
-        },
-        "requires_test": True,
-        "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
-    }
-    values.update(updates)
-    return IntakeClassificationOutput.model_validate(values)
 
 
 def create_task(
@@ -303,7 +282,7 @@ def test_expired_lease_can_be_reclaimed(
     result = runtime_service(settings, session_factory, runner).start_task(task_id)
 
     assert result.status == "idle"
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
     metadata = runtime_metadata(session_factory, task_id)
     assert metadata["episode_status"] == "idle"
     assert metadata["episode_id"] != "runtime-episode-expired"
@@ -314,23 +293,7 @@ def test_lease_is_released_after_clarification_pause(
 ) -> None:
     settings, session_factory = runtime_context
     task_id = create_task(settings, session_factory)
-    runner = RecordingRunner(
-        classification=classification_output(
-            need_clarification=True,
-            requires_test=False,
-            difficulty_signals={
-                **classification_output().difficulty_signals.model_dump(mode="json"),
-                "requirement_incomplete": True,
-            },
-            clarification_questions=[
-                {
-                    "question": "Which PLC platform should be targeted?",
-                    "reason": "Platform details are required.",
-                    "required": True,
-                }
-            ],
-        )
-    )
+    runner = RecordingRunner(pause_for_clarification=True)
 
     result = runtime_service(settings, session_factory, runner).start_task(task_id)
 
@@ -358,7 +321,7 @@ def test_runtime_exception_records_metadata_and_error_event(
 ) -> None:
     settings, session_factory = runtime_context
     task_id = create_task(settings, session_factory)
-    runner = RecordingRunner(intake_error=RuntimeError("runner exploded"))
+    runner = RecordingRunner(orchestration_error=RuntimeError("runner exploded"))
 
     result = runtime_service(settings, session_factory, runner).start_task(task_id)
 
@@ -388,7 +351,7 @@ def test_waiting_user_resume_answers_questions_and_runs_episode(
 
     task = task_state(session_factory, task_id)
     assert result.status == "idle"
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
     assert task.status == "running"
     assert task.phase == "planning"
     assert task.unresolved_questions[0].status == "answered"

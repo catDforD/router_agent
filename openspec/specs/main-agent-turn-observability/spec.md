@@ -72,12 +72,12 @@ The backend SHALL persist a user-visible `FINAL_REPORT` artifact before applying
 - **AND** does not emit the terminal task event for that status
 
 ### Requirement: Runtime owns orchestration terminal finalization
-The backend SHALL make Runtime responsible for applying successful terminal task status after final output validation and report persistence.
+The backend SHALL make Runtime responsible for applying terminal task status after stop-policy validation and report persistence.
 
-#### Scenario: Model recommends final status
-- **WHEN** the orchestration model completes after Quality Gate execution
-- **THEN** the model returns a structured final output that recommends the final status
-- **AND** Runtime validates the recommendation against current task state, Scheduler Guard finalization policy, and Quality Gate state before mutating terminal status
+#### Scenario: Model returns allowed final response
+- **WHEN** the orchestration model stops with a natural final response
+- **THEN** Runtime validates the stop against current task state, evidence policy, Scheduler Guard expectations, and Quality Gate state before mutating terminal status
+- **AND** the model is not required to return a structured final output
 
 #### Scenario: Report persistence failure leaves task non-terminal
 - **WHEN** final report or replay log artifact persistence fails
@@ -85,13 +85,12 @@ The backend SHALL make Runtime responsible for applying successful terminal task
 - **AND** does not mark the task `succeeded`
 
 ### Requirement: Streaming runner feeds Router observability
-The backend SHALL use streaming-capable model execution for official OpenAI Agents SDK orchestration when Main Agent turn observability is enabled.
+The backend SHALL use streaming-capable OpenAI-compatible Chat Completions execution when Main Agent turn observability is enabled.
 
 #### Scenario: Streaming events become Router events
-- **WHEN** the official OpenAI Agents SDK runner emits semantic streaming events or lifecycle hook callbacks for an orchestration run
+- **WHEN** the OpenAI-compatible runner observes model messages, tool calls, tool outputs, or final responses for an orchestration run
 - **THEN** the backend translates relevant model turn, tool call, tool output, and final output signals into stable Router events and replay log entries
 
 #### Scenario: Streaming implementation remains runner-neutral
 - **WHEN** another Main Agent runner implementation is used
 - **THEN** the runner can report equivalent normalized observability entries without exposing SDK-specific event shapes to the frontend API
-

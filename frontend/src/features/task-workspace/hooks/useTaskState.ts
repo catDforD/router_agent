@@ -2,12 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getHealth, RouterApiError } from "../../../api/router/client";
 import {
-  appendUserMessage,
   cancelTask,
-  createTask,
   getTask,
 } from "../../../api/router/tasks";
+import {
+  appendSessionMessage,
+  createSession,
+  getSession,
+} from "../../../api/router/sessions";
 import type {
+  AgentSession,
   HealthResponse,
   ProjectContext,
   TaskState,
@@ -34,6 +38,8 @@ export interface TaskMutationState {
 
 export function useTaskState() {
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [agentSession, setAgentSession] = useState<AgentSession | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -65,6 +71,15 @@ export function useTaskState() {
         const next = await getTask(overrideTaskId);
         setTask(next);
         setTaskId(next.task_id);
+        if (next.session_id) {
+          setSessionId(next.session_id);
+          try {
+            const sessionPayload = await getSession(next.session_id);
+            setAgentSession(sessionPayload.session);
+          } catch {
+            setAgentSession(null);
+          }
+        }
         return next;
       } catch (err) {
         setError(readableError(err));
@@ -81,9 +96,11 @@ export function useTaskState() {
       setMutation({ loading: true });
       setError(undefined);
       try {
-        const created = await createTask(message, projectContext);
+        const created = await createSession(message, projectContext);
+        setSessionId(created.session.session_id);
+        setAgentSession(created.session);
         setTaskId(created.task_id);
-        await refreshTask(created.task_id);
+        setTask(created.task);
         setMutation({ loading: false });
         return created;
       } catch (err) {
@@ -101,7 +118,19 @@ export function useTaskState() {
       }
       setMutation({ loading: true });
       try {
-        const result = await appendUserMessage(taskId, message);
+        if (sessionId) {
+          const result = await appendSessionMessage(sessionId, message);
+          setSessionId(result.session.session_id);
+          setAgentSession(result.session);
+          setTaskId(result.task_id);
+          setTask(result.task);
+          setMutation({ loading: false });
+          return result;
+        }
+        const result = await createSession(message, task?.project_context ?? {});
+        setSessionId(result.session.session_id);
+        setAgentSession(result.session);
+        setTaskId(result.task_id);
         setTask(result.task);
         setMutation({ loading: false });
         return result;
@@ -110,7 +139,7 @@ export function useTaskState() {
         throw err;
       }
     },
-    [taskId],
+    [sessionId, task?.project_context, taskId],
   );
 
   const cancelCurrentTask = useCallback(async () => {
@@ -130,7 +159,9 @@ export function useTaskState() {
   }, [taskId]);
 
   const terminal = task ? TERMINAL_STATUSES.includes(task.status) : false;
-  const canAppendMessage = Boolean(task && !terminal);
+  const canAppendMessage = Boolean(
+    agentSession?.status === "active" || (task && !terminal),
+  );
   const canCancel =
     task?.status === "created" ||
     task?.status === "running" ||
@@ -139,6 +170,8 @@ export function useTaskState() {
   return useMemo(
     () => ({
       taskId,
+      sessionId,
+      agentSession,
       task,
       loading,
       error,
@@ -148,6 +181,7 @@ export function useTaskState() {
       canAppendMessage,
       canCancel,
       setTaskId,
+      setSessionId,
       refreshTask,
       refreshHealth,
       createNewTask,
@@ -156,6 +190,8 @@ export function useTaskState() {
     }),
     [
       taskId,
+      sessionId,
+      agentSession,
       task,
       loading,
       error,

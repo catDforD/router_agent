@@ -18,6 +18,7 @@ import type { BackendHealthState } from "./hooks/useTaskState";
 
 export interface TaskListItem {
   taskId: string;
+  sessionId?: string;
   title: string;
   status: string;
   phase: string;
@@ -116,7 +117,7 @@ export function ChatPanel({
 
       <section className="rail-section" id="tasks">
         <div className="rail-section-title">
-          <span>任务</span>
+          <span>会话</span>
           <span>{taskItems.length}</span>
         </div>
         <div className="task-list">

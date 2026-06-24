@@ -1,6 +1,6 @@
 # 总体思路
 
-> 当前状态：后端已经从早期的 OpenAI Agents SDK / structured final output 方案，切换为 OpenAI 兼容 Chat Completions tool loop。Main Agent 通过普通 `messages + tools + tool_calls` 运行，不依赖 `response_format`；前端通过 SSE 消费公开的 `main_agent.message`、`main_agent.tool_called`、`main_agent.tool_result` 等事件。
+> 当前状态：后端已经从早期的 OpenAI Agents SDK / structured final output 方案，切换为 OpenAI 兼容 Chat Completions tool loop。Main Agent 通过普通 `messages + tools + tool_calls` 运行，不依赖 `response_format`；前端通过 SSE 消费公开的 `agent.message`、`agent.tool_called`、`agent.tool_result` 等事件。
 
 1. **方向**  
     ```
@@ -98,17 +98,15 @@
     ```
     Main Agent:
     tools = [
-        update_plan,
-        request_clarification,
-        call_plc_dev,
-        call_plc_test,
-        call_plc_formal,
-        call_plc_repair,
-        run_parallel_workers,
+        list_files,
+        read_file,
+        write_file,
+        apply_patch,
+        exec_command,
+        git_status,
         read_artifact,
-        run_quality_gate,
-        write_final_report,
-        finish_task
+        write_artifact,
+        call_mcp_tool
     ]
     ```
 
@@ -147,8 +145,8 @@
         3. 注册 function tool schemas
         4. 执行 tool loop
         5. 写入 main_agent.message / tool_called / tool_result 事件
-        6. 通过 write_final_report 写最终报告 artifact
-        7. 通过 finish_task 做受控终态变更
+        6. 在允许停止时由 runtime finalization 写最终报告 artifact
+        7. 由 runtime lifecycle 做受控终态变更
         8. 把 trace_id / task_id / worker_job_id 关联起来
         ```
         Main Agent Instructions 示例：
@@ -163,8 +161,8 @@
             - run_parallel_workers：并行调用多个 worker
             - read_artifact：读取必要 artifact 摘要或内容
             - run_quality_gate：检查当前任务是否满足交付条件
-            - write_final_report：写最终报告 artifact
-            - finish_task：执行受控终态变更
+            - call_mcp_tool：调用已配置的 MCP/domain 工具
+            - runtime finalization：写最终报告 artifact 并执行受控终态变更
 
         调度规则：
             1. 需求不完整时，先追问用户。
@@ -232,7 +230,7 @@
         3. repair 后，必须重新调用 test。
         4. 如果 formal 曾经失败，repair 后必须重新 formal。
         5. L3/L4 且包含急停、互锁、故障锁存、模式互斥时，不能跳过 formal。
-        6. 有 blocking failure 时，不允许 finish_task 标记为 succeeded。
+        6. 有 blocking failure 时，不允许 runtime finalization 标记为 succeeded。
         7. worker 返回 need_clarification 时，Main Agent 必须追问用户。
         ```
     - **Artifact Store**  
@@ -378,7 +376,7 @@
         ↓
         如果都通过：
         run_quality_gate
-        finish_task
+        runtime finalization
         ↓
         如果任一失败：
         call_plc_repair

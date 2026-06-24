@@ -12,6 +12,7 @@ from app.agents.tools import (
     AgentToolContext,
     AgentToolService,
     ParallelWorkerRequest,
+    get_main_agent_tool_specs,
     get_main_agent_tools,
 )
 from app.models.db_models import Base, WorkerJobRow
@@ -29,7 +30,6 @@ from app.models.router_schema import (
     TaskPhase,
     TaskState,
     TaskStatus,
-    TaskTrace,
     WorkerType,
 )
 from app.repositories.task_repo import TaskRepository
@@ -37,6 +37,7 @@ from app.repositories.worker_job_repo import WorkerJobRepository
 from app.mcp.mock_worker import run_mock_worker
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
+from app.services.task_service import TaskService
 from app.workers.worker_input_builder import (
     WorkerInputBuildError,
     build_worker_input,
@@ -287,18 +288,174 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
     tools = get_main_agent_tools()
 
     assert [tool.name for tool in tools] == [
-        "update_plan",
-        "request_clarification",
-        "call_plc_dev",
-        "call_plc_test",
-        "call_plc_formal",
-        "call_plc_repair",
-        "run_parallel_workers",
+        "list_files",
+        "read_file",
+        "write_file",
+        "apply_patch",
+        "exec_command",
+        "git_status",
         "read_artifact",
-        "run_quality_gate",
-        "write_final_report",
-        "finish_task",
+        "write_artifact",
+        "call_mcp_tool",
     ]
+    assert [spec["function"]["name"] for spec in get_main_agent_tool_specs()] == [
+        tool.name for tool in tools
+    ]
+
+
+def test_finish_task_is_not_exposed_to_main_agent_model() -> None:
+    assert "finish_task" not in [
+        spec["function"]["name"] for spec in get_main_agent_tool_specs()
+    ]
+
+
+def test_file_tools_read_write_and_reject_foreign_paths(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    written = service.write_file(
+        task.task_id,
+        path="src/main.txt",
+        content="hello router\n",
+        create_dirs=True,
+    )
+    listed = service.list_files(task.task_id, path=".", recursive=True)
+    read = service.read_file(task.task_id, path="src/main.txt")
+    rejected = service.read_file(task.task_id, path="../outside.txt")
+
+    assert written.status == "applied"
+    assert (workspace / "src/main.txt").read_text(encoding="utf-8") == "hello router\n"
+    assert listed.status == "applied"
+    assert any(entry["path"] == "src/main.txt" for entry in listed.details["entries"])
+    assert read.details["content"] == "hello router\n"
+    assert rejected.status == "rejected"
+    assert rejected.violation is not None
+    assert rejected.violation.code == "workspace_path_rejected"
+
+
+def test_workspace_tools_return_results_for_invalid_paths(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "file.txt").write_text("hello\n", encoding="utf-8")
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    listed_file = service.list_files(task.task_id, path="file.txt")
+    missing_list = service.list_files(task.task_id, path="missing")
+    bad_exec_cwd = service.exec_command(
+        task.task_id,
+        command="pwd",
+        cwd="file.txt",
+    )
+    missing_git_cwd = service.git_status(task.task_id, cwd="missing")
+    missing_patch_cwd = service.apply_patch(
+        task.task_id,
+        patch="",
+        cwd="missing",
+    )
+
+    assert listed_file.status == "applied"
+    assert listed_file.details["entries"] == [
+        {"path": "file.txt", "type": "file", "size_bytes": 6}
+    ]
+    assert missing_list.status == "rejected"
+    assert missing_list.violation is not None
+    assert missing_list.violation.code == "path_not_found"
+    assert bad_exec_cwd.status == "rejected"
+    assert bad_exec_cwd.violation is not None
+    assert bad_exec_cwd.violation.code == "cwd_not_directory"
+    assert missing_git_cwd.status == "rejected"
+    assert missing_git_cwd.violation is not None
+    assert missing_git_cwd.violation.code == "path_not_found"
+    assert missing_patch_cwd.status == "rejected"
+    assert missing_patch_cwd.violation is not None
+    assert missing_patch_cwd.violation.code == "path_not_found"
+
+
+def test_exec_command_records_output_and_failure(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+            tool_output_max_chars=5,
+        )
+    )
+
+    ok = service.exec_command(task.task_id, command="printf abcdef")
+    failed = service.exec_command(task.task_id, command="printf nope >&2; exit 7")
+
+    assert ok.status == "applied"
+    assert ok.details["exit_code"] == 0
+    assert ok.details["stdout"] == "ab..."
+    assert ok.details["stdout_truncated"] is True
+    assert ok.artifact_refs
+    assert failed.status == "failed"
+    assert failed.error is not None
+    assert failed.details["exit_code"] == 7
+
+
+def test_apply_patch_modifies_workspace_file(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess_run = __import__("subprocess").run
+    subprocess_run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    target = workspace / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    patch = """diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    result = service.apply_patch(task.task_id, patch=patch)
+
+    assert result.status == "applied"
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert result.artifact_refs
 
 
 def test_update_plan_normalizes_provider_task_type_alias(
@@ -452,6 +609,47 @@ def test_mock_plc_dev_uses_fbd_artifact_details_when_target_language_is_fbd(
     assert code_write.summary == "Mock FBD implementation."
 
 
+def test_call_mcp_tool_prepares_intake_task_for_domain_worker(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    created = TaskService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+    ).create_task(
+        message="Generate a conveyor start stop controller.",
+        project_context={
+            "target_plc_language": "ST",
+            "target_platform": "Codesys",
+        },
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+        )
+    )
+
+    result = service.call_mcp_tool(
+        created.task.task_id,
+        tool_name="plc_dev.run",
+        arguments={"objective": "Generate conveyor start stop ST code."},
+    )
+    updated = TaskRepository(db_session).get_task(created.task.task_id)
+    events = EventService(db_session).list_visible_events(created.task.task_id)
+
+    assert result.status == "applied"
+    assert result.worker_type == "plc-dev"
+    assert updated.task_type == "new_plc_development"
+    assert updated.phase == "planning"
+    assert updated.status == "running"
+    assert updated.current_artifacts.current_code is not None
+    assert updated.runtime_limits.worker_calls_used == 1
+    assert "task.updated" in [event.type for event in events]
+    assert "worker.started" in [event.type for event in events]
+    assert "worker.completed" in [event.type for event in events]
+
+
 def test_worker_tool_rationale_is_observable_without_changing_worker_input(
     db_session: Session,
     tmp_path: Path,
@@ -482,9 +680,9 @@ def test_worker_tool_rationale_is_observable_without_changing_worker_input(
     job = worker_job_rows(db_session)[0]
 
     assert result.status == "applied"
-    assert "main_agent.tool_called" in [event.type for event in events]
-    assert "main_agent.tool_result" in [event.type for event in events]
-    tool_call = next(event for event in events if event.type == "main_agent.tool_called")
+    assert "agent.tool_called" in [event.type for event in events]
+    assert "agent.tool_result" in [event.type for event in events]
+    tool_call = next(event for event in events if event.type == "agent.tool_called")
     assert (
         tool_call.payload["rationale_summary"]
         == "No current code exists, so start with PLC development."
@@ -534,13 +732,13 @@ def test_guard_rejection_is_recorded_when_observability_is_enabled(
         rationale_summary="Testing is required before final delivery.",
     )
     events = EventService(db_session).list_visible_events(task.task_id)
-    tool_result = next(event for event in events if event.type == "main_agent.tool_result")
+    tool_result = next(event for event in events if event.type == "agent.tool_result")
 
     assert result.status == "rejected"
     assert [event.type for event in events] == [
-        "main_agent.turn_started",
-        "main_agent.tool_called",
-        "main_agent.tool_result",
+        "agent.turn_started",
+        "agent.tool_called",
+        "agent.tool_result",
     ]
     assert tool_result.payload["status"] == "rejected"
     assert tool_result.payload["details"]["violation"]["code"] == "missing_current_code"
@@ -614,6 +812,40 @@ def test_read_artifact_summary_and_bounded_full_modes(
     assert full.artifact.content_chars == 5
 
 
+def test_read_artifact_records_observable_call_and_result(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    artifact = create_text_artifact(db_session, tmp_path, task)
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-001",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.read_artifact(task.task_id, artifact.artifact_id, mode="summary")
+    events = EventService(db_session).list_visible_events(task.task_id)
+
+    assert result.status == "applied"
+    assert [event.type for event in events] == [
+        "agent.turn_started",
+        "agent.tool_called",
+        "agent.tool_result",
+    ]
+    assert events[1].payload["tool_name"] == "read_artifact"
+    assert events[2].payload["tool_name"] == "read_artifact"
+    assert events[2].payload["artifact_ids"] == [artifact.artifact_id]
+
+
 def test_read_artifact_rejects_foreign_task_artifact(
     db_session: Session,
     tmp_path: Path,
@@ -649,88 +881,7 @@ def test_run_quality_gate_returns_assessment_and_gate_report(
     assert result.gate_state.can_finish_as_success is True
 
 
-def test_finish_task_rejects_succeeded_without_quality_gate(
-    db_session: Session,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-
-    assert result.status == "rejected"
-    assert result.violation is not None
-    assert result.violation.code == "quality_gate_required"
-    assert updated.status == "running"
-
-
-def test_finish_task_rejects_without_durable_final_report_after_gate(
-    db_session: Session,
-    tmp_path: Path,
-) -> None:
-    service = AgentToolService(
-        AgentToolContext(
-            session=db_session,
-            artifact_root=tmp_path / "artifacts",
-            report_first_finalization=True,
-        )
-    )
-    task = classified_task(db_session, qa=True)
-    create_raw_artifact(db_session, tmp_path, task)
-    service.run_quality_gate(task.task_id)
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-    events = EventService(db_session).list_visible_events(task.task_id)
-
-    assert result.status == "rejected"
-    assert result.violation is not None
-    assert result.violation.code == "final_report_required"
-    assert updated.status == "running"
-    assert "task.succeeded" not in [event.type for event in events]
-
-
-def test_finish_task_marks_succeeded_after_quality_gate_passes(
-    db_session: Session,
-    tmp_path: Path,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-    task = TaskRepository(db_session).update_task_state(
-        task.model_copy(
-            deep=True,
-            update={
-                "trace": TaskTrace(
-                    openai_trace_id="trace-001",
-                    main_agent_run_ids=["main-agent-run-001"],
-                    latest_main_agent_run_id="main-agent-run-001",
-                )
-            },
-        )
-    )
-    create_raw_artifact(db_session, tmp_path, task)
-    service.run_quality_gate(task.task_id)
-    report_result = service.write_final_report(
-        task.task_id,
-        final_status="succeeded",
-        summary="QA task passed Quality Gate.",
-    )
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-    events = EventService(db_session).list_visible_events(task.task_id)
-
-    assert report_result.status == "applied"
-    assert result.status == "applied"
-    assert updated.status == "succeeded"
-    assert updated.phase == "completed"
-    assert updated.completed_at is not None
-    assert [event.type for event in events][-1] == "task.succeeded"
-    assert events[-1].correlation.openai_trace_id == "trace-001"
-    assert events[-1].correlation.main_agent_run_id == "main-agent-run-001"
-
-
-def test_tool_checkpoint_callback_runs_after_gate_and_finish(
+def test_tool_checkpoint_callback_runs_after_gate_and_report(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
@@ -751,31 +902,6 @@ def test_tool_checkpoint_callback_runs_after_gate_and_finish(
         final_status="succeeded",
         summary="QA task passed Quality Gate.",
     )
-    service.finish_task(task.task_id)
 
-    assert len(checkpoints) >= 3
+    assert len(checkpoints) >= 2
     assert set(checkpoints) == {"checkpoint"}
-
-
-def test_finish_task_rejects_cancelled_task_without_overwrite(
-    db_session: Session,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-    cancelled = task.model_copy(
-        deep=True,
-        update={
-            "status": TaskStatus.CANCELLED.value,
-            "phase": TaskPhase.COMPLETED.value,
-        },
-    )
-    TaskRepository(db_session).update_task_state(cancelled)
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-
-    assert result.status == "rejected"
-    assert result.violation is not None
-    assert result.violation.code == "terminal_task"
-    assert updated.status == "cancelled"
-    assert EventService(db_session).list_visible_events(task.task_id) == []

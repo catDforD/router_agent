@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents.main_agent import build_main_agent_event, episode_output_from_task
 from app.agents.output_schema import (
-    IntakeClassificationOutput,
     MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentPlanStep,
@@ -26,7 +25,7 @@ from app.core.database import get_engine_for_url, get_session_factory_for_url
 from app.core.time import utc_now
 from app.main import create_app
 from app.models.db_models import Base, WorkerJobRow
-from app.models.router_schema import EventType, TaskState
+from app.models.router_schema import EventType, TaskState, TaskStatus
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.gate_repo import GateResultRepository
 from app.repositories.task_repo import TaskRepository
@@ -117,25 +116,7 @@ class EvalScriptedRunner:
         self.calls: list[str] = []
         self.tool_results: list[AgentToolResult] = []
         self.failures: list[str] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        if _worker_rows(context.session, run_config.group_id):
-            self.failures.append("worker jobs existed before intake completed")
-        task = TaskRepository(context.session).get_task(run_config.group_id)
-        if task.status != "created" or task.phase != "intake":
-            self.failures.append(
-                f"unexpected intake task state: status={task.status}, phase={task.phase}"
-            )
-        return self.case.intake_classification()
+        self.uses_tool_loop_side_effects = False
 
     def run_orchestration(
         self,
@@ -149,6 +130,44 @@ class EvalScriptedRunner:
         self.calls.append("orchestration")
         task_id = run_config.group_id
         tools = AgentToolService(context)
+        if _worker_rows(context.session, task_id):
+            self.failures.append("worker jobs existed before task was prepared")
+        task = TaskRepository(context.session).get_task(task_id)
+        if task.status != "created" or task.phase != "intake":
+            self.failures.append(
+                f"unexpected initial task state: status={task.status}, phase={task.phase}"
+            )
+        if TaskStatus.WAITING_USER.value in self.case.expected.final_status:
+            self.uses_tool_loop_side_effects = True
+            result = tools.request_clarification(
+                task_id,
+                questions=[
+                    {
+                        "question": "Which PLC platform and I/O names should be used?",
+                        "reason": "The worker needs concrete target details.",
+                        "required": True,
+                    }
+                ],
+                rationale_summary=f"Eval case {self.case.id} needs clarification.",
+            )
+            self._record_tool_expectation("request_clarification", result)
+            task = TaskRepository(context.session).get_task(task_id)
+            return episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary=f"Deterministic eval case {self.case.id} paused.",
+            )
+
+        plan_result = tools.update_plan(
+            task_id,
+            summary=f"Deterministic eval case {self.case.id} prepared task.",
+            plan=[{"order": 1, "action": "run scripted eval sequence"}],
+            **self.case.plan_config(),
+        )
+        if plan_result.status != "applied":
+            self.failures.append(
+                f"update_plan expected applied but got {plan_result.status}"
+            )
         for action in self.case.scripted_sequence:
             if action == "finalizing":
                 self._emit_finalizing(context, task_id)
@@ -510,16 +529,6 @@ def assert_eval_expectations(
             audit,
             f"expected task status in {expected.final_status}, got {audit.task.status}",
         )
-    if expected.min_difficulty is not None:
-        if _difficulty_rank(audit.task.difficulty.level) < _difficulty_rank(
-            expected.min_difficulty
-        ):
-            raise_eval_failure(
-                case,
-                audit,
-                "task difficulty was below expected minimum: "
-                f"{audit.task.difficulty.level} < {expected.min_difficulty}",
-            )
 
     worker_sequence = [row.worker_type for row in audit.worker_jobs]
     if expected.worker_sequence is not None and worker_sequence != expected.worker_sequence:
@@ -709,7 +718,7 @@ def invariant_final_report_before_terminal_event(
         return
     if audit.task.current_artifacts.final_report is None:
         raise AssertionError("terminal task has no final report artifact")
-    assert_ordered_events(audit, "main_agent.completed", TERMINAL_EVENTS[audit.task.status])
+    assert_ordered_events(audit, "agent.completed", TERMINAL_EVENTS[audit.task.status])
 
 
 def invariant_no_worker_for_clarification(case: EvalCase, audit: AuditSnapshot) -> None:
@@ -864,10 +873,6 @@ def _worker_rows(session: Session, task_id: str) -> list[WorkerJobRow]:
             .order_by(WorkerJobRow.created_at, WorkerJobRow.id)
         ).scalars()
     )
-
-
-def _difficulty_rank(value: str) -> int:
-    return {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}[str(value)]
 
 
 def _minimal_case(case_id: str) -> dict[str, Any]:

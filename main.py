@@ -38,6 +38,7 @@ class ProcessSpec:
     name: str
     command: list[str]
     cwd: Path
+    host: str | None = None
     port: int | None = None
     service: str | None = None
 
@@ -80,8 +81,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend-port", type=int, default=DEFAULT_BACKEND_PORT)
     parser.add_argument("--frontend-host", default=DEFAULT_FRONTEND_HOST)
     parser.add_argument("--frontend-port", type=int, default=DEFAULT_FRONTEND_PORT)
-    parser.add_argument("--no-postgres", action="store_true", help="Do not start Docker Compose PostgreSQL.")
-    parser.add_argument("--stop-postgres-on-exit", action="store_true", help="Stop the Docker Compose PostgreSQL service on shutdown.")
+    postgres_group = parser.add_mutually_exclusive_group()
+    postgres_group.add_argument("--with-postgres", action="store_true", help="Start Docker Compose PostgreSQL before launching services.")
+    postgres_group.add_argument("--no-postgres", action="store_true", help="Use the configured local database without starting Docker Compose PostgreSQL.")
+    parser.add_argument("--stop-postgres-on-exit", action="store_true", help="Stop the Docker Compose PostgreSQL service on shutdown. Only applies with --with-postgres.")
     parser.add_argument("--no-migrate", action="store_true", help="Skip Alembic migration execution.")
     parser.add_argument("--no-backend", action="store_true", help="Do not start the backend API process.")
     parser.add_argument("--no-frontend", action="store_true", help="Do not start the frontend dev server.")
@@ -119,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             managed = []
             return 0
 
+        ensure_managed_ports_available(specs)
         if config.manage_postgres:
             start_postgres(config)
         else:
@@ -211,7 +215,7 @@ def config_from_args(args: argparse.Namespace, env: dict[str, str]) -> LauncherC
         mcp_mode=mcp_mode,
         plc_worker_mcp_url=env.get("PLC_WORKER_MCP_URL", DEFAULT_MCP_URL),
         plc_worker_modes=worker_modes,
-        manage_postgres=not args.no_postgres,
+        manage_postgres=args.with_postgres and not args.no_postgres,
         run_migrations=not args.no_migrate,
         start_backend=not args.no_backend,
         start_frontend=not args.no_frontend,
@@ -251,7 +255,7 @@ def start_postgres(config: LauncherConfig) -> None:
     if shutil.which("docker") is None:
         raise RuntimeError(
             "docker is required for managed PostgreSQL; "
-            "use --no-postgres to use an existing database"
+            "run without --with-postgres to use an existing database"
         )
     print("Starting PostgreSQL through Docker Compose...")
     run_checked(["docker", "compose", "up", "-d", "postgres"], ROOT, os.environ.copy())
@@ -295,12 +299,14 @@ def ensure_frontend_dependencies(config: LauncherConfig, env: dict[str, str]) ->
 def build_process_specs(config: LauncherConfig) -> list[ProcessSpec]:
     specs: list[ProcessSpec] = []
     if config.start_worker:
+        parsed_worker_url = urlparse(config.plc_worker_mcp_url)
         specs.append(
             ProcessSpec(
                 name="plc-worker",
                 command=[sys.executable, "scripts/start_plc_worker_mcp_server.py"],
                 cwd=ROOT,
-                port=urlparse(config.plc_worker_mcp_url).port or 9000,
+                host=parsed_worker_url.hostname or "localhost",
+                port=parsed_worker_url.port or 9000,
                 service="mcp",
             )
         )
@@ -321,6 +327,7 @@ def build_process_specs(config: LauncherConfig) -> list[ProcessSpec]:
                     str(config.backend_port),
                 ],
                 cwd=ROOT,
+                host=config.backend_host,
                 port=config.backend_port,
                 service="api",
             )
@@ -340,11 +347,50 @@ def build_process_specs(config: LauncherConfig) -> list[ProcessSpec]:
                     str(config.frontend_port),
                 ],
                 cwd=FRONTEND_DIR,
+                host=config.frontend_host,
                 port=config.frontend_port,
                 service="vite",
             )
         )
     return specs
+
+
+def ensure_managed_ports_available(specs: list[ProcessSpec]) -> None:
+    for spec in specs:
+        if spec.port is None:
+            continue
+        host = probe_host(spec.host)
+        if not is_tcp_port_open(host, spec.port):
+            continue
+        flag = skip_flag_for_process(spec.name)
+        raise RuntimeError(
+            f"port already in use before launch: {spec.name} at {host}:{spec.port}. "
+            f"Stop the existing process, choose another port, or run with {flag} "
+            f"if that service is already running outside this launcher."
+        )
+
+
+def probe_host(host: str | None) -> str:
+    if not host or host in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def is_tcp_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def skip_flag_for_process(name: str) -> str:
+    flags = {
+        "backend": "--no-backend",
+        "frontend": "--no-frontend",
+        "plc-worker": "--no-worker",
+    }
+    return flags.get(name, "--no-backend/--no-frontend/--no-worker")
 
 
 def start_process(item: ManagedProcess, env: dict[str, str]) -> None:

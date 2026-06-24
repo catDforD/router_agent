@@ -264,9 +264,9 @@ def test_worker_call_budget_exhaustion_is_guard_rejected_before_dispatch(
     assert rows == []
     assert [event.type for event in events] == [
         "task.created",
-        "main_agent.turn_started",
-        "main_agent.tool_called",
-        "main_agent.tool_result",
+        "agent.turn_started",
+        "agent.tool_called",
+        "agent.tool_result",
     ]
     assert events[-1].payload["details"]["violation"]["code"] == (
         "worker_call_limit_exceeded"
@@ -297,8 +297,8 @@ def test_main_agent_max_turns_marks_non_terminal_task_failed(
     assert task.completed_at is not None
     assert task.current_artifacts.final_report is not None
     assert event_types[-3:] == [
-        "main_agent.decision",
-        "main_agent.completed",
+        "agent.decision",
+        "agent.completed",
         "task.failed",
     ]
     assert events[-3].severity == "error"
@@ -368,21 +368,14 @@ class NeverRunner:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def run_intake(self, **kwargs: Any) -> Any:
-        self.calls.append("intake")
-        raise AssertionError("cancelled task should not run intake")
-
     def run_orchestration(self, **kwargs: Any) -> Any:
         self.calls.append("orchestration")
         raise AssertionError("cancelled task should not run orchestration")
 
 
 class MaxTurnsRunner:
-    def run_intake(self, **kwargs: Any) -> Any:
-        raise MaxTurnsExceeded("too many turns")
-
     def run_orchestration(self, **kwargs: Any) -> Any:
-        raise AssertionError("orchestration should not run after intake max turns")
+        raise MaxTurnsExceeded("too many turns")
 
 
 class CancelThenMaxTurnsRunner:
@@ -394,12 +387,9 @@ class CancelThenMaxTurnsRunner:
         self.settings = settings
         self.session_factory = session_factory
 
-    def run_intake(self, **kwargs: Any) -> Any:
+    def run_orchestration(self, **kwargs: Any) -> Any:
         cancel_task(self.settings, self.session_factory, kwargs["run_config"].group_id)
         raise MaxTurnsExceeded("too many turns after cancellation")
-
-    def run_orchestration(self, **kwargs: Any) -> Any:
-        raise AssertionError("orchestration should not run after intake max turns")
 
 
 class FakeRealMcpClient:

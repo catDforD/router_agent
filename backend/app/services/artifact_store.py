@@ -26,6 +26,7 @@ from app.models.router_schema import (
     Artifact,
     ArtifactCreator,
     ArtifactCreatorType,
+    DEFAULT_SCHEMA_VERSION,
     ArtifactMetadata,
     ArtifactRef,
     ArtifactStatus,
@@ -132,7 +133,7 @@ class ArtifactStore:
 
         now = request.created_at or datetime.now(UTC)
         artifact = Artifact(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             artifact_id=artifact_id,
             task_id=request.task_id,
             type=artifact_type,

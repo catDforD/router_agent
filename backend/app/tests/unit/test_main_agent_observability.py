@@ -89,8 +89,8 @@ def test_recorder_appends_turn_and_tool_events(
 
     assert turn == 1
     assert [row.type for row in rows] == [
-        "main_agent.turn_started",
-        "main_agent.tool_called",
+        "agent.turn_started",
+        "agent.tool_called",
     ]
     assert event.payload["turn_index"] == 1
     assert event.payload["arguments"]["api_key"] == "[redacted]"
@@ -129,7 +129,7 @@ def test_recorder_truncates_rationale_and_records_tool_result(
     )
 
     call_row = db_session.execute(
-        select(EventRow).where(EventRow.type == "main_agent.tool_called")
+        select(EventRow).where(EventRow.type == "agent.tool_called")
     ).scalar_one()
 
     assert call_row.event_json["payload"]["rationale_summary"].endswith(
@@ -190,7 +190,7 @@ def test_recorder_writes_report_log_and_completed_event(
     assert report_content["main_agent_output_summary"]["final_task_status"] == (
         "succeeded"
     )
-    assert completed.type == "main_agent.completed"
+    assert completed.type == "agent.completed"
     assert completed.correlation.artifact_ids == [
         final_report.artifact_id,
         replay_log.artifact_id,

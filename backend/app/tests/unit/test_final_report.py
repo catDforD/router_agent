@@ -80,7 +80,7 @@ def test_final_report_payload_includes_stable_delivery_sections(
     )
 
     assert report["kind"] == "main_agent_final_report"
-    assert report["schema_version"] == "router.v1"
+    assert report["schema_version"] == "router.v2"
     assert report["report_version"] == 1
     assert report["task_id"] == task.task_id
     assert report["main_agent_run_id"] == "main-agent-run-001"

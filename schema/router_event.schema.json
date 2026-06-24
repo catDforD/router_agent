@@ -15,6 +15,30 @@
           "default": null,
           "title": "Parent Event Id"
         },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
         "openai_trace_id": {
           "anyOf": [
             {
@@ -164,6 +188,18 @@
         "task.partial_failed",
         "task.failed",
         "task.cancelled",
+        "agent.started",
+        "agent.decision",
+        "agent.plan_updated",
+        "agent.clarification_requested",
+        "agent.finalizing",
+        "agent.turn_started",
+        "agent.message",
+        "agent.final_response",
+        "agent.stop_blocked",
+        "agent.tool_called",
+        "agent.tool_result",
+        "agent.completed",
         "main_agent.started",
         "main_agent.decision",
         "main_agent.plan_updated",
@@ -219,7 +255,10 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "router.v1",
+      "enum": [
+        "router.v2",
+        "router.v1"
+      ],
       "title": "Schema Version",
       "type": "string"
     },
@@ -297,6 +336,6 @@
   "title": "RouterEvent",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.router.local/router.v1/router_event.schema.json",
-  "x-schema-version": "router.v1"
+  "$id": "https://schemas.router.local/router.v2/router_event.schema.json",
+  "x-schema-version": "router.v2"
 }

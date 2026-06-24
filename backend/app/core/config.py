@@ -53,6 +53,24 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="MAIN_AGENT_STREAM",
     )
+    agent_execution_mode: str = Field(
+        default="disabled",
+        validation_alias="AGENT_EXECUTION_MODE",
+    )
+    agent_workspace_root: Path = Field(
+        default=Path("."),
+        validation_alias="AGENT_WORKSPACE_ROOT",
+    )
+    agent_command_timeout_seconds: int = Field(
+        default=120,
+        ge=1,
+        validation_alias="AGENT_COMMAND_TIMEOUT_SECONDS",
+    )
+    agent_tool_output_max_chars: int = Field(
+        default=12_000,
+        ge=1,
+        validation_alias="AGENT_TOOL_OUTPUT_MAX_CHARS",
+    )
     mcp_mode: str = Field(default="mock", validation_alias="MCP_MODE")
     plc_worker_mcp_url: str = Field(
         default="http://localhost:9000/mcp",
@@ -116,10 +134,18 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_main_agent_provider(cls, value: str) -> str:
         normalized = value.lower()
-        if normalized not in {"openai_compatible", "legacy_openai_agents"}:
+        if normalized != "openai_compatible":
+            raise ValueError("main_agent_provider must be 'openai_compatible'")
+        return normalized
+
+    @field_validator("agent_execution_mode")
+    @classmethod
+    def normalize_agent_execution_mode(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in {"disabled", "local_read_only", "local_full_access"}:
             raise ValueError(
-                "main_agent_provider must be 'openai_compatible' or "
-                "'legacy_openai_agents'"
+                "agent_execution_mode must be 'disabled', 'local_read_only', "
+                "or 'local_full_access'"
             )
         return normalized
 
@@ -164,6 +190,10 @@ class Settings(BaseSettings):
             "main_agent_max_turns": self.main_agent_max_turns,
             "main_agent_stream": self.main_agent_stream,
             "main_agent_api_key": _redacted(self.main_agent_api_key),
+            "agent_execution_mode": self.agent_execution_mode,
+            "agent_workspace_root": str(self.agent_workspace_root),
+            "agent_command_timeout_seconds": self.agent_command_timeout_seconds,
+            "agent_tool_output_max_chars": self.agent_tool_output_max_chars,
             "deepseek_base_url": self.deepseek_base_url,
             "deepseek_model": self.deepseek_model,
             "deepseek_timeout_seconds": self.deepseek_timeout_seconds,

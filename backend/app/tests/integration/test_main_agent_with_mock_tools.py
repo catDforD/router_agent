@@ -13,7 +13,6 @@ from app.agents.main_agent import (
     episode_output_from_task,
 )
 from app.agents.output_schema import (
-    IntakeClassificationOutput,
     MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentPlanStep,
@@ -61,32 +60,18 @@ class ToolSequenceRunner:
     def __init__(
         self,
         *,
-        classification: IntakeClassificationOutput,
+        plan_config: dict[str, Any] | None = None,
+        clarification_questions: list[dict[str, Any]] | None = None,
         sequence: list[str],
         final_task_status: str | None = None,
     ) -> None:
-        self.classification = classification
+        self.plan_config = plan_config or default_plan_config()
+        self.clarification_questions = clarification_questions
         self.sequence = sequence
         self.final_task_status = final_task_status
         self.calls: list[str] = []
         self.tool_results: list[AgentToolResult] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        assert worker_jobs(context.session) == []
-        task = TaskRepository(context.session).get_task(run_config.group_id)
-        assert task.status == "created"
-        assert task.phase == "intake"
-        assert task.task_type == "unknown"
-        return self.classification
+        self.uses_tool_loop_side_effects = clarification_questions is not None
 
     def run_orchestration(
         self,
@@ -100,6 +85,28 @@ class ToolSequenceRunner:
         self.calls.append("orchestration")
         task_id = run_config.group_id
         tools = AgentToolService(context)
+        task = TaskRepository(context.session).get_task(task_id)
+        assert worker_jobs(context.session) == []
+        assert task.status == "created"
+        assert task.phase == "intake"
+        assert task.task_type == "unknown"
+        if self.clarification_questions is not None:
+            result = tools.request_clarification(
+                task_id,
+                questions=self.clarification_questions,
+                rationale_summary="Scripted scenario needs user clarification.",
+            )
+            assert result.status == "applied", result.model_dump(mode="json")
+            task = TaskRepository(context.session).get_task(task_id)
+            return self._episode_output(task)
+
+        plan_result = tools.update_plan(
+            task_id,
+            summary="Scripted scenario prepared task for worker dispatch.",
+            plan=[{"order": 1, "action": "run scripted worker sequence"}],
+            **self.plan_config,
+        )
+        assert plan_result.status == "applied", plan_result.model_dump(mode="json")
         for action in self.sequence:
             if action == "dev":
                 result = tools.call_plc_dev(task_id)
@@ -114,8 +121,6 @@ class ToolSequenceRunner:
                 continue
             elif action == "gate":
                 result = tools.run_quality_gate(task_id)
-            elif action == "finish":
-                result = tools.finish_task(task_id)
             else:
                 raise AssertionError(f"unknown fake action: {action}")
             self.tool_results.append(result)
@@ -131,7 +136,7 @@ class ToolSequenceRunner:
                 task_id=task_id,
                 event_type=EventType.MAIN_AGENT_FINALIZING,
                 title="Main Agent finalizing",
-                message="Fake runner is running Quality Gate before finish.",
+                message="Fake runner is running Quality Gate before final response.",
                 openai_trace_id=task.trace.openai_trace_id,
                 main_agent_run_id=task.trace.latest_main_agent_run_id,
                 payload={"task_id": task_id},
@@ -148,7 +153,7 @@ class ToolSequenceRunner:
                 MainAgentDecision(
                     decision_type="tool_sequence",
                     summary="Ran deterministic Main Agent tool sequence.",
-                    action="finish",
+                    action="return_final_response",
                     artifact_refs=_output_artifact_refs(self.tool_results),
                     details={
                         "tools": [result.tool for result in self.tool_results],
@@ -194,18 +199,6 @@ class GuardRejectionRunner:
         self.calls: list[str] = []
         self.tool_result: AgentToolResult | None = None
 
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        return classification()
-
     def run_orchestration(
         self,
         *,
@@ -217,7 +210,15 @@ class GuardRejectionRunner:
     ) -> Any:
         self.calls.append("orchestration")
         task_id = run_config.group_id
-        result = AgentToolService(context).call_plc_test(
+        tools = AgentToolService(context)
+        plan_result = tools.update_plan(
+            task_id,
+            summary="Prepare task so test guard reaches missing code validation.",
+            plan=[{"order": 1, "action": "call_plc_test"}],
+            **default_plan_config(),
+        )
+        assert plan_result.status == "applied"
+        result = tools.call_plc_test(
             task_id,
             rationale_summary="Validate code before delivery.",
         )
@@ -231,41 +232,15 @@ class GuardRejectionRunner:
         )
 
 
-def signals(**updates: bool) -> dict[str, bool]:
-    values = {
-        "has_existing_code": False,
-        "has_io_points": False,
-        "has_timing_logic": False,
-        "has_state_machine": False,
-        "has_safety_constraints": False,
-        "has_emergency_stop": False,
-        "has_interlock": False,
-        "has_fault_latching": False,
-        "has_mode_switching": False,
-        "multi_module": False,
-        "requirement_incomplete": False,
-    }
-    values.update(updates)
-    return values
-
-
-def classification(**updates: Any) -> IntakeClassificationOutput:
+def default_plan_config(**updates: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "normalized_goal": "Create motor control PLC logic with validation.",
         "task_type": "new_plc_development",
-        "difficulty_level": "L2",
-        "difficulty_score": 0.55,
-        "difficulty_confidence": 0.86,
-        "difficulty_reasons": ["Development with validation."],
-        "difficulty_signals": signals(has_io_points=True),
         "requires_test": True,
         "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
     }
     values.update(updates)
-    return IntakeClassificationOutput.model_validate(values)
+    return values
 
 
 def create_task(task_service: TaskService, message: str = "Create motor logic.") -> str:
@@ -305,13 +280,12 @@ def read_report_content(
     return json.loads(stored.content)
 
 
-def test_ordinary_l2_development_completes_with_dev_test_gate_finish(
+def test_ordinary_l2_development_completes_with_dev_test_gate_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -325,7 +299,7 @@ def test_ordinary_l2_development_completes_with_dev_test_gate_finish(
     )
     task = TaskRepository(db_session).get_task(task_id)
 
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
     assert [result.tool for result in runner.tool_results] == [
         "call_plc_dev",
         "call_plc_test",
@@ -348,7 +322,6 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -363,7 +336,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
     event_types = [event.type for event in events]
-    completed_event = next(event for event in events if event.type == "main_agent.completed")
+    completed_event = next(event for event in events if event.type == "agent.completed")
     artifact_rows = list(
         db_session.execute(select(ArtifactRow).where(ArtifactRow.task_id == task_id))
         .scalars()
@@ -381,7 +354,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     assert {"final_report", "main_agent_log"} <= {row.type for row in artifact_rows}
     assert completed_event.payload["final_report_artifact_id"] in artifact_ids
     assert completed_event.payload["main_agent_log_artifact_id"] in artifact_ids
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.succeeded"
     )
     assert task.current_artifacts.final_report is not None
@@ -410,7 +383,6 @@ def test_report_first_partial_failed_report_records_unresolved_failures(
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(requires_repair_loop=True),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="partial_failed",
     )
@@ -431,7 +403,7 @@ def test_report_first_partial_failed_report_records_unresolved_failures(
     assert task.gates.has_blocking_failure is True
     assert any(failure.status == "open" for failure in task.failures)
     assert task.current_artifacts.final_report is not None
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.partial_failed"
     )
     report = read_report_content(
@@ -469,9 +441,14 @@ def test_guard_rejection_is_visible_through_main_agent_tool_result(
     )
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
-    tool_result = next(event for event in events if event.type == "main_agent.tool_result")
+    tool_result = next(
+        event
+        for event in events
+        if event.type == "agent.tool_result"
+        and event.payload["status"] == "rejected"
+    )
 
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
     assert runner.tool_result is not None
     assert runner.tool_result.status == "rejected"
     assert task.status == "running"
@@ -481,16 +458,13 @@ def test_guard_rejection_is_visible_through_main_agent_tool_result(
     assert worker_jobs(db_session) == []
 
 
-def test_safety_critical_l3_development_runs_test_and_formal_before_finish(
+def test_safety_critical_l3_development_runs_test_and_formal_before_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(
-            difficulty_level="L3",
-            difficulty_reasons=["Emergency stop requires formal verification."],
-            difficulty_signals=signals(has_emergency_stop=True),
+        plan_config=default_plan_config(
             requires_formal=True,
         ),
         sequence=["dev", "test", "formal", "finalizing", "gate"],
@@ -507,20 +481,18 @@ def test_safety_critical_l3_development_runs_test_and_formal_before_finish(
     task = TaskRepository(db_session).get_task(task_id)
 
     assert task.status == "succeeded"
-    assert task.difficulty.level == "L3"
     assert task.gates.test_required is True
     assert task.gates.formal_required is True
     assert task.gates.latest_test_passed is True
     assert task.gates.latest_formal_passed is True
 
 
-def test_test_failure_triggers_repair_and_regression_before_finish(
+def test_test_failure_triggers_repair_and_regression_before_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(),
         sequence=["dev", "test", "repair", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -548,10 +520,7 @@ def test_formal_failure_triggers_repair_test_and_formal_regression(
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(
-            difficulty_level="L3",
-            difficulty_reasons=["Safety property requires formal verification."],
-            difficulty_signals=signals(has_safety_constraints=True),
+        plan_config=default_plan_config(
             requires_formal=True,
         ),
         sequence=[
@@ -592,21 +561,14 @@ def test_clarification_required_task_creates_no_worker_jobs(
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(
-            difficulty_level="L1",
-            difficulty_reasons=["Platform and I/O details are missing."],
-            difficulty_signals=signals(requirement_incomplete=True),
-            requires_test=False,
-            need_clarification=True,
-            clarification_questions=[
-                {
-                    "question": "Which PLC platform and I/O names should be used?",
-                    "reason": "The worker needs concrete target details.",
-                    "required": True,
-                }
-            ],
-        ),
-        sequence=["dev"],
+        clarification_questions=[
+            {
+                "question": "Which PLC platform and I/O names should be used?",
+                "reason": "The worker needs concrete target details.",
+                "required": True,
+            }
+        ],
+        sequence=[],
     )
 
     task_id, output = run_with_sequence(
@@ -618,7 +580,7 @@ def test_clarification_required_task_creates_no_worker_jobs(
     )
     task = TaskRepository(db_session).get_task(task_id)
 
-    assert runner.calls == ["intake"]
+    assert runner.calls == ["orchestration"]
     assert task.status == "waiting_user"
     assert task.phase == "clarifying"
     assert worker_jobs(db_session) == []
@@ -636,7 +598,6 @@ def test_worker_inputs_inherit_main_agent_trace_context(
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -683,7 +644,6 @@ def test_main_agent_events_are_visible_in_orchestration_timeline(
     task_service: TaskService,
 ) -> None:
     runner = ToolSequenceRunner(
-        classification=classification(),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -697,10 +657,10 @@ def test_main_agent_events_are_visible_in_orchestration_timeline(
     )
     events = [event.type for event in EventService(db_session).list_visible_events(task_id)]
 
-    assert "main_agent.started" in events
-    assert "main_agent.decision" in events
-    assert "main_agent.finalizing" in events
-    assert "main_agent.completed" in events
+    assert "agent.started" in events
+    assert "agent.plan_updated" in events
+    assert "agent.finalizing" in events
+    assert "agent.completed" in events
     assert "gate.passed" in events
     assert "task.succeeded" in events
 

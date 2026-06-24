@@ -1,5 +1,5 @@
 /**
- * Router v1 TypeScript reference contract.
+ * Router v2 TypeScript reference contract.
  *
  * This file is kept as a human-readable companion to the Python Pydantic
  * models in backend/models/router_schema.py and the generated JSON Schema
@@ -17,7 +17,7 @@
  * Main Agent、Runtime、Worker 之间尽量传 ArtifactRef，不直接传大段代码、
  * 日志、trace 或报告正文。
  */
-export type SchemaVersion = "router.v1";
+export type SchemaVersion = "router.v2" | "router.v1";
 export type ISODateTime = string;
 
 export type JsonValue =
@@ -311,6 +311,40 @@ export interface ProjectContext {
 
   coding_style_artifact_id?: string | null;
   project_memory_artifact_ids?: string[];
+  workspace_root?: string | null;
+}
+
+export interface ExecutionPolicy {
+  mode: "disabled" | "local_read_only" | "local_full_access";
+  command_timeout_seconds: number;
+  tool_output_max_chars: number;
+  allow_network?: boolean | null;
+}
+
+export interface WorkspaceContext {
+  root: string;
+  current_directory?: string | null;
+  writable: boolean;
+}
+
+export interface AgentToolCallRecord {
+  tool_call_id: string;
+  tool_name: string;
+  arguments: Record<string, JsonValue>;
+  status: "queued" | "running" | "applied" | "rejected" | "failed" | "no-op";
+  summary?: string | null;
+  started_at: ISODateTime;
+  completed_at?: ISODateTime | null;
+}
+
+export interface AgentRunState {
+  agent_run_id: string;
+  status: "running" | "waiting_user" | "succeeded" | "partial_failed" | "failed" | "cancelled";
+  workspace?: WorkspaceContext | null;
+  execution_policy?: ExecutionPolicy | null;
+  tool_calls: AgentToolCallRecord[];
+  started_at: ISODateTime;
+  completed_at?: ISODateTime | null;
 }
 
 export interface TaskState {
@@ -337,6 +371,9 @@ export interface TaskState {
   difficulty: DifficultyProfile;
 
   project_context: ProjectContext;
+  workspace?: WorkspaceContext | null;
+  execution_policy?: ExecutionPolicy | null;
+  agent_runs: AgentRunState[];
 
   runtime_limits: RuntimeLimits;
   gates: GateState;
@@ -800,6 +837,18 @@ export type EventType =
   | "task.failed"
   | "task.cancelled"
 
+  | "agent.started"
+  | "agent.decision"
+  | "agent.plan_updated"
+  | "agent.clarification_requested"
+  | "agent.finalizing"
+  | "agent.turn_started"
+  | "agent.message"
+  | "agent.final_response"
+  | "agent.stop_blocked"
+  | "agent.tool_called"
+  | "agent.tool_result"
+  | "agent.completed"
   | "main_agent.started"
   | "main_agent.decision"
   | "main_agent.plan_updated"
@@ -849,6 +898,9 @@ export interface EventSource {
 export interface EventCorrelation {
   parent_event_id?: string | null;
 
+  session_id?: string | null;
+  run_id?: string | null;
+
   openai_trace_id?: string | null;
   main_agent_run_id?: string | null;
 
@@ -857,6 +909,36 @@ export interface EventCorrelation {
 
   artifact_ids?: string[];
   failure_ids?: string[];
+}
+
+export type AgentSessionStatus = "active" | "archived" | "cancelled";
+
+export interface AgentSessionRunRef {
+  run_id: string;
+  task_id: string;
+  status: string;
+  user_message: string;
+  final_response?: string | null;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+  completed_at?: ISODateTime | null;
+}
+
+export interface AgentSession {
+  schema_version: SchemaVersion;
+  session_id: string;
+  user_id?: string | null;
+  title: string;
+  status: AgentSessionStatus;
+  project_context: ProjectContext;
+  workspace?: WorkspaceContext | null;
+  latest_task_id?: string | null;
+  latest_run_id?: string | null;
+  summary?: string | null;
+  event_seq: number;
+  runs: AgentSessionRunRef[];
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
 }
 
 export interface RouterEvent {

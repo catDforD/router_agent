@@ -172,7 +172,7 @@ def test_cancel_task_updates_state_and_emits_event(
     assert cancelled.completed_at is not None
     assert [event.type for event in events] == [
         "task.created",
-        "main_agent.started",
+        "agent.started",
         "task.cancelled",
     ]
     assert events[-1].correlation.openai_trace_id == started.trace.openai_trace_id
@@ -239,7 +239,7 @@ def test_cancel_task_refreshes_stale_session_after_background_event(
         assert restored.status == "cancelled"
         assert [event.type for event in events] == [
             "task.created",
-            "main_agent.started",
+            "agent.started",
             "task.cancelled",
         ]
         assert [event.seq for event in events] == [1, 2, 3]

@@ -9,6 +9,7 @@ from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
 from app.models.db_models import EventRow, TaskRow
 from app.models.router_schema import EventVisibility, RouterEvent
 from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
+from app.repositories.session_repo import AgentSessionRepository
 
 
 class EventRepository:
@@ -53,6 +54,10 @@ class EventRepository:
         flush_or_raise_conflict(
             self.session,
             f"event sequence conflicts for task: {event.task_id}",
+        )
+        AgentSessionRepository(self.session).append_session_event(
+            session_id=task_row.session_id,
+            event=persisted_event,
         )
         return persisted_event
 

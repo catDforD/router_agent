@@ -6,7 +6,7 @@ TBD - created by archiving change add-scheduler-guard. Update Purpose after arch
 ### Requirement: Scheduler Guard validates worker dispatch before side effects
 The backend SHALL validate proposed PLC worker calls before creating worker jobs, writing worker events, or invoking MCP tools.
 
-#### Scenario: Intake task dispatch is rejected before classification
+#### Scenario: Unprepared intake task dispatch is rejected
 - **WHEN** Runtime proposes any PLC worker call for a task whose `status` is `created`, `phase` is `intake`, or `task_type` is `unknown`
 - **THEN** Scheduler Guard rejects the worker call
 
@@ -105,4 +105,3 @@ The backend SHALL make Scheduler Guard decisions deterministic and free of runti
 #### Scenario: Rejected action does not mutate task state
 - **WHEN** Scheduler Guard rejects a proposed action
 - **THEN** the input `TaskState` remains unchanged
-

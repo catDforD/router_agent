@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -10,46 +9,13 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from pydantic import JsonValue
 from sqlalchemy.orm import Session
 
-try:
-    from agents import (
-        Agent,
-        AgentOutputSchema,
-        MaxTurnsExceeded,
-        ModelBehaviorError,
-        RunConfig,
-        Runner,
-        gen_trace_id,
-    )
-    from agents.lifecycle import RunHooksBase
-
-    AGENTS_SDK_AVAILABLE = True
-except ImportError:  # pragma: no cover - SDK is a runtime dependency.
-    Agent = Any  # type: ignore[assignment]
-    AgentOutputSchema = Any  # type: ignore[assignment]
-    RunHooksBase = object  # type: ignore[assignment]
-    RunConfig = Any  # type: ignore[assignment]
-    Runner = None  # type: ignore[assignment]
-    AGENTS_SDK_AVAILABLE = False
-
-    class MaxTurnsExceeded(Exception):  # type: ignore[no-redef]
-        pass
-
-    class ModelBehaviorError(Exception):  # type: ignore[no-redef]
-        pass
-
-    def gen_trace_id() -> str:  # type: ignore[no-redef]
-        from uuid import uuid4
-
-        return f"trace_{uuid4().hex}"
-
 from app.agents.instructions import (
-    INTAKE_AGENT_NAME,
     ORCHESTRATION_AGENT_NAME,
-    build_intake_instructions,
     build_orchestration_instructions,
     build_state_view_prompt,
 )
@@ -61,7 +27,6 @@ from app.agents.chat_completions import (
 )
 from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.output_schema import (
-    IntakeClassificationOutput,
     MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentEpisodeOutput,
@@ -74,18 +39,19 @@ from app.agents.tools import (
     ToolStatus,
     call_main_agent_tool,
     get_main_agent_tool_specs,
-    get_main_agent_tools,
+    get_main_agent_tool_names,
 )
 from app.core.ids import new_event_id, prefixed_id
 from app.core.logging import log_with_context
 from app.core.time import utc_now
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
+    AgentRunState,
     ArtifactRef,
-    ClarificationQuestion,
     CurrentArtifacts,
+    DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
-    DifficultyProfile,
+    ExecutionPolicy,
     EventCorrelation,
     EventSeverity,
     EventSource,
@@ -93,20 +59,21 @@ from app.models.router_schema import (
     EventType,
     EventVisibility,
     Failure,
-    GateState,
     RouterEvent,
     TaskPhase,
     TaskState,
     TaskStatus,
     TaskTrace,
     TaskType,
+    WorkspaceContext,
 )
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
-from app.services.scheduler_guard import SchedulerGuardViolation, validate_finish_task
+from app.services.scheduler_guard import SchedulerGuardViolation
 
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
+MAX_STOP_BLOCKS = 2
 LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -120,50 +87,67 @@ TERMINAL_EVENT_BY_STATUS = {
     TaskStatus.FAILED.value: EventType.TASK_FAILED,
     TaskStatus.CANCELLED.value: EventType.TASK_CANCELLED,
 }
-SAFETY_SIGNAL_FIELDS = (
-    "has_safety_constraints",
-    "has_emergency_stop",
-    "has_interlock",
-    "has_fault_latching",
-    "has_mode_switching",
-    "has_state_machine",
-)
-DIFFICULTY_RANK = {
-    DifficultyLevel.L0.value: 0,
-    DifficultyLevel.L1.value: 1,
-    DifficultyLevel.L2.value: 2,
-    DifficultyLevel.L3.value: 3,
-    DifficultyLevel.L4.value: 4,
-}
-DIFFICULTY_BY_RANK = {
-    rank: level
-    for level, rank in DIFFICULTY_RANK.items()
-}
-MAIN_AGENT_TOOL_NAMES = (
-    "update_plan",
-    "request_clarification",
-    "call_plc_dev",
-    "call_plc_test",
-    "call_plc_formal",
-    "call_plc_repair",
-    "run_parallel_workers",
+MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
+EVIDENCE_TOOL_NAMES = {
+    "list_files",
+    "read_file",
+    "write_file",
+    "apply_patch",
+    "exec_command",
+    "git_status",
     "read_artifact",
-    "run_quality_gate",
-    "write_final_report",
-    "finish_task",
+    "write_artifact",
+    "call_mcp_tool",
+}
+EXECUTION_REQUEST_KEYWORDS = (
+    "plc",
+    "code",
+    "file",
+    "workspace",
+    "modify",
+    "write",
+    "create",
+    "build",
+    "implement",
+    "test",
+    "verify",
+    "debug",
+    "command",
+    "patch",
+    "artifact",
+    "代码",
+    "文件",
+    "修改",
+    "写",
+    "创建",
+    "生成",
+    "实现",
+    "测试",
+    "验证",
+    "调试",
+    "命令",
+    "补丁",
 )
+
+
+class MaxTurnsExceeded(Exception):
+    """Raised when a Main Agent runner exceeds its turn budget."""
+
+
+class ModelBehaviorError(Exception):
+    """Raised when a Main Agent runner reports invalid model behavior."""
+
+
+def gen_trace_id() -> str:
+    return f"trace_{uuid4().hex}"
 
 
 class MainAgentServiceError(Exception):
     """Base class for Main Agent service failures."""
 
 
-class MainAgentRunnerUnavailableError(MainAgentServiceError):
-    """Raised when production SDK execution is requested without the SDK."""
-
-
 class MainAgentRunner(Protocol):
-    """Runner boundary used by production SDK calls and deterministic tests."""
+    """Runner boundary used by production tool-loop calls and deterministic tests."""
 
     def run_orchestration(
         self,
@@ -209,6 +193,12 @@ class _AssistantTurn:
     tool_calls: list[_ChatToolCall]
 
 
+@dataclass(frozen=True)
+class _StopDecision:
+    allowed: bool
+    reason: str
+
+
 class OpenAICompatibleToolLoopRunner:
     """Production Main Agent runner using OpenAI-compatible Chat Completions."""
 
@@ -245,6 +235,7 @@ class OpenAICompatibleToolLoopRunner:
         tools = get_main_agent_tool_specs()
         recorder = context.observability_recorder
         task_id = run_config.group_id
+        stop_block_count = 0
 
         for _ in range(max_turns):
             turn_index = (
@@ -261,11 +252,98 @@ class OpenAICompatibleToolLoopRunner:
             assistant_message = _assistant_message_for_history(assistant_turn)
             messages.append(assistant_message)
 
-            if assistant_turn.content and recorder is not None:
-                recorder.record_message(
+            if assistant_turn.tool_calls and assistant_turn.content and recorder is not None:
+                recorder.record_progress_message(
                     content=assistant_turn.content,
                     turn_index=turn_index,
                 )
+
+            if not assistant_turn.tool_calls:
+                if assistant_turn.content:
+                    stop_decision = _evaluate_stop_request(
+                        context=context,
+                        task_id=task_id,
+                    )
+                    if stop_decision.allowed:
+                        current = TaskRepository(context.session).get_task(task_id)
+                        return _finalize_runtime_stop(
+                            context=context,
+                            task_id=task_id,
+                            final_response=assistant_turn.content,
+                            final_status=_final_status_for_stop(context, current),
+                            source="assistant_stop",
+                            turn_index=turn_index,
+                        )
+                    if recorder is not None:
+                        recorder.record_progress_message(
+                            content=assistant_turn.content,
+                            turn_index=turn_index,
+                        )
+                    stop_block_count += 1
+                    if recorder is not None:
+                        recorder.record_stop_blocked(
+                            reason=stop_decision.reason,
+                            blocked_count=stop_block_count,
+                            max_blocked_count=MAX_STOP_BLOCKS,
+                            turn_index=turn_index,
+                        )
+                    if stop_block_count >= MAX_STOP_BLOCKS:
+                        return _finalize_runtime_stop(
+                            context=context,
+                            task_id=task_id,
+                            final_response=(
+                                "I could not complete this task because required "
+                                f"execution evidence is missing. {stop_decision.reason}"
+                            ),
+                            final_status=TaskStatus.FAILED.value,
+                            source="runtime_fallback",
+                            turn_index=turn_index,
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Runtime stop was blocked: "
+                                f"{stop_decision.reason} Continue with the required "
+                                "workspace/tool work, then provide a final answer "
+                                "with no tool calls."
+                            ),
+                        }
+                    )
+                    continue
+
+                stop_block_count += 1
+                reason = "The assistant returned no content and no tool calls."
+                if recorder is not None:
+                    recorder.record_stop_blocked(
+                        reason=reason,
+                        blocked_count=stop_block_count,
+                        max_blocked_count=MAX_STOP_BLOCKS,
+                        turn_index=turn_index,
+                    )
+                if stop_block_count >= MAX_STOP_BLOCKS:
+                    return _finalize_runtime_stop(
+                        context=context,
+                        task_id=task_id,
+                        final_response=(
+                            "I could not complete this task because the model "
+                            "stopped without a final response or tool action."
+                        ),
+                        final_status=TaskStatus.FAILED.value,
+                        source="runtime_fallback",
+                        turn_index=turn_index,
+                    )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Runtime stop was blocked: no final response or tool "
+                            "call was provided. Continue with required work or "
+                            "provide a final answer with no tool calls."
+                        ),
+                    }
+                )
+                continue
 
             for tool_call in assistant_turn.tool_calls:
                 tool_result = _execute_tool_call(
@@ -337,117 +415,6 @@ class OpenAICompatibleToolLoopRunner:
         return _assistant_turn_from_response(response)
 
 
-class OpenAIAgentsRunner:
-    """Production runner backed by the OpenAI Agents SDK."""
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        if Runner is None:
-            raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")
-        result = Runner.run_sync(
-            agent,
-            input_text,
-            context=context,
-            max_turns=max_turns,
-            run_config=run_config,
-        )
-        return result.final_output_as(IntakeClassificationOutput, raise_if_incorrect_type=True)
-
-    def run_orchestration(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> MainAgentEpisodeOutput:
-        if Runner is None:
-            raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")
-        if context.observability_recorder is not None:
-            return self._run_orchestration_streamed(
-                agent=agent,
-                input_text=input_text,
-                context=context,
-                max_turns=max_turns,
-                run_config=run_config,
-            )
-        result = Runner.run_sync(
-            agent,
-            input_text,
-            context=context,
-            max_turns=max_turns,
-            run_config=run_config,
-        )
-        return result.final_output_as(MainAgentEpisodeOutput, raise_if_incorrect_type=True)
-
-    def _run_orchestration_streamed(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> MainAgentEpisodeOutput:
-        async def run_streamed() -> MainAgentEpisodeOutput:
-            result = Runner.run_streamed(
-                agent,
-                input_text,
-                context=context,
-                max_turns=max_turns,
-                run_config=run_config,
-                hooks=_ObservabilityRunHooks(context.observability_recorder),
-            )
-            async for _event in result.stream_events():
-                # Tool calls/results are persisted by AgentToolService. Draining the
-                # SDK stream keeps the model run live without exposing raw SDK events.
-                pass
-            return result.final_output_as(
-                MainAgentEpisodeOutput,
-                raise_if_incorrect_type=True,
-            )
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(run_streamed())
-        raise MainAgentServiceError(
-            "streamed OpenAI Agents runner cannot run inside an active event loop"
-        )
-
-
-class _ObservabilityRunHooks(RunHooksBase):  # type: ignore[misc, valid-type]
-    """SDK lifecycle hook adapter for Router observability."""
-
-    def __init__(self, recorder: Any | None) -> None:
-        self.recorder = recorder
-
-    async def on_llm_start(
-        self,
-        context: Any,
-        agent: Any,
-        system_prompt: str | None,
-        input_items: list[Any],
-    ) -> None:
-        if self.recorder is not None:
-            self.recorder.start_turn(phase="orchestration")
-
-
-@dataclass(frozen=True)
-class ClassificationApplyResult:
-    task: TaskState
-    classification: IntakeClassificationOutput
-    clarification_requested: bool
-
-
 class MainAgentService:
     """Coordinates one Main Agent episode over persisted Router state."""
 
@@ -462,6 +429,10 @@ class MainAgentService:
         max_turns: int = DEFAULT_MAIN_AGENT_MAX_TURNS,
         provider: str = "openai_compatible",
         stream: bool = True,
+        workspace_root: Path | None = None,
+        execution_mode: str = "disabled",
+        command_timeout_seconds: int = 120,
+        tool_output_max_chars: int = 12_000,
         chat_client: MainAgentChatClient | None = None,
         runner: MainAgentRunner | None = None,
         checkpoint: Callable[[], None] | None = None,
@@ -474,6 +445,10 @@ class MainAgentService:
         self.max_turns = max_turns
         self.provider = provider
         self.stream = stream
+        self.workspace_root = workspace_root
+        self.execution_mode = execution_mode
+        self.command_timeout_seconds = command_timeout_seconds
+        self.tool_output_max_chars = tool_output_max_chars
         self.runner = runner or _default_runner(
             provider=provider,
             stream=stream,
@@ -511,6 +486,10 @@ class MainAgentService:
         context = AgentToolContext(
             session=self.session,
             artifact_root=self.artifact_root,
+            workspace_root=_workspace_root_for_task(started, self.workspace_root),
+            execution_mode=self.execution_mode,
+            command_timeout_seconds=self.command_timeout_seconds,
+            tool_output_max_chars=self.tool_output_max_chars,
             mcp_mode=self.mcp_mode,
             mock_scenario=self.mock_scenario,
             report_first_finalization=True,
@@ -528,65 +507,30 @@ class MainAgentService:
 
         try:
             current = started
-            legacy_structured_runner = _uses_legacy_structured_runner(self.runner)
-            if legacy_structured_runner and _needs_classification(current):
-                current = self._run_and_apply_intake(current, context).task
-                if current.status == TaskStatus.WAITING_USER.value:
-                    output = episode_output_from_task(
-                        current,
-                        main_agent_run_id=current.trace.latest_main_agent_run_id
-                        or "not-started",
-                        summary="Task is waiting for user clarification.",
-                    )
-                    log_with_context(
-                        LOGGER,
-                        logging.INFO,
-                        "Main Agent episode paused",
-                        task_id=task_id,
-                        openai_trace_id=current.trace.openai_trace_id,
-                        main_agent_run_id=current.trace.latest_main_agent_run_id,
-                        status=current.status,
-                    )
-                    return output
-
-            if _is_terminal(current):
-                output = episode_output_from_task(
-                    current,
-                    main_agent_run_id=current.trace.latest_main_agent_run_id
-                    or "not-started",
-                    summary="Task reached a terminal state during intake.",
-                )
-                log_with_context(
-                    LOGGER,
-                    logging.INFO,
-                    "Main Agent episode completed during intake",
-                    task_id=task_id,
-                    openai_trace_id=current.trace.openai_trace_id,
-                    main_agent_run_id=current.trace.latest_main_agent_run_id,
-                    status=current.status,
-                )
-                return output
-
             state_view = build_state_view(current)
+            session_context = build_session_context_view(self.session, current)
+            if session_context:
+                state_view["session_context"] = session_context
             output = self.runner.run_orchestration(
-                agent=(
-                    build_orchestration_agent(model=self.model)
-                    if legacy_structured_runner
-                    else build_tool_loop_agent(model=self.model)
-                ),
+                agent=build_tool_loop_agent(model=self.model),
                 input_text=build_state_view_prompt(state_view),
                 context=context,
                 max_turns=self.max_turns,
-                run_config=(
-                    build_run_config(current, phase="orchestration")
-                    if legacy_structured_runner
-                    else build_tool_loop_run_config(current, phase="orchestration")
+                run_config=build_tool_loop_run_config(
+                    current,
+                    phase="orchestration",
                 ),
             )
             persisted_output = (
                 output
                 if getattr(self.runner, "uses_tool_loop_side_effects", False)
                 else self._persist_orchestration_output(output, recorder)
+            )
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(
+                    _value(persisted_output.final_task_status)
+                ),
             )
             log_with_context(
                 LOGGER,
@@ -632,6 +576,21 @@ class MainAgentService:
         now = utc_now()
         openai_trace_id = task.trace.openai_trace_id or gen_trace_id()
         main_agent_run_id = new_main_agent_run_id()
+        workspace_root = _workspace_root_for_task(task, self.workspace_root)
+        workspace = (
+            WorkspaceContext(
+                root=str(workspace_root),
+                current_directory=str(workspace_root),
+                writable=self.execution_mode == "local_full_access",
+            )
+            if workspace_root is not None
+            else task.workspace
+        )
+        execution_policy = ExecutionPolicy(
+            mode=self.execution_mode,
+            command_timeout_seconds=self.command_timeout_seconds,
+            tool_output_max_chars=self.tool_output_max_chars,
+        )
         main_agent_run_ids = [
             *task.trace.main_agent_run_ids,
             main_agent_run_id,
@@ -644,6 +603,19 @@ class MainAgentService:
                     main_agent_run_ids=main_agent_run_ids,
                     latest_main_agent_run_id=main_agent_run_id,
                 ),
+                "workspace": workspace,
+                "execution_policy": execution_policy,
+                "agent_runs": [
+                    *task.agent_runs,
+                    AgentRunState(
+                        agent_run_id=main_agent_run_id,
+                        status="running",
+                        workspace=workspace,
+                        execution_policy=execution_policy,
+                        tool_calls=[],
+                        started_at=now,
+                    ),
+                ],
                 "started_at": task.started_at or now,
                 "updated_at": now,
             },
@@ -662,167 +634,18 @@ class MainAgentService:
                     "main_agent_run_id": main_agent_run_id,
                     "phase": _value(task.phase),
                     "status": _value(task.status),
+                    "workspace": (
+                        workspace.model_dump(mode="json")
+                        if workspace is not None
+                        else None
+                    ),
+                    "execution_policy": execution_policy.model_dump(mode="json"),
                 },
                 created_at=now,
             )
         )
         self._checkpoint()
         return self._fresh_task(task_id)
-
-    def apply_intake_classification(
-        self,
-        task_id: str,
-        classification: IntakeClassificationOutput,
-    ) -> ClassificationApplyResult:
-        normalized = normalize_classification(classification)
-        task = self._fresh_task_for_update(task_id)
-        if _is_terminal(task):
-            return ClassificationApplyResult(
-                task=task,
-                classification=normalized,
-                clarification_requested=False,
-            )
-
-        now = utc_now()
-        questions = (
-            [
-                ClarificationQuestion(
-                    question_id=prefixed_id("question"),
-                    question=question.question,
-                    reason=question.reason,
-                    required=question.required,
-                    status="open",
-                    asked_at=now,
-                )
-                for question in normalized.clarification_questions
-            ]
-            if normalized.need_clarification
-            else []
-        )
-        difficulty = DifficultyProfile(
-            level=normalized.difficulty_level,
-            score=normalized.difficulty_score,
-            confidence=normalized.difficulty_confidence,
-            reasons=normalized.difficulty_reasons,
-            signals=normalized.difficulty_signals,
-            requires_test=normalized.requires_test,
-            requires_formal=normalized.requires_formal,
-            requires_repair_loop=normalized.requires_repair_loop,
-            need_clarification=normalized.need_clarification,
-        )
-        gates = GateState(
-            test_required=normalized.requires_test,
-            formal_required=normalized.requires_formal,
-            regression_required=task.gates.regression_required,
-            formal_regression_required=task.gates.formal_regression_required,
-            latest_test_passed=task.gates.latest_test_passed,
-            latest_formal_passed=task.gates.latest_formal_passed,
-            has_blocking_failure=task.gates.has_blocking_failure,
-            can_finish_as_success=False,
-        )
-        status = (
-            TaskStatus.WAITING_USER.value
-            if normalized.need_clarification
-            else TaskStatus.RUNNING.value
-        )
-        phase = (
-            TaskPhase.CLARIFYING.value
-            if normalized.need_clarification
-            else TaskPhase.PLANNING.value
-        )
-        updated = task.model_copy(
-            deep=True,
-            update={
-                "normalized_goal": normalized.normalized_goal,
-                "task_type": normalized.task_type,
-                "difficulty": difficulty,
-                "gates": gates,
-                "status": status,
-                "phase": phase,
-                "unresolved_questions": questions or task.unresolved_questions,
-                "updated_at": now,
-            },
-        )
-        self.task_repository.update_task_state(updated)
-        self.event_service.append_event(
-            build_main_agent_event(
-                task_id=task_id,
-                event_type=EventType.MAIN_AGENT_DECISION,
-                title="Main Agent classified task",
-                message="Main Agent intake classification was applied.",
-                openai_trace_id=updated.trace.openai_trace_id,
-                main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                payload={
-                    "task_id": task_id,
-                    "task_type": _value(normalized.task_type),
-                    "difficulty_level": _value(normalized.difficulty_level),
-                    "requires_test": normalized.requires_test,
-                    "requires_formal": normalized.requires_formal,
-                    "need_clarification": normalized.need_clarification,
-                },
-                created_at=now,
-            )
-        )
-        if normalized.need_clarification:
-            self.event_service.append_event(
-                build_main_agent_event(
-                    task_id=task_id,
-                    event_type=EventType.MAIN_AGENT_CLARIFICATION_REQUESTED,
-                    title="Main Agent requested clarification",
-                    message="Main Agent paused execution for user clarification.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "question_ids": [question.question_id for question in questions],
-                    },
-                    created_at=now,
-                )
-            )
-            self.event_service.append_event(
-                build_task_event(
-                    task_id=task_id,
-                    event_type=EventType.TASK_WAITING_USER,
-                    title="Task waiting for user",
-                    message="The task needs user clarification before workers can run.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "status": TaskStatus.WAITING_USER.value,
-                        "phase": TaskPhase.CLARIFYING.value,
-                        "question_ids": [question.question_id for question in questions],
-                    },
-                    created_at=now,
-                )
-            )
-        else:
-            self.event_service.append_event(
-                build_task_event(
-                    task_id=task_id,
-                    event_type=EventType.TASK_UPDATED,
-                    title="Task classified",
-                    message="The task was classified and is ready for planning.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "status": TaskStatus.RUNNING.value,
-                        "phase": TaskPhase.PLANNING.value,
-                        "task_type": _value(normalized.task_type),
-                        "difficulty_level": _value(normalized.difficulty_level),
-                    },
-                    created_at=now,
-                )
-            )
-
-        self._checkpoint()
-        persisted = self.task_repository.get_task(task_id)
-        return ClassificationApplyResult(
-            task=persisted,
-            classification=normalized,
-            clarification_requested=normalized.need_clarification,
-        )
 
     def emit_plan_updated(
         self,
@@ -864,20 +687,6 @@ class MainAgentService:
         self._checkpoint()
         return event
 
-    def _run_and_apply_intake(
-        self,
-        task: TaskState,
-        context: AgentToolContext,
-    ) -> ClassificationApplyResult:
-        classification = self.runner.run_intake(
-            agent=build_intake_agent(model=self.model),
-            input_text=build_state_view_prompt(build_state_view(task)),
-            context=context,
-            max_turns=self.max_turns,
-            run_config=build_run_config(task, phase="intake"),
-        )
-        return self.apply_intake_classification(task.task_id, classification)
-
     def _persist_orchestration_output(
         self,
         output: MainAgentEpisodeOutput,
@@ -912,7 +721,6 @@ class MainAgentService:
         if _is_terminal(task) or final_status not in TERMINAL_EVENT_BY_STATUS:
             return task
 
-        validate_finish_task(task, final_status)
         now = utc_now()
         updated = task.model_copy(
             deep=True,
@@ -942,6 +750,34 @@ class MainAgentService:
         self._checkpoint()
         return self._fresh_task(output.task_id)
 
+    def _complete_latest_agent_run(
+        self,
+        task_id: str,
+        status: str,
+    ) -> TaskState:
+        task = self._fresh_task_for_update(task_id)
+        latest_run_id = task.trace.latest_main_agent_run_id
+        if latest_run_id is None:
+            return task
+
+        now = utc_now()
+        updated_runs = [
+            run.model_copy(update={"status": status, "completed_at": now})
+            if run.agent_run_id == latest_run_id
+            else run
+            for run in task.agent_runs
+        ]
+        updated = task.model_copy(
+            deep=True,
+            update={
+                "agent_runs": updated_runs,
+                "updated_at": now,
+            },
+        )
+        self.task_repository.update_task_state(updated)
+        self._checkpoint()
+        return self._fresh_task(task_id)
+
     def _record_agent_error(
         self,
         *,
@@ -952,6 +788,10 @@ class MainAgentService:
     ) -> MainAgentEpisodeOutput:
         task = self._fresh_task(task_id)
         if _is_terminal(task):
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(_value(task.status)),
+            )
             log_with_context(
                 LOGGER,
                 logging.ERROR,
@@ -1055,6 +895,12 @@ class MainAgentService:
                     created_at=now,
                 )
             )
+            self._complete_latest_agent_run(
+                task_id,
+                _agent_run_status_from_final_status(terminal_status),
+            )
+        else:
+            self._complete_latest_agent_run(task_id, "failed")
         self._checkpoint()
         latest = self.task_repository.get_task(task_id)
         return episode_output_from_task(
@@ -1080,51 +926,11 @@ class MainAgentService:
         return self.task_repository.get_task_for_update(task_id)
 
 
-def build_intake_agent(*, model: str | None = None) -> Any:
-    _require_agents_sdk()
-    return Agent(
-        name=INTAKE_AGENT_NAME,
-        instructions=build_intake_instructions(),
-        model=model,
-        output_type=_agent_output_schema(IntakeClassificationOutput),
-    )
-
-
 def build_tool_loop_agent(*, model: str | None = None) -> ToolLoopAgent:
     return ToolLoopAgent(
         name=ORCHESTRATION_AGENT_NAME,
         instructions=build_orchestration_instructions(),
         model=model,
-    )
-
-
-def build_orchestration_agent(*, model: str | None = None) -> Any:
-    _require_agents_sdk()
-    return Agent(
-        name=ORCHESTRATION_AGENT_NAME,
-        instructions=build_orchestration_instructions(),
-        model=model,
-        tools=get_main_agent_tools(),
-        output_type=_agent_output_schema(MainAgentEpisodeOutput),
-    )
-
-
-def _agent_output_schema(output_type: type[Any]) -> Any:
-    return AgentOutputSchema(output_type, strict_json_schema=False)
-
-
-def build_run_config(task: TaskState, *, phase: str) -> Any:
-    _require_agents_sdk()
-    return RunConfig(
-        workflow_name="Router Main Agent",
-        trace_id=task.trace.openai_trace_id,
-        group_id=task.task_id,
-        trace_metadata={
-            "task_id": task.task_id,
-            "session_id": task.session_id,
-            "main_agent_run_id": task.trace.latest_main_agent_run_id or "",
-            "phase": phase,
-        },
     )
 
 
@@ -1164,6 +970,17 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
         },
         "gates": task.gates.model_dump(mode="json"),
         "current_artifacts": _current_artifact_view(task.current_artifacts),
+        "workspace": (
+            task.workspace.model_dump(mode="json")
+            if task.workspace is not None
+            else None
+        ),
+        "execution_policy": (
+            task.execution_policy.model_dump(mode="json")
+            if task.execution_policy is not None
+            else None
+        ),
+        "agent_runs": [run.model_dump(mode="json") for run in task.agent_runs],
         "open_failures": _failure_summaries(task.failures),
         "repair_rounds": (
             f"{task.runtime_limits.repair_rounds}/"
@@ -1185,39 +1002,91 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
     }
 
 
-def normalize_classification(
-    classification: IntakeClassificationOutput,
-) -> IntakeClassificationOutput:
-    level = _value(classification.difficulty_level)
-    reasons = list(classification.difficulty_reasons)
-    requires_test = classification.requires_test
-    requires_formal = classification.requires_formal
-    requires_repair_loop = classification.requires_repair_loop
+def build_session_context_view(
+    session: Session,
+    current_task: TaskState,
+    *,
+    max_runs: int = 6,
+) -> dict[str, Any] | None:
+    previous_tasks = [
+        task
+        for task in TaskRepository(session).list_tasks_by_session(current_task.session_id)
+        if task.task_id != current_task.task_id
+    ][-max_runs:]
+    if not previous_tasks:
+        return None
 
-    if DIFFICULTY_RANK[level] >= DIFFICULTY_RANK[DifficultyLevel.L2.value]:
-        requires_test = True
+    event_service = EventService(session)
+    runs: list[dict[str, Any]] = []
+    for task in previous_tasks:
+        events = event_service.list_visible_events(task.task_id)
+        final_response = next(
+            (
+                str(event.payload.get("content") or event.message or "")
+                for event in reversed(events)
+                if event.type == EventType.MAIN_AGENT_FINAL_RESPONSE
+            ),
+            None,
+        )
+        completed = next(
+            (
+                event
+                for event in reversed(events)
+                if event.type == EventType.MAIN_AGENT_COMPLETED
+            ),
+            None,
+        )
+        runs.append(
+            {
+                "run_id": task.task_id,
+                "task_id": task.task_id,
+                "status": _value(task.status),
+                "user_message": task.raw_user_request,
+                "final_response": _bounded_session_text(final_response),
+                "final_report_artifact_id": (
+                    completed.payload.get("final_report_artifact_id")
+                    if completed is not None
+                    else None
+                ),
+                "updated_at": task.updated_at.isoformat(),
+            }
+        )
 
-    if _has_safety_signal(classification):
-        if DIFFICULTY_RANK[level] < DIFFICULTY_RANK[DifficultyLevel.L3.value]:
-            level = DifficultyLevel.L3.value
-            reasons.append(
-                "Runtime elevated difficulty to L3 for safety-critical signals."
-            )
-        requires_test = True
-        requires_formal = True
+    return {
+        "session_id": current_task.session_id,
+        "current_run_id": current_task.task_id,
+        "recent_runs": runs,
+    }
 
-    if classification.task_type == TaskType.REPAIR_EXISTING_CODE.value:
-        requires_repair_loop = True
 
-    return classification.model_copy(
-        update={
-            "difficulty_level": level,
-            "difficulty_reasons": reasons,
-            "requires_test": requires_test,
-            "requires_formal": requires_formal,
-            "requires_repair_loop": requires_repair_loop,
-        }
-    )
+def _bounded_session_text(value: str | None, *, limit: int = 2000) -> str | None:
+    if value is None:
+        return None
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."
+
+
+def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
+    if task.workspace is not None:
+        return Path(task.workspace.root)
+    if task.project_context.workspace_root:
+        return Path(task.project_context.workspace_root)
+    return fallback
+
+
+def _agent_run_status_from_final_status(status: str) -> str:
+    if status in {
+        TaskStatus.SUCCEEDED.value,
+        TaskStatus.PARTIAL_FAILED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.CANCELLED.value,
+    }:
+        return status
+    if status == TaskStatus.WAITING_USER.value:
+        return status
+    return TaskStatus.FAILED.value
 
 
 def episode_output_from_task(
@@ -1258,6 +1127,199 @@ def episode_output_from_task(
         error_code=error_code,
         error_message=error_message,
     )
+
+
+def _evaluate_stop_request(
+    *,
+    context: AgentToolContext,
+    task_id: str,
+) -> _StopDecision:
+    task = TaskRepository(context.session).get_task(task_id)
+    if _is_terminal(task):
+        return _StopDecision(allowed=True, reason="Task is already terminal.")
+    if not _task_requires_tool_evidence(task):
+        return _StopDecision(allowed=True, reason="Task can be answered directly.")
+    if _has_tool_evidence(context, task):
+        return _StopDecision(allowed=True, reason="Required execution evidence exists.")
+    return _StopDecision(
+        allowed=False,
+        reason=(
+            "This task appears to require workspace, code, command, artifact, or "
+            "domain-tool evidence before a final answer."
+        ),
+    )
+
+
+def _task_requires_tool_evidence(task: TaskState) -> bool:
+    task_type = _value(task.task_type)
+    if task_type not in {TaskType.UNKNOWN.value, TaskType.QA.value}:
+        return True
+    if task_type == TaskType.QA.value:
+        return False
+    if (
+        task.difficulty.requires_test
+        or task.difficulty.requires_formal
+        or task.difficulty.requires_repair_loop
+    ):
+        return True
+    if _value(task.difficulty.level) in {
+        DifficultyLevel.L2.value,
+        DifficultyLevel.L3.value,
+        DifficultyLevel.L4.value,
+    }:
+        return True
+    request = f"{task.raw_user_request}\n{task.normalized_goal or ''}".lower()
+    return any(keyword in request for keyword in EXECUTION_REQUEST_KEYWORDS)
+
+
+def _has_tool_evidence(context: AgentToolContext, task: TaskState) -> bool:
+    return _latest_run_has_tool_evidence(task) or _events_have_tool_evidence(
+        context,
+        task.task_id,
+    )
+
+
+def _latest_run_has_tool_evidence(task: TaskState) -> bool:
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is None:
+        return False
+    return any(
+        call.tool_name in EVIDENCE_TOOL_NAMES and _value(call.status) != "rejected"
+        for call in latest_run.tool_calls
+    )
+
+
+def _events_have_tool_evidence(context: AgentToolContext, task_id: str) -> bool:
+    events = EventService(context.session).list_visible_events(task_id)
+    return any(
+        event.type == EventType.MAIN_AGENT_TOOL_RESULT
+        and str(event.payload.get("tool_name") or "") in EVIDENCE_TOOL_NAMES
+        and str(event.payload.get("status") or "") != "rejected"
+        for event in events
+    )
+
+
+def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is not None:
+        for call in reversed(latest_run.tool_calls):
+            if call.tool_name in EVIDENCE_TOOL_NAMES and _value(call.status) != "rejected":
+                return (
+                    TaskStatus.FAILED.value
+                    if _value(call.status) == "failed"
+                    else TaskStatus.SUCCEEDED.value
+                )
+    for event in reversed(EventService(context.session).list_visible_events(task.task_id)):
+        if (
+            event.type == EventType.MAIN_AGENT_TOOL_RESULT
+            and str(event.payload.get("tool_name") or "") in EVIDENCE_TOOL_NAMES
+            and str(event.payload.get("status") or "") != "rejected"
+        ):
+            return (
+                TaskStatus.FAILED.value
+                if str(event.payload.get("status") or "") == "failed"
+                else TaskStatus.SUCCEEDED.value
+            )
+    if task.failures:
+        open_blocking = any(
+            _value(failure.status) == "open"
+            and _value(failure.severity) == "blocking"
+            for failure in task.failures
+        )
+        if open_blocking:
+            return TaskStatus.FAILED.value
+    return TaskStatus.SUCCEEDED.value
+
+
+def _finalize_runtime_stop(
+    *,
+    context: AgentToolContext,
+    task_id: str,
+    final_response: str,
+    final_status: str,
+    source: str,
+    turn_index: int | None,
+) -> MainAgentEpisodeOutput:
+    task_repository = TaskRepository(context.session)
+    event_service = EventService(context.session)
+    task = task_repository.get_task(task_id)
+    main_agent_run_id = task.trace.latest_main_agent_run_id or "not-started"
+    recorder = context.observability_recorder or MainAgentObservabilityRecorder(
+        session=context.session,
+        artifact_root=context.artifact_root,
+        task_id=task_id,
+        openai_trace_id=task.trace.openai_trace_id,
+        main_agent_run_id=task.trace.latest_main_agent_run_id,
+        checkpoint=context.checkpoint,
+    )
+
+    output = episode_output_from_task(
+        task,
+        main_agent_run_id=main_agent_run_id,
+        summary=final_response,
+        final_task_status=final_status,
+    ).model_copy(update={"phase": TaskPhase.COMPLETED.value})
+    recorder.record_final_response(
+        content=final_response,
+        final_status=final_status,
+        source=source,
+        turn_index=turn_index,
+    )
+    final_report = recorder.write_final_report(output)
+    replay_log = recorder.write_replay_log(final_output=output)
+    recorder.record_completed(
+        output=output,
+        final_report=final_report,
+        replay_log=replay_log,
+    )
+
+    if final_status in TERMINAL_EVENT_BY_STATUS and not _is_terminal(task):
+        now = utc_now()
+        latest = task_repository.get_task_for_update(task_id)
+        updated = latest.model_copy(
+            deep=True,
+            update={
+                "status": final_status,
+                "phase": TaskPhase.COMPLETED.value,
+                "updated_at": now,
+                "completed_at": now,
+            },
+        )
+        task_repository.update_task_state(updated)
+        event_service.append_event(
+            build_task_event(
+                task_id=task_id,
+                event_type=TERMINAL_EVENT_BY_STATUS[final_status],
+                title=_terminal_event_title(final_status),
+                message=f"The task was marked {final_status}.",
+                openai_trace_id=updated.trace.openai_trace_id,
+                main_agent_run_id=updated.trace.latest_main_agent_run_id,
+                payload={
+                    "task_id": task_id,
+                    "status": final_status,
+                },
+                created_at=now,
+            )
+        )
+    if context.checkpoint is not None:
+        context.checkpoint()
+    return output
 
 
 def _assistant_message_for_history(turn: _AssistantTurn) -> dict[str, Any]:
@@ -1547,7 +1609,7 @@ def build_main_agent_event(
     failure_ids: list[str] | None = None,
 ) -> RouterEvent:
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version=DEFAULT_SCHEMA_VERSION,
         event_id=new_event_id(),
         task_id=task_id,
         seq=0,
@@ -1583,7 +1645,7 @@ def build_task_event(
     created_at: Any,
 ) -> RouterEvent:
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version=DEFAULT_SCHEMA_VERSION,
         event_id=new_event_id(),
         task_id=task_id,
         seq=0,
@@ -1670,29 +1732,9 @@ def _default_runner(
     stream: bool,
     chat_client: MainAgentChatClient | None,
 ) -> MainAgentRunner:
-    if provider == "legacy_openai_agents":
-        return OpenAIAgentsRunner()
     return OpenAICompatibleToolLoopRunner(
         chat_client=chat_client,
         stream=stream,
-    )
-
-
-def _uses_legacy_structured_runner(runner: MainAgentRunner) -> bool:
-    return (
-        isinstance(runner, OpenAIAgentsRunner)
-        or (
-            hasattr(runner, "run_intake")
-            and not getattr(runner, "uses_tool_loop_side_effects", False)
-        )
-    )
-
-
-def _needs_classification(task: TaskState) -> bool:
-    return (
-        _value(task.status) == TaskStatus.CREATED.value
-        or _value(task.phase) == TaskPhase.INTAKE.value
-        or _value(task.task_type) == TaskType.UNKNOWN.value
     )
 
 
@@ -1710,13 +1752,6 @@ def _terminal_event_title(final_status: str) -> str:
     if final_status == TaskStatus.CANCELLED.value:
         return "Task cancelled"
     return "Task completed"
-
-
-def _has_safety_signal(classification: IntakeClassificationOutput) -> bool:
-    return any(
-        bool(getattr(classification.difficulty_signals, field_name))
-        for field_name in SAFETY_SIGNAL_FIELDS
-    )
 
 
 def _json_payload(payload: dict[str, Any]) -> dict[str, JsonValue]:
@@ -1747,8 +1782,3 @@ def _value(value: Any) -> str:
     if isinstance(value, Enum):
         return str(value.value)
     return str(value)
-
-
-def _require_agents_sdk() -> None:
-    if not AGENTS_SDK_AVAILABLE:
-        raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")
