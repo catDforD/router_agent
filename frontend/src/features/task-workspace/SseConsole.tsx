@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUp,
@@ -22,6 +22,7 @@ import type {
   TaskState,
 } from "../../api/router/types";
 import type { StreamState } from "../../api/router/events";
+import { MarkdownText } from "./MarkdownText";
 
 interface SseConsoleProps {
   task: TaskState | null;
@@ -390,8 +391,8 @@ function TranscriptRow({
     return (
       <article className="transcript-entry transcript-message user-message">
         <div className="message-avatar">U</div>
-        <div className="message-body inline-rich-text">
-          {renderInlineText(item.content)}
+        <div className="message-body">
+          <MarkdownText content={item.content} variant="message" />
         </div>
       </article>
     );
@@ -403,9 +404,9 @@ function TranscriptRow({
         <div className="message-avatar">
           <Sparkles size={13} />
         </div>
-        <div className="message-body inline-rich-text">
+        <div className="message-body">
           {item.label ? <span className="message-label">{item.label}</span> : null}
-          {renderInlineText(item.content)}
+          <MarkdownText content={item.content} variant="message" />
           {item.finalReportArtifactId ? (
             <button
               className="artifact-chip"
@@ -433,8 +434,8 @@ function TranscriptRow({
             <span className="activity-time">{formatTime(item.createdAt)}</span>
           </div>
           {item.summary ? (
-            <div className="activity-summary inline-rich-text">
-              {renderInlineText(item.summary)}
+            <div className="activity-summary">
+              <MarkdownText content={item.summary} variant="compact" />
             </div>
           ) : null}
           {item.steps.length ? (
@@ -470,8 +471,8 @@ function TranscriptRow({
             </span>
           </div>
           {item.summary ? (
-            <div className="activity-summary inline-rich-text">
-              {renderInlineText(item.summary)}
+            <div className="activity-summary">
+              <MarkdownText content={item.summary} variant="compact" />
             </div>
           ) : null}
           <div className="activity-links">
@@ -521,8 +522,8 @@ function TranscriptRow({
           <span className="activity-time">{formatTime(item.createdAt)}</span>
         </div>
         {item.message ? (
-          <div className="activity-summary inline-rich-text">
-            {renderInlineText(item.message)}
+          <div className="activity-summary">
+            <MarkdownText content={item.message} variant="compact" />
           </div>
         ) : null}
       </div>
@@ -593,9 +594,9 @@ function FinalAnswer({
 }) {
   return (
     <article className="final-answer">
-      <div className="final-answer-body inline-rich-text">
+      <div className="final-answer-body">
         {item.label ? <span className="message-label">{item.label}</span> : null}
-        {renderInlineText(item.content)}
+        <MarkdownText content={item.content} variant="message" />
         {item.finalReportArtifactId ? (
           <button
             className="artifact-chip"
@@ -1191,35 +1192,6 @@ function statusFromEvent(type: string): string {
     return "rejected";
   }
   return "observed";
-}
-
-function renderInlineText(text: string): ReactNode {
-  const paragraphs = text
-    .split(/\n{2,}/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean);
-  if (!paragraphs.length) {
-    return null;
-  }
-
-  return paragraphs.map((paragraph, paragraphIndex) => (
-    <p key={`${paragraphIndex}-${paragraph.slice(0, 16)}`}>
-      {renderInlineSegments(paragraph)}
-    </p>
-  ));
-}
-
-function renderInlineSegments(text: string): ReactNode[] {
-  return text.split(/(`[^`]+`)/g).map((segment, index) => {
-    if (segment.startsWith("`") && segment.endsWith("`") && segment.length > 1) {
-      return (
-        <code className="inline-code-chip" key={`${index}-${segment}`}>
-          {segment.slice(1, -1)}
-        </code>
-      );
-    }
-    return <span key={`${index}-${segment.slice(0, 12)}`}>{segment}</span>;
-  });
 }
 
 function formatTime(value?: string): string {

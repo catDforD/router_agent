@@ -738,21 +738,147 @@ select:focus {
   padding-top: 0;
 }
 
-.inline-rich-text p {
+.markdown-text {
   max-width: 100%;
-  margin: 0;
   color: #262c32;
   font-size: 0.95rem;
   line-height: 1.72;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
 }
 
-.inline-rich-text p + p {
-  margin-top: 14px;
+.markdown-text > :first-child {
+  margin-top: 0;
 }
 
-.user-message .message-body p {
+.markdown-text > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-text > * + * {
+  margin-top: 12px;
+}
+
+.markdown-text p {
+  max-width: 100%;
+  margin: 0;
+}
+
+.markdown-text ul,
+.markdown-text ol {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 0;
+  padding-left: 1.25rem;
+}
+
+.markdown-text li {
+  min-width: 0;
+}
+
+.markdown-text li > p {
+  display: inline;
+}
+
+.markdown-text strong {
+  font-weight: 700;
+}
+
+.markdown-text a {
+  color: #126ec6;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.markdown-text code {
+  border-radius: 5px;
+  background: #f0f2f4;
+  padding: 1px 5px;
+  color: #30373e;
+  font-family: "Cascadia Mono", "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.86em;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.markdown-text pre {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #101418;
+  padding: 10px;
+  color: #edf4f7;
+  font-family: "Cascadia Mono", "IBM Plex Mono", "SFMono-Regular", monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.markdown-text pre code {
+  display: block;
+  min-width: max-content;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  overflow-wrap: normal;
+  white-space: pre;
+}
+
+.markdown-text blockquote {
+  margin-right: 0;
+  margin-left: 0;
+  border-left: 3px solid #cfd7df;
+  padding-left: 10px;
+  color: #5d6770;
+}
+
+.markdown-text table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+  font-size: 0.86em;
+}
+
+.markdown-text th,
+.markdown-text td {
+  border: 1px solid var(--line);
+  padding: 5px 7px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-text th {
+  background: var(--surface-soft);
+  font-weight: 650;
+}
+
+.markdown-text-message {
+  font-size: 0.95rem;
+  line-height: 1.72;
+}
+
+.markdown-text-compact {
+  color: #606a73;
+  font-size: 0.84rem;
+  line-height: 1.52;
+}
+
+.markdown-text-compact > * + * {
+  margin-top: 8px;
+}
+
+.markdown-text-report {
+  margin-top: 8px;
+  color: #39424a;
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+.user-message .message-body .markdown-text {
   color: #4d5862;
 }
 
@@ -836,11 +962,8 @@ select:focus {
   margin-top: 5px;
 }
 
-.activity-summary p {
+.activity-summary .markdown-text {
   color: #606a73;
-  font-size: 0.84rem;
-  line-height: 1.52;
-  overflow-wrap: anywhere;
 }
 
 .activity-status {
@@ -1339,6 +1462,19 @@ button.artifact-chip {
   max-height: 220px;
   margin: 8px 0 0;
   padding: 10px;
+}
+
+.report-string-list {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #39424a;
+}
+
+.report-string-list .markdown-text {
+  display: inline-block;
+  vertical-align: top;
 }
 
 @keyframes spin {
