@@ -1,18 +1,7 @@
 from app.agents.instructions import (
-    build_intake_instructions,
     build_orchestration_instructions,
     build_state_view_prompt,
 )
-
-
-def test_intake_instructions_cover_classification_policy() -> None:
-    instructions = build_intake_instructions()
-
-    assert "never return unknown" in instructions
-    assert "requires_test=true for L2, L3, or L4" in instructions
-    assert "requires_formal=true" in instructions
-    assert "need_clarification=true" in instructions
-    assert "Do not call PLC worker tools" in instructions
 
 
 def test_orchestration_instructions_cover_guarded_finalization() -> None:

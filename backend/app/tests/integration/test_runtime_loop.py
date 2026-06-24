@@ -7,7 +7,6 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents.main_agent import build_main_agent_event, episode_output_from_task
-from app.agents.output_schema import IntakeClassificationOutput
 from app.agents.tools import AgentToolContext, AgentToolResult, AgentToolService
 from app.core.config import Settings
 from app.core.time import utc_now
@@ -67,33 +66,20 @@ class ScriptedToolRunner:
     def __init__(
         self,
         *,
-        classifications: list[IntakeClassificationOutput],
         sequence: list[str],
         final_task_status: str | None = None,
-        on_intake: Callable[[str], None] | None = None,
+        plan_config: dict[str, Any] | None = None,
+        request_clarification: bool = False,
+        on_orchestration_start: Callable[[str], None] | None = None,
     ) -> None:
-        self.classifications = list(classifications)
         self.sequence = sequence
         self.final_task_status = final_task_status
-        self.on_intake = on_intake
+        self.plan_config = plan_config or default_plan_config()
+        self.request_clarification = request_clarification
+        self.on_orchestration_start = on_orchestration_start
+        self.uses_tool_loop_side_effects = False
         self.calls: list[str] = []
         self.tool_results: list[AgentToolResult] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        if self.on_intake is not None:
-            self.on_intake(run_config.group_id)
-        if not self.classifications:
-            raise AssertionError("no scripted classification remains")
-        return self.classifications.pop(0)
 
     def run_orchestration(
         self,
@@ -107,6 +93,45 @@ class ScriptedToolRunner:
         self.calls.append("orchestration")
         task_id = run_config.group_id
         tools = AgentToolService(context)
+        if self.on_orchestration_start is not None:
+            self.on_orchestration_start(task_id)
+            context.session.expire_all()
+        task = TaskRepository(context.session).get_task(task_id)
+        if task.status in {"succeeded", "partial_failed", "failed", "cancelled"}:
+            return episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary="Fake runtime loop observed terminal task before tools.",
+            )
+        if self.request_clarification and not task.unresolved_questions:
+            self.uses_tool_loop_side_effects = True
+            result = tools.request_clarification(
+                task_id,
+                questions=[
+                    {
+                        "question": "Which PLC platform and I/O names should be used?",
+                        "reason": "The worker needs concrete target details.",
+                        "required": True,
+                    }
+                ],
+                rationale_summary="Scripted runtime loop needs user clarification.",
+            )
+            assert result.status == "applied", result.model_dump(mode="json")
+            task = TaskRepository(context.session).get_task(task_id)
+            return episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary="Fake runtime loop paused for user clarification.",
+            )
+
+        self.uses_tool_loop_side_effects = False
+        plan_result = tools.update_plan(
+            task_id,
+            summary="Scripted runtime loop prepared task for worker dispatch.",
+            plan=[{"order": 1, "action": "run scripted worker sequence"}],
+            **self.plan_config,
+        )
+        assert plan_result.status == "applied", plan_result.model_dump(mode="json")
         for action in self.sequence:
             if action == "dev":
                 result = tools.call_plc_dev(task_id)
@@ -161,53 +186,15 @@ class ScriptedToolRunner:
             context.checkpoint()
 
 
-def classification(**updates: Any) -> IntakeClassificationOutput:
+def default_plan_config(**updates: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "normalized_goal": "Create motor control PLC logic with validation.",
         "task_type": "new_plc_development",
-        "difficulty_level": "L2",
-        "difficulty_score": 0.55,
-        "difficulty_confidence": 0.86,
-        "difficulty_reasons": ["Development with validation."],
-        "difficulty_signals": {
-            "has_existing_code": False,
-            "has_io_points": True,
-            "has_timing_logic": False,
-            "has_state_machine": False,
-            "has_safety_constraints": False,
-            "has_emergency_stop": False,
-            "has_interlock": False,
-            "has_fault_latching": False,
-            "has_mode_switching": False,
-            "multi_module": False,
-            "requirement_incomplete": False,
-        },
         "requires_test": True,
         "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
     }
     values.update(updates)
-    return IntakeClassificationOutput.model_validate(values)
-
-
-def clarification_classification() -> IntakeClassificationOutput:
-    values = classification(
-        difficulty_level="L1",
-        difficulty_reasons=["Platform details are missing."],
-        requires_test=False,
-        need_clarification=True,
-        clarification_questions=[
-            {
-                "question": "Which PLC platform and I/O names should be used?",
-                "reason": "The worker needs concrete target details.",
-                "required": True,
-            }
-        ],
-    ).model_dump(mode="json")
-    values["difficulty_signals"]["requirement_incomplete"] = True
-    return IntakeClassificationOutput.model_validate(values)
+    return values
 
 
 def runtime_service(
@@ -285,7 +272,6 @@ def test_scheduled_start_returns_before_runtime_job_completes_then_succeeds(
 ) -> None:
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
-        classifications=[classification()],
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -301,7 +287,7 @@ def test_scheduled_start_returns_before_runtime_job_completes_then_succeeds(
 
     assert results[0].status == "completed"
     assert get_task(session_factory, task_id).status == "succeeded"
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
 
 
 def test_checkpointed_progress_is_visible_from_separate_session(
@@ -309,7 +295,6 @@ def test_checkpointed_progress_is_visible_from_separate_session(
 ) -> None:
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
-        classifications=[classification()],
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -334,7 +319,6 @@ def test_cancelled_task_is_not_started_by_scheduled_runtime_job(
 ) -> None:
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
-        classifications=[classification()],
         sequence=["dev", "test", "gate"],
     )
     scheduler = InProcessRuntimeScheduler(runtime_service(settings, session_factory, runner))
@@ -355,17 +339,16 @@ def test_cancellation_during_runtime_episode_preserves_cancelled_state(
     runtime_context: tuple[Settings, sessionmaker[Session]],
 ) -> None:
     settings, session_factory = runtime_context
-    cancelled_during_intake: list[str] = []
+    cancelled_during_orchestration: list[str] = []
 
-    def cancel_during_intake(task_id: str) -> None:
+    def cancel_during_orchestration(task_id: str) -> None:
         cancel_task(settings, session_factory, task_id)
-        cancelled_during_intake.append(task_id)
+        cancelled_during_orchestration.append(task_id)
 
     runner = ScriptedToolRunner(
-        classifications=[classification()],
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
-        on_intake=cancel_during_intake,
+        on_orchestration_start=cancel_during_orchestration,
     )
     runtime = runtime_service(settings, session_factory, runner)
     task_id = create_task(settings, session_factory)
@@ -375,7 +358,7 @@ def test_cancellation_during_runtime_episode_preserves_cancelled_state(
     events = event_types(session_factory, task_id)
 
     assert result.status == "completed"
-    assert cancelled_during_intake == [task_id]
+    assert cancelled_during_orchestration == [task_id]
     assert task.status == "cancelled"
     assert task.phase == "completed"
     assert worker_jobs(session_factory) == []
@@ -392,17 +375,15 @@ def test_duplicate_runtime_trigger_skips_while_lease_is_active(
 
     def trigger_duplicate(task_id: str) -> None:
         duplicate_runner = ScriptedToolRunner(
-            classifications=[classification()],
             sequence=["dev"],
         )
         duplicate_runtime = runtime_service(settings, session_factory, duplicate_runner)
         duplicate_results.append(duplicate_runtime.start_task(task_id))
 
     runner = ScriptedToolRunner(
-        classifications=[classification()],
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
-        on_intake=trigger_duplicate,
+        on_orchestration_start=trigger_duplicate,
     )
     runtime = runtime_service(settings, session_factory, runner)
     task_id = create_task(settings, session_factory)
@@ -412,7 +393,7 @@ def test_duplicate_runtime_trigger_skips_while_lease_is_active(
     assert result.status == "completed"
     assert duplicate_results[0].status == "skipped"
     assert duplicate_results[0].reason == "runtime_lease_active"
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
 
 
 def test_user_message_resume_answers_clarification_and_completes_next_episode(
@@ -420,7 +401,7 @@ def test_user_message_resume_answers_clarification_and_completes_next_episode(
 ) -> None:
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
-        classifications=[clarification_classification()],
+        request_clarification=True,
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -444,4 +425,4 @@ def test_user_message_resume_answers_clarification_and_completes_next_episode(
     assert completed.status == "succeeded"
     assert completed.unresolved_questions[0].status == "answered"
     assert "Use Codesys" in (completed.unresolved_questions[0].answer or "")
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration", "orchestration"]

@@ -17,7 +17,6 @@ from sqlalchemy import select  # noqa: E402
 
 from app.agents.main_agent import build_main_agent_event, episode_output_from_task  # noqa: E402
 from app.agents.output_schema import (  # noqa: E402
-    IntakeClassificationOutput,
     MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentPlanStep,
@@ -55,27 +54,19 @@ class ScriptedE2ERunner:
     def __init__(
         self,
         *,
-        classification: IntakeClassificationOutput,
+        plan_config: dict[str, Any] | None = None,
+        clarification_questions: list[dict[str, Any]] | None = None,
         sequence: list[str],
         final_task_status: str | None,
         expected_rejections: dict[str, str] | None = None,
     ) -> None:
-        self.classification = classification
+        self.plan_config = plan_config or default_plan_config()
+        self.clarification_questions = clarification_questions
         self.sequence = sequence
         self.final_task_status = final_task_status
         self.expected_rejections = expected_rejections or {}
         self.tool_results: list[AgentToolResult] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        return self.classification
+        self.uses_tool_loop_side_effects = clarification_questions is not None
 
     def run_orchestration(
         self,
@@ -88,6 +79,29 @@ class ScriptedE2ERunner:
     ) -> Any:
         task_id = run_config.group_id
         tools = AgentToolService(context)
+        if self.clarification_questions is not None:
+            result = tools.request_clarification(
+                task_id,
+                questions=self.clarification_questions,
+                rationale_summary="Local E2E script needs user clarification.",
+            )
+            if result.status != "applied":
+                raise RuntimeError(result.model_dump_json(indent=2))
+            task = TaskRepository(context.session).get_task(task_id)
+            return episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary=result.summary,
+            )
+
+        plan_result = tools.update_plan(
+            task_id,
+            summary="Local E2E script prepared task for worker dispatch.",
+            plan=[{"order": 1, "action": "run scripted E2E sequence"}],
+            **self.plan_config,
+        )
+        if plan_result.status != "applied":
+            raise RuntimeError(plan_result.model_dump_json(indent=2))
         for action in self.sequence:
             if action == "finalizing":
                 self._emit_finalizing(context, task_id)
@@ -224,22 +238,24 @@ def main() -> None:
 def runner_for_scenario(scenario: str) -> ScriptedE2ERunner:
     if scenario == SCENARIO_NEED_CLARIFICATION:
         return ScriptedE2ERunner(
-            classification=clarification_classification(),
+            clarification_questions=[
+                {
+                    "question": "Which PLC platform and I/O names should be used?",
+                    "reason": "The worker needs concrete target details.",
+                    "required": True,
+                }
+            ],
             sequence=[],
             final_task_status=None,
         )
     if scenario == SCENARIO_TEST_FAILED_THEN_REPAIR_PASS:
         return ScriptedE2ERunner(
-            classification=classification(),
             sequence=["dev", "test", "repair", "test", "finalizing", "gate"],
             final_task_status="succeeded",
         )
     if scenario == SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS:
         return ScriptedE2ERunner(
-            classification=classification(
-                difficulty_level="L3",
-                difficulty_reasons=["Safety constraints require formal verification."],
-                difficulty_signals=signals(has_safety_constraints=True),
+            plan_config=default_plan_config(
                 requires_formal=True,
             ),
             sequence=[
@@ -256,7 +272,6 @@ def runner_for_scenario(scenario: str) -> ScriptedE2ERunner:
         )
     if scenario == SCENARIO_TEST_FAILED_REPAIR_EXHAUSTED:
         return ScriptedE2ERunner(
-            classification=classification(requires_repair_loop=True),
             sequence=[
                 "dev",
                 "test",
@@ -274,7 +289,6 @@ def runner_for_scenario(scenario: str) -> ScriptedE2ERunner:
             expected_rejections={"repair_limit_rejected": "repair_limit_reached"},
         )
     return ScriptedE2ERunner(
-        classification=classification(),
         sequence=["dev", "test", "finalizing", "gate"],
         final_task_status="succeeded",
     )
@@ -339,57 +353,12 @@ def print_summary(task_id: str, runtime_status: str) -> None:
     print(f"curl -N http://localhost:8000/api/tasks/{task_id}/events")
 
 
-def classification(**updates: Any) -> IntakeClassificationOutput:
+def default_plan_config(**updates: Any) -> dict[str, Any]:
     values: dict[str, Any] = {
         "normalized_goal": "Create motor control PLC logic with validation.",
         "task_type": "new_plc_development",
-        "difficulty_level": "L2",
-        "difficulty_score": 0.55,
-        "difficulty_confidence": 0.86,
-        "difficulty_reasons": ["Development with validation."],
-        "difficulty_signals": signals(has_io_points=True),
         "requires_test": True,
         "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
-    }
-    values.update(updates)
-    return IntakeClassificationOutput.model_validate(values)
-
-
-def clarification_classification() -> IntakeClassificationOutput:
-    values = classification(
-        difficulty_level="L1",
-        difficulty_reasons=["Platform and I/O details are missing."],
-        requires_test=False,
-        requires_formal=False,
-        need_clarification=True,
-        clarification_questions=[
-            {
-                "question": "Which PLC platform and I/O names should be used?",
-                "reason": "The worker needs concrete target details.",
-                "required": True,
-            }
-        ],
-    ).model_dump(mode="json")
-    values["difficulty_signals"]["requirement_incomplete"] = True
-    return IntakeClassificationOutput.model_validate(values)
-
-
-def signals(**updates: bool) -> dict[str, bool]:
-    values = {
-        "has_existing_code": False,
-        "has_io_points": False,
-        "has_timing_logic": False,
-        "has_state_machine": False,
-        "has_safety_constraints": False,
-        "has_emergency_stop": False,
-        "has_interlock": False,
-        "has_fault_latching": False,
-        "has_mode_switching": False,
-        "multi_module": False,
-        "requirement_incomplete": False,
     }
     values.update(updates)
     return values

@@ -9,16 +9,12 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    field_validator,
     model_validator,
 )
 
 from app.models.router_schema import (
-    DifficultyLevel,
-    DifficultySignals,
     NextRecommendedAction,
     TaskStatus,
-    TaskType,
 )
 
 
@@ -26,52 +22,6 @@ class MainAgentOutputModel(BaseModel):
     """Strict base class for internal Main Agent outputs."""
 
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
-
-
-class IntakeClarificationQuestion(MainAgentOutputModel):
-    question: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
-    required: bool = True
-
-
-class IntakeClassificationOutput(MainAgentOutputModel):
-    """Structured intake result before Runtime applies deterministic policy."""
-
-    normalized_goal: str = Field(min_length=1)
-    task_type: TaskType
-    difficulty_level: DifficultyLevel
-    difficulty_score: float | None = Field(default=None, ge=0, le=1)
-    difficulty_confidence: float | None = Field(default=None, ge=0, le=1)
-    difficulty_reasons: list[str] = Field(min_length=1)
-    difficulty_signals: DifficultySignals
-    requires_test: bool
-    requires_formal: bool
-    requires_repair_loop: bool
-    need_clarification: bool
-    clarification_questions: list[IntakeClarificationQuestion] = Field(
-        default_factory=list
-    )
-
-    @field_validator("difficulty_score", "difficulty_confidence", mode="before")
-    @classmethod
-    def clamp_probability(cls, value: Any) -> Any:
-        if value is None:
-            return None
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return value
-        return min(max(numeric, 0.0), 1.0)
-
-    @model_validator(mode="after")
-    def validate_classification(self) -> IntakeClassificationOutput:
-        if self.task_type == TaskType.UNKNOWN.value:
-            raise ValueError("classification task_type must not be unknown")
-        if self.need_clarification and not self.clarification_questions:
-            raise ValueError(
-                "clarification_questions are required when need_clarification is true"
-            )
-        return self
 
 
 class MainAgentArtifactReference(MainAgentOutputModel):

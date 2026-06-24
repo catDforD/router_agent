@@ -44,7 +44,7 @@ SUPPORTED_TOOLS = (
     "call_plc_formal",
     "call_plc_repair",
     "run_quality_gate",
-    "finish_task",
+    "write_final_report",
 )
 
 
@@ -133,9 +133,13 @@ def invoke_tool(service: AgentToolService, task: TaskState, tool: str) -> AgentT
         return service.call_plc_repair(task.task_id)
     if tool == "run_quality_gate":
         return service.run_quality_gate(task.task_id)
-    if tool == "finish_task":
+    if tool == "write_final_report":
         service.run_quality_gate(task.task_id)
-        return service.finish_task(task.task_id)
+        return service.write_final_report(
+            task.task_id,
+            final_status="succeeded",
+            summary="Final report written from dev_call_agent_tool.py.",
+        )
     raise ValueError(f"unsupported tool: {tool}")
 
 
@@ -234,7 +238,7 @@ def main() -> None:
         )
         task = create_classified_task(
             task_repository,
-            qa=args.tool in {"run_quality_gate", "finish_task"},
+            qa=args.tool in {"run_quality_gate", "write_final_report"},
         )
         create_raw_artifact(artifact_store, task)
         service = AgentToolService(

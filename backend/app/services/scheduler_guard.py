@@ -228,7 +228,7 @@ def _validate_common_worker_preconditions(state: TaskState, worker_type: str) ->
     if _is_intake_not_classified(state):
         raise SchedulerGuardViolation(
             SchedulerGuardViolationCode.INTAKE_NOT_CLASSIFIED,
-            "cannot dispatch PLC workers before intake classification completes",
+            "cannot dispatch PLC workers before task is prepared for worker dispatch",
             details={
                 "status": _value(state.status),
                 "phase": _value(state.phase),

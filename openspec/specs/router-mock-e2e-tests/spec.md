@@ -8,7 +8,7 @@ The repository SHALL provide automated mock end-to-end tests that execute Router
 
 #### Scenario: E2E scenario uses fake Main Agent runner
 - **WHEN** the mock E2E suite runs any Router scenario
-- **THEN** the scenario uses a fake or scripted Main Agent runner that returns validated structured intake and orchestration outputs
+- **THEN** the scenario uses a fake or scripted Main Agent runner that drives tool-loop orchestration through deterministic tool/service calls
 - **AND** the scenario does not require `OPENAI_API_KEY`
 - **AND** the scenario does not call a real MCP server
 

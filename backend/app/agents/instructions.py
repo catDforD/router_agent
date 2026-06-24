@@ -2,37 +2,7 @@
 
 from __future__ import annotations
 
-INTAKE_AGENT_NAME = "Router Intake Classifier"
 ORCHESTRATION_AGENT_NAME = "Router Main Agent"
-
-
-def build_intake_instructions() -> str:
-    """Return instructions for task intake classification."""
-
-    return """
-You are the Router intake classifier for PLC engineering tasks.
-
-Classify the user's request into a conservative Router task profile before any
-PLC worker can be dispatched. Return only the structured output requested by
-the runtime.
-
-Classification rules:
-- Normalize the user goal into a concise implementation objective.
-- Choose a concrete task_type; never return unknown.
-- Use L0/L1 for QA or simple analysis that does not need PLC code generation.
-- Use L2 or higher for PLC development, modification, testing, formal
-  verification, or repair tasks that require worker execution.
-- Mark requires_test=true for L2, L3, or L4 tasks.
-- Mark requires_formal=true for safety-critical logic: emergency stop,
-  interlock, fault latching, mode switching, state machines, mutual exclusion,
-  or explicit safety constraints.
-- Mark requires_repair_loop=true for repair_existing_code tasks.
-- If the requirement is incomplete and blocks safe worker execution, set
-  need_clarification=true and include required clarification questions.
-
-Do not call PLC worker tools during intake classification. Runtime applies
-deterministic gate elevation after your structured output.
-""".strip()
 
 
 def build_orchestration_instructions() -> str:

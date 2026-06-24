@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app.agents.output_schema import IntakeClassificationOutput
 from app.mcp.mock_worker import (
     SCENARIO_DEV_TEST_PASS,
     SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS,
@@ -19,7 +18,6 @@ from app.mcp.mock_worker import (
 )
 from app.models.router_schema import (
     ArtifactType,
-    DifficultyLevel,
     EventType,
     TaskStatus,
     TaskType,
@@ -75,21 +73,6 @@ REQUIRED_WORKFLOW_TAGS = {
 }
 TOOL_STATUSES = {"applied", "rejected", "failed", "no-op"}
 
-DEFAULT_SIGNALS = {
-    "has_existing_code": False,
-    "has_io_points": False,
-    "has_timing_logic": False,
-    "has_state_machine": False,
-    "has_safety_constraints": False,
-    "has_emergency_stop": False,
-    "has_interlock": False,
-    "has_fault_latching": False,
-    "has_mode_switching": False,
-    "multi_module": False,
-    "requirement_incomplete": False,
-}
-
-
 class EvalCaseValidationError(ValueError):
     """Raised when the eval corpus cannot be parsed or validated."""
 
@@ -100,7 +83,6 @@ class EvalBaseModel(BaseModel):
 
 class EvalExpected(EvalBaseModel):
     final_status: list[TaskStatus] = Field(min_length=1)
-    min_difficulty: DifficultyLevel | None = None
     worker_sequence: list[WorkerType] | None = None
     required_workers: list[WorkerType] = Field(default_factory=list)
     forbidden_workers: list[WorkerType] = Field(default_factory=list)
@@ -163,7 +145,7 @@ class EvalCase(EvalBaseModel):
     project_context: dict[str, Any] = Field(default_factory=dict)
     eval_mode: Literal["deterministic_mock", "live_provider"] = "deterministic_mock"
     mock_scenario: str = SCENARIO_DEV_TEST_PASS
-    scripted_classification: dict[str, Any] = Field(default_factory=dict)
+    scripted_plan: dict[str, Any] = Field(default_factory=dict)
     scripted_sequence: list[str] = Field(default_factory=list)
     scripted_final_status: TaskStatus | None = None
     expected: EvalExpected
@@ -194,7 +176,7 @@ class EvalCase(EvalBaseModel):
 
     @model_validator(mode="after")
     def validate_case(self) -> EvalCase:
-        _ = self.intake_classification()
+        _ = self.plan_config()
         unknown_rejections = sorted(
             set(self.expected.expected_rejections) - set(self.scripted_sequence)
         )
@@ -221,14 +203,20 @@ class EvalCase(EvalBaseModel):
             )
         return self
 
-    def intake_classification(self) -> IntakeClassificationOutput:
-        payload = _default_classification_payload(self)
-        payload.update(self.scripted_classification)
-        payload["difficulty_signals"] = {
-            **DEFAULT_SIGNALS,
-            **payload.get("difficulty_signals", {}),
+    def plan_config(self) -> dict[str, Any]:
+        payload = _default_plan_config(self)
+        payload.update(self.scripted_plan)
+        allowed = {
+            "normalized_goal",
+            "task_type",
+            "requires_test",
+            "requires_formal",
         }
-        return IntakeClassificationOutput.model_validate(payload)
+        return {
+            key: value
+            for key, value in payload.items()
+            if key in allowed
+        }
 
     def runner_final_status(self) -> str | None:
         if self.scripted_final_status is not None:
@@ -316,20 +304,12 @@ def _validate_corpus_coverage(cases: list[EvalCase], *, source: str) -> None:
         )
 
 
-def _default_classification_payload(case: EvalCase) -> dict[str, Any]:
+def _default_plan_config(case: EvalCase) -> dict[str, Any]:
     return {
         "normalized_goal": case.title,
         "task_type": TaskType.NEW_PLC_DEVELOPMENT.value,
-        "difficulty_level": DifficultyLevel.L2.value,
-        "difficulty_score": 0.55,
-        "difficulty_confidence": 0.86,
-        "difficulty_reasons": ["Eval case default classification."],
-        "difficulty_signals": {**DEFAULT_SIGNALS, "has_io_points": True},
         "requires_test": True,
         "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
     }
 
 

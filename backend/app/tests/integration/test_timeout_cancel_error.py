@@ -368,21 +368,14 @@ class NeverRunner:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def run_intake(self, **kwargs: Any) -> Any:
-        self.calls.append("intake")
-        raise AssertionError("cancelled task should not run intake")
-
     def run_orchestration(self, **kwargs: Any) -> Any:
         self.calls.append("orchestration")
         raise AssertionError("cancelled task should not run orchestration")
 
 
 class MaxTurnsRunner:
-    def run_intake(self, **kwargs: Any) -> Any:
-        raise MaxTurnsExceeded("too many turns")
-
     def run_orchestration(self, **kwargs: Any) -> Any:
-        raise AssertionError("orchestration should not run after intake max turns")
+        raise MaxTurnsExceeded("too many turns")
 
 
 class CancelThenMaxTurnsRunner:
@@ -394,12 +387,9 @@ class CancelThenMaxTurnsRunner:
         self.settings = settings
         self.session_factory = session_factory
 
-    def run_intake(self, **kwargs: Any) -> Any:
+    def run_orchestration(self, **kwargs: Any) -> Any:
         cancel_task(self.settings, self.session_factory, kwargs["run_config"].group_id)
         raise MaxTurnsExceeded("too many turns after cancellation")
-
-    def run_orchestration(self, **kwargs: Any) -> Any:
-        raise AssertionError("orchestration should not run after intake max turns")
 
 
 class FakeRealMcpClient:

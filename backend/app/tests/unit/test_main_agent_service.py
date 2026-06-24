@@ -13,17 +13,13 @@ from app.agents.main_agent import (
     MainAgentService,
     MaxTurnsExceeded,
     ModelBehaviorError,
-    OpenAIAgentsRunner,
-    build_intake_agent,
-    build_orchestration_agent,
-    build_run_config,
     build_state_view,
+    build_tool_loop_agent,
+    build_tool_loop_run_config,
     episode_output_from_task,
 )
-import app.agents.main_agent as main_agent_module
 from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.output_schema import (
-    IntakeClassificationOutput,
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
 )
@@ -85,29 +81,11 @@ class RecordingRunner:
     def __init__(
         self,
         *,
-        classification: IntakeClassificationOutput | None = None,
-        intake_error: Exception | None = None,
+        orchestration_error: Exception | None = None,
     ) -> None:
-        self.classification = classification or classification_output()
-        self.intake_error = intake_error
+        self.orchestration_error = orchestration_error
         self.calls: list[str] = []
-        self.intake_contexts: list[AgentToolContext] = []
         self.orchestration_contexts: list[AgentToolContext] = []
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        self.calls.append("intake")
-        self.intake_contexts.append(context)
-        if self.intake_error is not None:
-            raise self.intake_error
-        return self.classification
 
     def run_orchestration(
         self,
@@ -120,6 +98,8 @@ class RecordingRunner:
     ) -> Any:
         self.calls.append("orchestration")
         self.orchestration_contexts.append(context)
+        if self.orchestration_error is not None:
+            raise self.orchestration_error
         task = TaskRepository(context.session).get_task(run_config.group_id)
         return episode_output_from_task(
             task,
@@ -129,17 +109,6 @@ class RecordingRunner:
 
 
 class SucceededOutputRunner:
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        raise AssertionError("intake should not run for pre-classified task")
-
     def run_orchestration(
         self,
         *,
@@ -173,17 +142,6 @@ class TerminalOutputRunner:
     def __init__(self, final_task_status: str) -> None:
         self.final_task_status = final_task_status
 
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        raise AssertionError("intake should not run for pre-classified task")
-
     def run_orchestration(
         self,
         *,
@@ -214,17 +172,6 @@ class TerminalOutputRunner:
 
 
 class ModelBehaviorErrorRunner:
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        raise AssertionError("intake should not run for pre-classified task")
-
     def run_orchestration(
         self,
         *,
@@ -326,49 +273,45 @@ def raw_tool_call(name: str, arguments: str, *, call_id: str) -> dict[str, Any]:
     }
 
 
-def signals(**updates: bool) -> dict[str, bool]:
-    values = {
-        "has_existing_code": False,
-        "has_io_points": False,
-        "has_timing_logic": False,
-        "has_state_machine": False,
-        "has_safety_constraints": False,
-        "has_emergency_stop": False,
-        "has_interlock": False,
-        "has_fault_latching": False,
-        "has_mode_switching": False,
-        "multi_module": False,
-        "requirement_incomplete": False,
-    }
-    values.update(updates)
-    return values
-
-
-def classification_output(**updates: Any) -> IntakeClassificationOutput:
-    values: dict[str, Any] = {
-        "normalized_goal": "Create tested motor start/stop PLC logic.",
-        "task_type": "new_plc_development",
-        "difficulty_level": "L2",
-        "difficulty_score": 0.5,
-        "difficulty_confidence": 0.85,
-        "difficulty_reasons": ["Requires PLC development and validation."],
-        "difficulty_signals": signals(has_io_points=True),
-        "requires_test": True,
-        "requires_formal": False,
-        "requires_repair_loop": False,
-        "need_clarification": False,
-        "clarification_questions": [],
-    }
-    values.update(updates)
-    return IntakeClassificationOutput.model_validate(values)
-
-
 def create_task(task_service: TaskService) -> str:
     result = task_service.create_task(
         message="Create motor start stop logic with validation.",
         project_context={"target_plc_language": "ST", "target_platform": "Codesys"},
     )
     return result.task.task_id
+
+
+def prepare_development_task(db_session: Session, task_id: str) -> TaskState:
+    task = TaskRepository(db_session).get_task(task_id)
+    updated = task.model_copy(
+        deep=True,
+        update={
+            "status": TaskStatus.RUNNING.value,
+            "phase": TaskPhase.PLANNING.value,
+            "normalized_goal": "Create tested motor start/stop PLC logic.",
+            "task_type": "new_plc_development",
+            "difficulty": task.difficulty.model_copy(
+                update={
+                    "level": "L2",
+                    "score": 0.5,
+                    "confidence": 0.85,
+                    "reasons": ["Requires PLC development and validation."],
+                    "requires_test": True,
+                    "requires_formal": False,
+                    "requires_repair_loop": False,
+                    "need_clarification": False,
+                }
+            ),
+            "gates": task.gates.model_copy(
+                update={
+                    "test_required": True,
+                    "formal_required": False,
+                    "can_finish_as_success": False,
+                }
+            ),
+        },
+    )
+    return TaskRepository(db_session).update_task_state(updated)
 
 
 def artifact_store(db_session: Session, tmp_path: Path) -> ArtifactStore:
@@ -440,7 +383,7 @@ def test_state_view_contains_scheduling_facts(
 ) -> None:
     task_id = create_task(task_service)
     main_agent_service.start_main_agent_run(task_id)
-    main_agent_service.apply_intake_classification(task_id, classification_output())
+    prepare_development_task(db_session, task_id)
     code_artifact_id = write_artifact(
         db_session,
         tmp_path,
@@ -497,7 +440,7 @@ def test_state_view_excludes_large_artifact_content(
     main_agent_service: MainAgentService,
 ) -> None:
     task_id = create_task(task_service)
-    main_agent_service.apply_intake_classification(task_id, classification_output())
+    prepare_development_task(db_session, task_id)
     secrets = [
         "FULL_PLC_CODE_BODY_SHOULD_STAY_IN_ARTIFACT",
         "FULL_TEST_REPORT_BODY_SHOULD_STAY_IN_ARTIFACT",
@@ -604,122 +547,6 @@ def test_start_main_agent_run_refreshes_stale_cancelled_task(
         engine.dispose()
 
 
-def test_apply_classification_persists_planning_state_and_events(
-    db_session: Session,
-    task_service: TaskService,
-    main_agent_service: MainAgentService,
-) -> None:
-    task_id = create_task(task_service)
-    main_agent_service.start_main_agent_run(task_id)
-
-    result = main_agent_service.apply_intake_classification(
-        task_id,
-        classification_output(requires_test=False),
-    )
-
-    assert result.clarification_requested is False
-    assert result.task.status == "running"
-    assert result.task.phase == "planning"
-    assert result.task.normalized_goal == "Create tested motor start/stop PLC logic."
-    assert result.task.task_type == "new_plc_development"
-    assert result.task.difficulty.level == "L2"
-    assert result.task.difficulty.requires_test is True
-    assert result.task.gates.test_required is True
-    assert event_types(db_session, task_id)[-2:] == [
-        "agent.decision",
-        "task.updated",
-    ]
-
-
-def test_classification_elevates_safety_critical_to_l3_formal(
-    task_service: TaskService,
-    main_agent_service: MainAgentService,
-) -> None:
-    task_id = create_task(task_service)
-    main_agent_service.start_main_agent_run(task_id)
-
-    result = main_agent_service.apply_intake_classification(
-        task_id,
-        classification_output(
-            difficulty_level="L1",
-            difficulty_reasons=["Simple logic, but has emergency stop."],
-            difficulty_signals=signals(has_emergency_stop=True),
-            requires_test=False,
-            requires_formal=False,
-        ),
-    )
-
-    assert result.task.difficulty.level == "L3"
-    assert result.task.difficulty.requires_test is True
-    assert result.task.difficulty.requires_formal is True
-    assert result.task.gates.test_required is True
-    assert result.task.gates.formal_required is True
-
-
-def test_classification_enforces_repair_loop_for_repair_tasks(
-    task_service: TaskService,
-    main_agent_service: MainAgentService,
-) -> None:
-    task_id = create_task(task_service)
-    main_agent_service.start_main_agent_run(task_id)
-
-    result = main_agent_service.apply_intake_classification(
-        task_id,
-        classification_output(
-            task_type="repair_existing_code",
-            difficulty_level="L1",
-            difficulty_signals=signals(has_existing_code=True),
-            requires_test=False,
-            requires_repair_loop=False,
-        ),
-    )
-
-    assert result.task.task_type == "repair_existing_code"
-    assert result.task.difficulty.requires_repair_loop is True
-
-
-def test_clarification_classification_waits_for_user_without_workers(
-    db_session: Session,
-    task_service: TaskService,
-    main_agent_service: MainAgentService,
-) -> None:
-    task_id = create_task(task_service)
-    main_agent_service.start_main_agent_run(task_id)
-
-    result = main_agent_service.apply_intake_classification(
-        task_id,
-        classification_output(
-            difficulty_level="L1",
-            difficulty_reasons=["Missing required platform details."],
-            difficulty_signals=signals(requirement_incomplete=True),
-            requires_test=False,
-            need_clarification=True,
-            clarification_questions=[
-                {
-                    "question": "Which PLC platform should be targeted?",
-                    "reason": "The target platform affects code conventions.",
-                    "required": True,
-                }
-            ],
-        ),
-    )
-
-    assert result.clarification_requested is True
-    assert result.task.status == "waiting_user"
-    assert result.task.phase == "clarifying"
-    assert result.task.unresolved_questions[0].status == "open"
-    assert event_types(db_session, task_id)[-2:] == [
-        "agent.clarification_requested",
-        "task.waiting_user",
-    ]
-    assert row_count(db_session, WorkerJobRow) == 0
-    assert not [
-        event_type
-        for event_type in event_types(db_session, task_id)
-        if event_type.startswith("worker.")
-    ]
-
-
 def test_plan_and_finalizing_event_helpers_emit_correlated_events(
     db_session: Session,
     task_service: TaskService,
@@ -744,7 +571,7 @@ def test_plan_and_finalizing_event_helpers_emit_correlated_events(
     assert finalizing_event.correlation.main_agent_run_id == started.trace.latest_main_agent_run_id
 
 
-def test_run_episode_with_legacy_runner_classifies_before_orchestration(
+def test_run_episode_orchestrates_created_task_without_standalone_intake(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -760,9 +587,9 @@ def test_run_episode_with_legacy_runner_classifies_before_orchestration(
     output = service.run_episode(task_id)
     task = persisted_task(db_session, task_id)
 
-    assert runner.calls == ["intake", "orchestration"]
-    assert task.status == "running"
-    assert task.phase == "planning"
+    assert runner.calls == ["orchestration"]
+    assert task.status == "created"
+    assert task.phase == "intake"
     assert output.task_id == task_id
     assert output.main_agent_run_id == task.trace.latest_main_agent_run_id
     assert row_count(db_session, WorkerJobRow) == 0
@@ -1153,7 +980,7 @@ def test_run_episode_checkpoint_callback_runs_at_visible_milestones(
 
     service.run_episode(task_id)
 
-    assert runner.calls == ["intake", "orchestration"]
+    assert runner.calls == ["orchestration"]
     assert len(checkpoints) >= 5
     assert set(checkpoints) == {"checkpoint"}
 
@@ -1331,7 +1158,7 @@ def test_run_episode_model_behavior_error_does_not_write_final_report_or_termina
     assert "task.succeeded" not in event_types
 
 
-def test_run_episode_skips_intake_for_classified_running_task(
+def test_run_episode_orchestrates_prepared_running_task(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -1339,7 +1166,7 @@ def test_run_episode_skips_intake_for_classified_running_task(
 ) -> None:
     task_id = create_task(task_service)
     main_agent_service.start_main_agent_run(task_id)
-    main_agent_service.apply_intake_classification(task_id, classification_output())
+    prepare_development_task(db_session, task_id)
     runner = RecordingRunner()
     service = MainAgentService(
         session=db_session,
@@ -1405,7 +1232,7 @@ def test_run_episode_records_max_turns_error_without_success(
     task_service: TaskService,
 ) -> None:
     task_id = create_task(task_service)
-    runner = RecordingRunner(intake_error=MaxTurnsExceeded("too many turns"))
+    runner = RecordingRunner(orchestration_error=MaxTurnsExceeded("too many turns"))
     service = MainAgentService(
         session=db_session,
         artifact_root=tmp_path / "artifacts",
@@ -1442,94 +1269,23 @@ def test_run_episode_records_max_turns_error_without_success(
     )
 
 
-def test_production_agent_builders_and_run_config(
+def test_tool_loop_agent_builder_and_run_config(
     db_session: Session,
     task_service: TaskService,
     main_agent_service: MainAgentService,
 ) -> None:
     task_id = create_task(task_service)
     started = main_agent_service.start_main_agent_run(task_id)
-    intake_agent = build_intake_agent(model="gpt-4.1-mini")
-    orchestration_agent = build_orchestration_agent(model="gpt-4.1-mini")
-    run_config = build_run_config(started, phase="intake")
+    orchestration_agent = build_tool_loop_agent(model="fake-main-agent")
+    run_config = build_tool_loop_run_config(started, phase="orchestration")
 
-    assert intake_agent.name == "Router Intake Classifier"
-    assert intake_agent.output_type.output_type is IntakeClassificationOutput
-    assert intake_agent.output_type.is_strict_json_schema() is False
     assert orchestration_agent.name == "Router Main Agent"
-    assert orchestration_agent.output_type.is_strict_json_schema() is False
-    assert [tool.name for tool in orchestration_agent.tools] == list(MAIN_AGENT_TOOL_NAMES)
+    assert orchestration_agent.model == "fake-main-agent"
+    assert "Codex-like backend execution agent" in orchestration_agent.instructions
     assert run_config.workflow_name == "Router Main Agent"
     assert run_config.trace_id == started.trace.openai_trace_id
     assert run_config.group_id == task_id
     assert run_config.trace_metadata["main_agent_run_id"] == started.trace.latest_main_agent_run_id
-
-
-def test_openai_runner_uses_streaming_when_observability_is_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: Session,
-    tmp_path: Path,
-    task_service: TaskService,
-    main_agent_service: MainAgentService,
-) -> None:
-    task_id = create_task(task_service)
-    started = main_agent_service.start_main_agent_run(task_id)
-    output = episode_output_from_task(
-        started,
-        main_agent_run_id=started.trace.latest_main_agent_run_id or "not-started",
-        summary="Fake streamed orchestration completed.",
-    )
-
-    class FakeStreamingResult:
-        def __init__(self, hooks: Any) -> None:
-            self.hooks = hooks
-
-        async def stream_events(self) -> Any:
-            await self.hooks.on_llm_start(None, None, None, [])
-            if False:
-                yield None
-
-        def final_output_as(
-            self,
-            cls: type[Any],
-            raise_if_incorrect_type: bool = False,
-        ) -> Any:
-            return output
-
-    class FakeRunner:
-        run_streamed_called = False
-
-        @classmethod
-        def run_streamed(cls, *args: Any, **kwargs: Any) -> FakeStreamingResult:
-            cls.run_streamed_called = True
-            return FakeStreamingResult(kwargs["hooks"])
-
-    recorder = MainAgentObservabilityRecorder(
-        session=db_session,
-        artifact_root=tmp_path / "artifacts",
-        task_id=task_id,
-        main_agent_run_id=started.trace.latest_main_agent_run_id,
-        openai_trace_id=started.trace.openai_trace_id,
-    )
-    context = AgentToolContext(
-        session=db_session,
-        artifact_root=tmp_path / "artifacts",
-        observability_recorder=recorder,
-    )
-    monkeypatch.setattr(main_agent_module, "Runner", FakeRunner)
-
-    streamed = OpenAIAgentsRunner().run_orchestration(
-        agent=object(),
-        input_text="state",
-        context=context,
-        max_turns=3,
-        run_config=object(),
-    )
-    events = EventService(db_session).list_visible_events(task_id)
-
-    assert FakeRunner.run_streamed_called is True
-    assert streamed.summary == "Fake streamed orchestration completed."
-    assert [event.type for event in events][-1] == "agent.turn_started"
 
 
 def row_count(db_session: Session, row_type: type[Any]) -> int:
