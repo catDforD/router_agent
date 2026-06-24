@@ -613,6 +613,18 @@ select:focus {
   margin: 0 auto;
 }
 
+.transcript-run {
+  display: grid;
+  gap: 13px;
+  min-width: 0;
+}
+
+.transcript-run + .transcript-run {
+  margin-top: 10px;
+  padding-top: 16px;
+  border-top: 1px solid #edf0f3;
+}
+
 .transcript-entry {
   min-width: 0;
 }

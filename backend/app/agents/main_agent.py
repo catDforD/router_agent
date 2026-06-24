@@ -112,6 +112,7 @@ from app.services.scheduler_guard import SchedulerGuardViolation
 
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
+MAX_STOP_BLOCKS = 2
 LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -145,6 +146,46 @@ DIFFICULTY_BY_RANK = {
     for level, rank in DIFFICULTY_RANK.items()
 }
 MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
+EVIDENCE_TOOL_NAMES = {
+    "list_files",
+    "read_file",
+    "write_file",
+    "apply_patch",
+    "exec_command",
+    "git_status",
+    "read_artifact",
+    "write_artifact",
+    "call_mcp_tool",
+}
+EXECUTION_REQUEST_KEYWORDS = (
+    "plc",
+    "code",
+    "file",
+    "workspace",
+    "modify",
+    "write",
+    "create",
+    "build",
+    "implement",
+    "test",
+    "verify",
+    "debug",
+    "command",
+    "patch",
+    "artifact",
+    "代码",
+    "文件",
+    "修改",
+    "写",
+    "创建",
+    "生成",
+    "实现",
+    "测试",
+    "验证",
+    "调试",
+    "命令",
+    "补丁",
+)
 
 
 class MainAgentServiceError(Exception):
@@ -202,6 +243,12 @@ class _AssistantTurn:
     tool_calls: list[_ChatToolCall]
 
 
+@dataclass(frozen=True)
+class _StopDecision:
+    allowed: bool
+    reason: str
+
+
 class OpenAICompatibleToolLoopRunner:
     """Production Main Agent runner using OpenAI-compatible Chat Completions."""
 
@@ -238,6 +285,7 @@ class OpenAICompatibleToolLoopRunner:
         tools = get_main_agent_tool_specs()
         recorder = context.observability_recorder
         task_id = run_config.group_id
+        stop_block_count = 0
 
         for _ in range(max_turns):
             turn_index = (
@@ -254,11 +302,98 @@ class OpenAICompatibleToolLoopRunner:
             assistant_message = _assistant_message_for_history(assistant_turn)
             messages.append(assistant_message)
 
-            if assistant_turn.content and recorder is not None:
-                recorder.record_message(
+            if assistant_turn.tool_calls and assistant_turn.content and recorder is not None:
+                recorder.record_progress_message(
                     content=assistant_turn.content,
                     turn_index=turn_index,
                 )
+
+            if not assistant_turn.tool_calls:
+                if assistant_turn.content:
+                    stop_decision = _evaluate_stop_request(
+                        context=context,
+                        task_id=task_id,
+                    )
+                    if stop_decision.allowed:
+                        current = TaskRepository(context.session).get_task(task_id)
+                        return _finalize_runtime_stop(
+                            context=context,
+                            task_id=task_id,
+                            final_response=assistant_turn.content,
+                            final_status=_final_status_for_stop(context, current),
+                            source="assistant_stop",
+                            turn_index=turn_index,
+                        )
+                    if recorder is not None:
+                        recorder.record_progress_message(
+                            content=assistant_turn.content,
+                            turn_index=turn_index,
+                        )
+                    stop_block_count += 1
+                    if recorder is not None:
+                        recorder.record_stop_blocked(
+                            reason=stop_decision.reason,
+                            blocked_count=stop_block_count,
+                            max_blocked_count=MAX_STOP_BLOCKS,
+                            turn_index=turn_index,
+                        )
+                    if stop_block_count >= MAX_STOP_BLOCKS:
+                        return _finalize_runtime_stop(
+                            context=context,
+                            task_id=task_id,
+                            final_response=(
+                                "I could not complete this task because required "
+                                f"execution evidence is missing. {stop_decision.reason}"
+                            ),
+                            final_status=TaskStatus.FAILED.value,
+                            source="runtime_fallback",
+                            turn_index=turn_index,
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Runtime stop was blocked: "
+                                f"{stop_decision.reason} Continue with the required "
+                                "workspace/tool work, then provide a final answer "
+                                "with no tool calls."
+                            ),
+                        }
+                    )
+                    continue
+
+                stop_block_count += 1
+                reason = "The assistant returned no content and no tool calls."
+                if recorder is not None:
+                    recorder.record_stop_blocked(
+                        reason=reason,
+                        blocked_count=stop_block_count,
+                        max_blocked_count=MAX_STOP_BLOCKS,
+                        turn_index=turn_index,
+                    )
+                if stop_block_count >= MAX_STOP_BLOCKS:
+                    return _finalize_runtime_stop(
+                        context=context,
+                        task_id=task_id,
+                        final_response=(
+                            "I could not complete this task because the model "
+                            "stopped without a final response or tool action."
+                        ),
+                        final_status=TaskStatus.FAILED.value,
+                        source="runtime_fallback",
+                        turn_index=turn_index,
+                    )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Runtime stop was blocked: no final response or tool "
+                            "call was provided. Continue with required work or "
+                            "provide a final answer with no tool calls."
+                        ),
+                    }
+                )
+                continue
 
             for tool_call in assistant_turn.tool_calls:
                 tool_result = _execute_tool_call(
@@ -578,6 +713,9 @@ class MainAgentService:
                 return output
 
             state_view = build_state_view(current)
+            session_context = build_session_context_view(self.session, current)
+            if session_context:
+                state_view["session_context"] = session_context
             output = self.runner.run_orchestration(
                 agent=(
                     build_orchestration_agent(model=self.model)
@@ -1283,6 +1421,72 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
     }
 
 
+def build_session_context_view(
+    session: Session,
+    current_task: TaskState,
+    *,
+    max_runs: int = 6,
+) -> dict[str, Any] | None:
+    previous_tasks = [
+        task
+        for task in TaskRepository(session).list_tasks_by_session(current_task.session_id)
+        if task.task_id != current_task.task_id
+    ][-max_runs:]
+    if not previous_tasks:
+        return None
+
+    event_service = EventService(session)
+    runs: list[dict[str, Any]] = []
+    for task in previous_tasks:
+        events = event_service.list_visible_events(task.task_id)
+        final_response = next(
+            (
+                str(event.payload.get("content") or event.message or "")
+                for event in reversed(events)
+                if event.type == EventType.MAIN_AGENT_FINAL_RESPONSE
+            ),
+            None,
+        )
+        completed = next(
+            (
+                event
+                for event in reversed(events)
+                if event.type == EventType.MAIN_AGENT_COMPLETED
+            ),
+            None,
+        )
+        runs.append(
+            {
+                "run_id": task.task_id,
+                "task_id": task.task_id,
+                "status": _value(task.status),
+                "user_message": task.raw_user_request,
+                "final_response": _bounded_session_text(final_response),
+                "final_report_artifact_id": (
+                    completed.payload.get("final_report_artifact_id")
+                    if completed is not None
+                    else None
+                ),
+                "updated_at": task.updated_at.isoformat(),
+            }
+        )
+
+    return {
+        "session_id": current_task.session_id,
+        "current_run_id": current_task.task_id,
+        "recent_runs": runs,
+    }
+
+
+def _bounded_session_text(value: str | None, *, limit: int = 2000) -> str | None:
+    if value is None:
+        return None
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."
+
+
 def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
     if task.workspace is not None:
         return Path(task.workspace.root)
@@ -1377,6 +1581,199 @@ def episode_output_from_task(
         error_code=error_code,
         error_message=error_message,
     )
+
+
+def _evaluate_stop_request(
+    *,
+    context: AgentToolContext,
+    task_id: str,
+) -> _StopDecision:
+    task = TaskRepository(context.session).get_task(task_id)
+    if _is_terminal(task):
+        return _StopDecision(allowed=True, reason="Task is already terminal.")
+    if not _task_requires_tool_evidence(task):
+        return _StopDecision(allowed=True, reason="Task can be answered directly.")
+    if _has_tool_evidence(context, task):
+        return _StopDecision(allowed=True, reason="Required execution evidence exists.")
+    return _StopDecision(
+        allowed=False,
+        reason=(
+            "This task appears to require workspace, code, command, artifact, or "
+            "domain-tool evidence before a final answer."
+        ),
+    )
+
+
+def _task_requires_tool_evidence(task: TaskState) -> bool:
+    task_type = _value(task.task_type)
+    if task_type not in {TaskType.UNKNOWN.value, TaskType.QA.value}:
+        return True
+    if task_type == TaskType.QA.value:
+        return False
+    if (
+        task.difficulty.requires_test
+        or task.difficulty.requires_formal
+        or task.difficulty.requires_repair_loop
+    ):
+        return True
+    if _value(task.difficulty.level) in {
+        DifficultyLevel.L2.value,
+        DifficultyLevel.L3.value,
+        DifficultyLevel.L4.value,
+    }:
+        return True
+    request = f"{task.raw_user_request}\n{task.normalized_goal or ''}".lower()
+    return any(keyword in request for keyword in EXECUTION_REQUEST_KEYWORDS)
+
+
+def _has_tool_evidence(context: AgentToolContext, task: TaskState) -> bool:
+    return _latest_run_has_tool_evidence(task) or _events_have_tool_evidence(
+        context,
+        task.task_id,
+    )
+
+
+def _latest_run_has_tool_evidence(task: TaskState) -> bool:
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is None:
+        return False
+    return any(
+        call.tool_name in EVIDENCE_TOOL_NAMES and _value(call.status) != "rejected"
+        for call in latest_run.tool_calls
+    )
+
+
+def _events_have_tool_evidence(context: AgentToolContext, task_id: str) -> bool:
+    events = EventService(context.session).list_visible_events(task_id)
+    return any(
+        event.type == EventType.MAIN_AGENT_TOOL_RESULT
+        and str(event.payload.get("tool_name") or "") in EVIDENCE_TOOL_NAMES
+        and str(event.payload.get("status") or "") != "rejected"
+        for event in events
+    )
+
+
+def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is not None:
+        for call in reversed(latest_run.tool_calls):
+            if call.tool_name in EVIDENCE_TOOL_NAMES and _value(call.status) != "rejected":
+                return (
+                    TaskStatus.FAILED.value
+                    if _value(call.status) == "failed"
+                    else TaskStatus.SUCCEEDED.value
+                )
+    for event in reversed(EventService(context.session).list_visible_events(task.task_id)):
+        if (
+            event.type == EventType.MAIN_AGENT_TOOL_RESULT
+            and str(event.payload.get("tool_name") or "") in EVIDENCE_TOOL_NAMES
+            and str(event.payload.get("status") or "") != "rejected"
+        ):
+            return (
+                TaskStatus.FAILED.value
+                if str(event.payload.get("status") or "") == "failed"
+                else TaskStatus.SUCCEEDED.value
+            )
+    if task.failures:
+        open_blocking = any(
+            _value(failure.status) == "open"
+            and _value(failure.severity) == "blocking"
+            for failure in task.failures
+        )
+        if open_blocking:
+            return TaskStatus.FAILED.value
+    return TaskStatus.SUCCEEDED.value
+
+
+def _finalize_runtime_stop(
+    *,
+    context: AgentToolContext,
+    task_id: str,
+    final_response: str,
+    final_status: str,
+    source: str,
+    turn_index: int | None,
+) -> MainAgentEpisodeOutput:
+    task_repository = TaskRepository(context.session)
+    event_service = EventService(context.session)
+    task = task_repository.get_task(task_id)
+    main_agent_run_id = task.trace.latest_main_agent_run_id or "not-started"
+    recorder = context.observability_recorder or MainAgentObservabilityRecorder(
+        session=context.session,
+        artifact_root=context.artifact_root,
+        task_id=task_id,
+        openai_trace_id=task.trace.openai_trace_id,
+        main_agent_run_id=task.trace.latest_main_agent_run_id,
+        checkpoint=context.checkpoint,
+    )
+
+    output = episode_output_from_task(
+        task,
+        main_agent_run_id=main_agent_run_id,
+        summary=final_response,
+        final_task_status=final_status,
+    ).model_copy(update={"phase": TaskPhase.COMPLETED.value})
+    recorder.record_final_response(
+        content=final_response,
+        final_status=final_status,
+        source=source,
+        turn_index=turn_index,
+    )
+    final_report = recorder.write_final_report(output)
+    replay_log = recorder.write_replay_log(final_output=output)
+    recorder.record_completed(
+        output=output,
+        final_report=final_report,
+        replay_log=replay_log,
+    )
+
+    if final_status in TERMINAL_EVENT_BY_STATUS and not _is_terminal(task):
+        now = utc_now()
+        latest = task_repository.get_task_for_update(task_id)
+        updated = latest.model_copy(
+            deep=True,
+            update={
+                "status": final_status,
+                "phase": TaskPhase.COMPLETED.value,
+                "updated_at": now,
+                "completed_at": now,
+            },
+        )
+        task_repository.update_task_state(updated)
+        event_service.append_event(
+            build_task_event(
+                task_id=task_id,
+                event_type=TERMINAL_EVENT_BY_STATUS[final_status],
+                title=_terminal_event_title(final_status),
+                message=f"The task was marked {final_status}.",
+                openai_trace_id=updated.trace.openai_trace_id,
+                main_agent_run_id=updated.trace.latest_main_agent_run_id,
+                payload={
+                    "task_id": task_id,
+                    "status": final_status,
+                },
+                created_at=now,
+            )
+        )
+    if context.checkpoint is not None:
+        context.checkpoint()
+    return output
 
 
 def _assistant_message_for_history(turn: _AssistantTurn) -> dict[str, Any]:

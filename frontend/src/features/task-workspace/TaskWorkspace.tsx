@@ -23,7 +23,12 @@ import {
 
 export function TaskWorkspace() {
   const taskState = useTaskState();
-  const eventState = useTaskEvents(taskState.taskId, Boolean(taskState.taskId));
+  const eventStreamId = taskState.sessionId ?? taskState.taskId;
+  const eventState = useTaskEvents(
+    eventStreamId,
+    Boolean(eventStreamId),
+    taskState.sessionId ? "session" : "task",
+  );
   const artifactState = useTaskArtifacts(taskState.taskId);
   const [trace, setTrace] = useState<TaskTraceSummary | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
@@ -59,6 +64,10 @@ export function TaskWorkspace() {
   }, [taskState.taskId]);
 
   useEffect(() => {
+    processedSeqRef.current = 0;
+  }, [eventStreamId]);
+
+  useEffect(() => {
     const pendingEvents = eventState.events
       .filter((event) => event.seq > processedSeqRef.current)
       .sort((left, right) => left.seq - right.seq);
@@ -87,8 +96,10 @@ export function TaskWorkspace() {
     if (!task) {
       return;
     }
-    setTaskItems((current) => upsertTaskItem(current, task));
-  }, [taskState.task]);
+    setTaskItems((current) =>
+      upsertTaskItem(current, task, taskState.sessionId ?? undefined),
+    );
+  }, [taskState.task, taskState.sessionId]);
 
   const finalReportArtifact = findFinalReportArtifact(
     taskState.task,
@@ -144,6 +155,10 @@ export function TaskWorkspace() {
             onAppendMessage={taskState.appendMessage}
             onRefreshHealth={taskState.refreshHealth}
             onSelectTask={(taskId) => {
+              const selected = taskItems.find((item) => item.taskId === taskId);
+              if (selected?.sessionId) {
+                taskState.setSessionId(selected.sessionId);
+              }
               taskState.setTaskId(taskId);
               void taskState.refreshTask(taskId);
             }}
@@ -219,17 +234,24 @@ export function TaskWorkspace() {
   );
 }
 
-function upsertTaskItem(current: TaskListItem[], task: TaskState): TaskListItem[] {
+function upsertTaskItem(
+  current: TaskListItem[],
+  task: TaskState,
+  sessionId?: string,
+): TaskListItem[] {
   const item: TaskListItem = {
     taskId: task.task_id,
+    sessionId,
     title: task.title ?? firstLine(task.normalized_goal ?? task.raw_user_request),
     status: task.status,
     phase: task.phase,
     updatedAt: task.updated_at,
   };
+  const sameConversation = (existing: TaskListItem) =>
+    sessionId ? existing.sessionId === sessionId : existing.taskId === task.task_id;
   return [
     item,
-    ...current.filter((existing) => existing.taskId !== task.task_id),
+    ...current.filter((existing) => !sameConversation(existing)),
   ].slice(0, 8);
 }
 

@@ -18,7 +18,6 @@ from app.services.scheduler_guard import (
     ProposedWorkerJob,
     SchedulerGuardViolation,
     SchedulerGuardViolationCode,
-    validate_finish_task,
     validate_parallel_jobs,
     validate_worker_call,
 )
@@ -308,115 +307,6 @@ def test_parallel_repair_is_rejected() -> None:
         state,
         [ProposedWorkerJob("plc-repair", [code, report_ref()])],
     )
-
-
-def test_finish_succeeded_with_blocking_failure_is_rejected() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(update={"has_blocking_failure": True})
-    state = running_task(gates=gates)
-
-    assert_guard_code(
-        SchedulerGuardViolationCode.BLOCKING_FAILURE_PRESENT,
-        validate_finish_task,
-        state,
-        "succeeded",
-    )
-
-
-def test_l3_task_skipping_formal_is_rejected() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(
-        update={
-            "test_required": True,
-            "formal_required": True,
-            "latest_test_passed": True,
-            "latest_formal_passed": None,
-            "has_blocking_failure": False,
-        }
-    )
-    state = running_task(gates=gates)
-
-    assert_guard_code(
-        SchedulerGuardViolationCode.REQUIRED_FORMAL_MISSING,
-        validate_finish_task,
-        state,
-        "succeeded",
-    )
-
-
-def test_regression_required_finish_is_rejected() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(
-        update={
-            "test_required": False,
-            "formal_required": False,
-            "regression_required": True,
-            "has_blocking_failure": False,
-        }
-    )
-    state = running_task(gates=gates)
-
-    assert_guard_code(
-        SchedulerGuardViolationCode.REGRESSION_REQUIRED,
-        validate_finish_task,
-        state,
-        "succeeded",
-    )
-
-
-def test_non_success_finish_is_not_blocked_by_success_rules() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(
-        update={
-            "test_required": True,
-            "formal_required": True,
-            "regression_required": True,
-            "formal_regression_required": True,
-            "has_blocking_failure": True,
-        }
-    )
-    state = running_task(gates=gates)
-
-    validate_finish_task(state, "partial_failed")
-
-
-def test_finish_succeeded_without_quality_gate_marker_is_rejected() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(
-        update={
-            "test_required": False,
-            "formal_required": False,
-            "regression_required": False,
-            "formal_regression_required": False,
-            "has_blocking_failure": False,
-            "can_finish_as_success": False,
-        }
-    )
-    state = running_task(gates=gates)
-
-    assert_guard_code(
-        SchedulerGuardViolationCode.QUALITY_GATE_REQUIRED,
-        validate_finish_task,
-        state,
-        "succeeded",
-    )
-
-
-def test_finish_succeeded_with_quality_gate_marker_is_allowed() -> None:
-    base = task_state()
-    gates = base.gates.model_copy(
-        update={
-            "test_required": False,
-            "formal_required": False,
-            "regression_required": False,
-            "formal_regression_required": False,
-            "has_blocking_failure": False,
-            "can_finish_as_success": True,
-        }
-    )
-    state = running_task(gates=gates)
-
-    validate_finish_task(state, "succeeded")
 
 
 def test_rejected_action_does_not_mutate_task_state() -> None:

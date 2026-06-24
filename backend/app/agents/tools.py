@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import time
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -79,7 +79,6 @@ from app.services.quality_gate import QualityGateService
 from app.services.scheduler_guard import (
     ProposedWorkerJob,
     SchedulerGuardViolation,
-    validate_finish_task,
     validate_parallel_jobs,
     validate_worker_call,
 )
@@ -101,7 +100,6 @@ TERMINAL_EVENT_BY_STATUS = {
     TaskStatus.CANCELLED.value: EventType.TASK_CANCELLED,
 }
 TERMINAL_STATUS_VALUES = tuple(TERMINAL_EVENT_BY_STATUS)
-FinishTaskStatus = Literal["succeeded", "partial_failed", "failed", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -1623,127 +1621,6 @@ class AgentToolService:
         self._record_tool_result("run_quality_gate", tool_result)
         return tool_result
 
-    def finish_task(
-        self,
-        task_id: str,
-        *,
-        final_status: TaskStatus | str = TaskStatus.SUCCEEDED.value,
-        summary: str | None = None,
-        rationale_summary: str | None = None,
-    ) -> AgentToolResult:
-        tool_name = "finish_task"
-        self._record_tool_call(
-            tool_name=tool_name,
-            task_id=task_id,
-            rationale_summary=rationale_summary,
-            arguments={
-                "task_id": task_id,
-                "final_status": _value(final_status),
-                "summary": summary,
-            },
-        )
-        task = self._get_task(task_id)
-        status_value = _value(final_status)
-        if _value(task.status) in TERMINAL_EVENT_BY_STATUS:
-            result = self._rejected_result(
-                tool_name=tool_name,
-                task_id=task_id,
-                task=task,
-                code="terminal_task",
-                message=f"cannot finish terminal task: {task_id}",
-                details={"status": _value(task.status)},
-            )
-            self._record_tool_result(tool_name, result)
-            return result
-        if status_value not in TERMINAL_EVENT_BY_STATUS:
-            result = self._rejected_result(
-                tool_name=tool_name,
-                task_id=task_id,
-                task=task,
-                code="unsupported_final_status",
-                message=(
-                    f"unsupported final status: {status_value!r}. "
-                    f"Allowed final_status values: {', '.join(TERMINAL_STATUS_VALUES)}."
-                ),
-            )
-            self._record_tool_result(tool_name, result)
-            return result
-
-        completion_summary = summary or rationale_summary or f"Task marked {status_value}."
-        output = MainAgentEpisodeOutput(
-            task_id=task_id,
-            main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
-            final_task_status=status_value,
-            phase=TaskPhase.COMPLETED.value,
-            decisions=[],
-            plan=[],
-            artifact_refs=_main_agent_artifact_refs(task),
-            gate_summary=MainAgentGateSummary.model_validate(
-                task.gates.model_dump(mode="json")
-            ),
-            open_clarification_question_ids=[
-                question.question_id
-                for question in task.unresolved_questions
-                if _value(question.status) == "open"
-            ],
-            summary=completion_summary,
-            metadata={"source": "generic_agent_finish_task"},
-        )
-        recorder = self.context.observability_recorder or MainAgentObservabilityRecorder(
-            session=self.context.session,
-            artifact_root=self.context.artifact_root,
-            task_id=task_id,
-            openai_trace_id=task.trace.openai_trace_id,
-            main_agent_run_id=task.trace.latest_main_agent_run_id,
-            checkpoint=self.context.checkpoint,
-        )
-        final_report = recorder.write_final_report(output)
-        replay_log = recorder.write_replay_log(final_output=output)
-        recorder.record_completed(
-            output=output,
-            final_report=final_report,
-            replay_log=replay_log,
-        )
-        task = self._get_task(task_id)
-
-        now = utc_now()
-        updated = task.model_copy(
-            deep=True,
-            update={
-                "status": status_value,
-                "phase": TaskPhase.COMPLETED.value,
-                "updated_at": now,
-                "completed_at": now,
-            },
-        )
-        self.task_repository.update_task_state(updated)
-        self.event_service.append_event(
-            _build_terminal_task_event(
-                task_id=task_id,
-                final_status=status_value,
-                openai_trace_id=updated.trace.openai_trace_id,
-                main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                created_at=now,
-            )
-        )
-        self._checkpoint()
-        persisted = self._get_task(task_id)
-        result = AgentToolResult(
-            tool=tool_name,
-            task_id=task_id,
-            status=ToolStatus.APPLIED,
-            summary=completion_summary,
-            failures=_failure_summaries(persisted.failures),
-            gate_state=_gate_state_summary(persisted),
-            artifact_refs=[
-                _artifact_ref_summary(final_report),
-                _artifact_ref_summary(replay_log),
-            ],
-            details={"final_status": status_value},
-        )
-        self._record_tool_result(tool_name, result)
-        return result
-
     def _has_final_report_artifact(self, task_id: str) -> bool:
         return any(
             _value(artifact.type) == ArtifactType.FINAL_REPORT.value
@@ -2390,22 +2267,6 @@ def run_quality_gate(
     )
 
 
-@function_tool(strict_mode=False)
-def finish_task(
-    ctx: RunContextWrapper[AgentToolContext],
-    task_id: str,
-    final_status: FinishTaskStatus = TaskStatus.SUCCEEDED.value,
-    rationale_summary: str | None = None,
-) -> AgentToolResult:
-    """Finish a task through guarded terminal state transition."""
-
-    return AgentToolService(ctx.context).finish_task(
-        task_id=task_id,
-        final_status=final_status,
-        rationale_summary=rationale_summary,
-    )
-
-
 def get_main_agent_tools() -> list[Any]:
     """Return SDK function tools for Main Agent registration."""
 
@@ -2420,7 +2281,6 @@ def get_main_agent_tools() -> list[Any]:
         read_artifact,
         run_quality_gate,
         write_final_report,
-        finish_task,
     ]
 
 
@@ -2547,16 +2407,6 @@ def get_main_agent_tool_specs() -> list[dict[str, Any]]:
             },
             ["task_id", "final_status", "summary"],
         ),
-        _tool_spec(
-            "finish_task",
-            "Apply terminal task status after report and guard checks.",
-            {
-                "task_id": {"type": "string"},
-                "final_status": {"type": "string", "enum": list(TERMINAL_STATUS_VALUES)},
-                "rationale_summary": {"type": "string"},
-            },
-            ["task_id"],
-        ),
     ]
 
 
@@ -2600,8 +2450,6 @@ def call_main_agent_tool(
         return service.run_quality_gate(**tool_arguments)
     if tool_name == "write_final_report":
         return service.write_final_report(**tool_arguments)
-    if tool_name == "finish_task":
-        return service.finish_task(**tool_arguments)
     return AgentToolResult(
         tool=tool_name,
         status=ToolStatus.REJECTED,
@@ -2750,24 +2598,6 @@ def call_mcp_tool(
     )
 
 
-@function_tool(strict_mode=False)
-def finish_task(
-    ctx: RunContextWrapper[AgentToolContext],
-    task_id: str,
-    final_status: FinishTaskStatus = TaskStatus.SUCCEEDED.value,
-    summary: str | None = None,
-    rationale_summary: str | None = None,
-) -> AgentToolResult:
-    """Finish a task through generic report-first terminalization."""
-
-    return AgentToolService(ctx.context).finish_task(
-        task_id=task_id,
-        final_status=final_status,
-        summary=summary,
-        rationale_summary=rationale_summary,
-    )
-
-
 GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
     MainAgentToolDefinition(
         name="list_files",
@@ -2892,19 +2722,6 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         required=("task_id", "tool_name"),
         sdk_tool=call_mcp_tool,
         executor_method="call_mcp_tool",
-    ),
-    MainAgentToolDefinition(
-        name="finish_task",
-        description="Write completion evidence and apply terminal task status.",
-        properties={
-            "task_id": {"type": "string"},
-            "final_status": {"type": "string", "enum": list(TERMINAL_STATUS_VALUES)},
-            "summary": {"type": "string"},
-            "rationale_summary": {"type": "string"},
-        },
-        required=("task_id", "summary"),
-        sdk_tool=finish_task,
-        executor_method="finish_task",
     ),
 )
 GENERIC_MAIN_AGENT_TOOL_BY_NAME = {

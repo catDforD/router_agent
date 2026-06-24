@@ -47,6 +47,14 @@ class TaskRepository:
             raise RepositoryNotFoundError(f"task not found: {task_id}")
         return TaskState.model_validate(row.state_json)
 
+    def list_tasks_by_session(self, session_id: str) -> list[TaskState]:
+        rows = self.session.execute(
+            select(TaskRow)
+            .where(TaskRow.session_id == session_id)
+            .order_by(TaskRow.created_at, TaskRow.id)
+        ).scalars()
+        return [TaskState.model_validate(row.state_json) for row in rows]
+
     def update_task_state(self, task_state: TaskState) -> TaskState:
         row = self.session.get(TaskRow, task_state.task_id)
         if row is None:

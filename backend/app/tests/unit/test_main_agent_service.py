@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -251,8 +252,8 @@ class ScriptedChatClient:
     ) -> dict[str, Any]:
         self.requests.append(
             {
-                "messages": messages,
-                "tools": tools,
+                "messages": deepcopy(messages),
+                "tools": deepcopy(tools),
                 "model": model,
                 "stream": stream,
             }
@@ -806,18 +807,7 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
                 ],
             ),
             chat_response(
-                content="The workspace change is complete.",
-                tool_calls=[
-                    tool_call(
-                        "finish_task",
-                        {
-                            "task_id": task_id,
-                            "final_status": "succeeded",
-                            "summary": "Created notes/result.txt.",
-                        },
-                        call_id="call-finish",
-                    )
-                ],
+                content="Created `notes/result.txt` with the requested deliverable.",
             ),
         ]
     )
@@ -840,10 +830,26 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     assert task.status == "succeeded"
     assert (workspace / "notes/result.txt").read_text(encoding="utf-8") == "done\n"
     assert "agent.message" in types
+    assert "agent.final_response" in types
     assert "agent.tool_called" in types
     assert "agent.tool_result" in types
     assert "agent.completed" in types
     assert "task.succeeded" in types
+    progress_messages = [
+        event.payload["content"]
+        for event in events
+        if event.type == "agent.message"
+    ]
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+    assert progress_messages == [
+        "I will inspect the workspace first.",
+        "I will write a small deliverable.",
+    ]
+    assert final_response.payload["content"] == (
+        "Created `notes/result.txt` with the requested deliverable."
+    )
     assert row_count(db_session, WorkerJobRow) == 0
     assert chat_client.requests[0]["model"] == "fake-main-agent"
     assert chat_client.requests[0]["messages"][0]["role"] == "system"
@@ -864,10 +870,8 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     assert [call.tool_name for call in latest_run.tool_calls] == [
         "list_files",
         "write_file",
-        "finish_task",
     ]
     assert [call.status for call in latest_run.tool_calls] == [
-        "applied",
         "applied",
         "applied",
     ]
@@ -898,17 +902,7 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
                 ],
             ),
             streamed_chat_chunks(
-                content="I can finish after the workspace check.",
-                tool_calls=[
-                    tool_call(
-                        "finish_task",
-                        {
-                            "task_id": task_id,
-                            "summary": "Workspace inspected.",
-                        },
-                        call_id="call-stream-finish",
-                    )
-                ],
+                content="Workspace inspected. No files were present.",
             ),
         ]
     )
@@ -929,10 +923,11 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
     assert output.final_task_status == "succeeded"
     assert chat_client.requests[0]["stream"] is True
     assert message_event.payload["content"] == "I will inspect the workspace."
+    assert "agent.final_response" in [event.type for event in events]
     assert "agent.completed" in [event.type for event in events]
 
 
-def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
+def test_tool_loop_runner_finalizes_from_content_only_stop(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -942,19 +937,7 @@ def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
     chat_client = ScriptedChatClient(
         [
             chat_response(
-                content="The task is ready for generic finalization.",
-                tool_calls=[
-                    tool_call(
-                        "finish_task",
-                        {
-                            "task_id": task_id,
-                            "final_status": "succeeded",
-                            "summary": "Validation passed and delivery is complete.",
-                            "rationale_summary": "Finalizing through finish_task.",
-                        },
-                        call_id="call-finish",
-                    )
-                ],
+                content="Validation passed and delivery is complete.",
             ),
         ]
     )
@@ -973,8 +956,104 @@ def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
     assert output.final_task_status == "succeeded"
     assert task.status == "succeeded"
     assert task.current_artifacts.final_report is not None
+    assert types.index("agent.final_response") < types.index("agent.completed")
     assert types.index("agent.completed") < types.index("task.succeeded")
-    assert chat_client.requests[0]["tools"][-1]["function"]["name"] == "finish_task"
+    assert "finish_task" not in [
+        tool["function"]["name"] for tool in chat_client.requests[0]["tools"]
+    ]
+
+
+def test_tool_loop_blocks_stop_without_execution_evidence_then_continues(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(content="I can complete this without inspecting anything."),
+            chat_response(
+                content="I will inspect the workspace first.",
+                tool_calls=[
+                    tool_call(
+                        "list_files",
+                        {
+                            "task_id": task_id,
+                            "path": ".",
+                        },
+                        call_id="call-list-after-block",
+                    )
+                ],
+            ),
+            chat_response(content="Workspace inspected; no files needed changes."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
+    )
+
+    output = service.run_episode(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    types = [event.type for event in events]
+    blocked = next(event for event in events if event.type == "agent.stop_blocked")
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+
+    assert output.final_task_status == "succeeded"
+    assert types.index("agent.stop_blocked") < types.index("agent.tool_called")
+    assert types.index("agent.tool_result") < types.index("agent.final_response")
+    assert blocked.payload["blocked_count"] == 1
+    assert final_response.payload["content"] == "Workspace inspected; no files needed changes."
+    assert chat_client.requests[1]["messages"][-1]["role"] == "user"
+    assert "Runtime stop was blocked" in chat_client.requests[1]["messages"][-1]["content"]
+
+
+def test_tool_loop_stop_block_limit_fails_with_runtime_fallback(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(content="I can answer without any execution evidence."),
+            chat_response(content="I still think this is done without tools."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    task = persisted_task(db_session, task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    types = [event.type for event in events]
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+
+    assert output.final_task_status == "failed"
+    assert task.status == "failed"
+    assert types.count("agent.stop_blocked") == 2
+    assert final_response.payload["source"] == "runtime_fallback"
+    assert final_response.payload["final_status"] == "failed"
+    assert "required execution evidence is missing" in final_response.payload["content"]
+    assert types.index("agent.final_response") < types.index("agent.completed")
+    assert types.index("agent.completed") < types.index("task.failed")
+    assert "task.succeeded" not in types
 
 
 def test_tool_loop_records_malformed_tool_arguments_and_continues(
@@ -996,18 +1075,7 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
                 ],
             ),
             chat_response(
-                content="The previous tool arguments were invalid, so I will finish with a failure summary.",
-                tool_calls=[
-                    tool_call(
-                        "finish_task",
-                        {
-                            "task_id": task_id,
-                            "final_status": "failed",
-                            "summary": "Stopped after invalid tool arguments.",
-                        },
-                        call_id="call-finish-after-error",
-                    )
-                ],
+                content="Stopped after invalid tool arguments.",
             ),
         ]
     )
@@ -1029,6 +1097,7 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
     )
 
     assert output.final_task_status == "failed"
+    assert "agent.final_response" in [event.type for event in events]
     assert failed_tool_result.payload["status"] == "failed"
     assert failed_tool_result.payload["details"]["error"]["error_code"] == (
         "invalid_tool_arguments"

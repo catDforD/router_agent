@@ -30,7 +30,6 @@ from app.models.router_schema import (
     TaskPhase,
     TaskState,
     TaskStatus,
-    TaskTrace,
     WorkerType,
 )
 from app.repositories.task_repo import TaskRepository
@@ -272,25 +271,16 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
         "read_artifact",
         "write_artifact",
         "call_mcp_tool",
-        "finish_task",
     ]
     assert [spec["function"]["name"] for spec in get_main_agent_tool_specs()] == [
         tool.name for tool in tools
     ]
 
 
-def test_finish_task_tool_schema_declares_terminal_status_enum() -> None:
-    specs = {
-        spec["function"]["name"]: spec["function"]["parameters"]
-        for spec in get_main_agent_tool_specs()
-    }
-
-    final_status = specs["finish_task"]["properties"]["final_status"]
-
-    assert final_status == {
-        "type": "string",
-        "enum": ["succeeded", "partial_failed", "failed", "cancelled"],
-    }
+def test_finish_task_is_not_exposed_to_main_agent_model() -> None:
+    assert "finish_task" not in [
+        spec["function"]["name"] for spec in get_main_agent_tool_specs()
+    ]
 
 
 def test_file_tools_read_write_and_reject_foreign_paths(
@@ -785,86 +775,7 @@ def test_run_quality_gate_returns_assessment_and_gate_report(
     assert result.gate_state.can_finish_as_success is True
 
 
-def test_finish_task_marks_succeeded_without_quality_gate(
-    db_session: Session,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-
-    result = service.finish_task(task.task_id, summary="Generic task complete.")
-    updated = TaskRepository(db_session).get_task(task.task_id)
-
-    assert result.status == "applied"
-    assert updated.status == "succeeded"
-    assert updated.current_artifacts.final_report is not None
-
-
-def test_finish_task_writes_durable_final_report_after_gate(
-    db_session: Session,
-    tmp_path: Path,
-) -> None:
-    service = AgentToolService(
-        AgentToolContext(
-            session=db_session,
-            artifact_root=tmp_path / "artifacts",
-            report_first_finalization=True,
-        )
-    )
-    task = classified_task(db_session, qa=True)
-    create_raw_artifact(db_session, tmp_path, task)
-    service.run_quality_gate(task.task_id)
-
-    result = service.finish_task(task.task_id, summary="Finished after optional gate.")
-    updated = TaskRepository(db_session).get_task(task.task_id)
-    events = EventService(db_session).list_visible_events(task.task_id)
-
-    assert result.status == "applied"
-    assert updated.status == "succeeded"
-    assert updated.current_artifacts.final_report is not None
-    assert "task.succeeded" in [event.type for event in events]
-
-
-def test_finish_task_marks_succeeded_after_quality_gate_passes(
-    db_session: Session,
-    tmp_path: Path,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-    task = TaskRepository(db_session).update_task_state(
-        task.model_copy(
-            deep=True,
-            update={
-                "trace": TaskTrace(
-                    openai_trace_id="trace-001",
-                    main_agent_run_ids=["main-agent-run-001"],
-                    latest_main_agent_run_id="main-agent-run-001",
-                )
-            },
-        )
-    )
-    create_raw_artifact(db_session, tmp_path, task)
-    service.run_quality_gate(task.task_id)
-    report_result = service.write_final_report(
-        task.task_id,
-        final_status="succeeded",
-        summary="QA task passed Quality Gate.",
-    )
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-    events = EventService(db_session).list_visible_events(task.task_id)
-
-    assert report_result.status == "applied"
-    assert result.status == "applied"
-    assert updated.status == "succeeded"
-    assert updated.phase == "completed"
-    assert updated.completed_at is not None
-    assert [event.type for event in events][-1] == "task.succeeded"
-    assert events[-1].correlation.openai_trace_id == "trace-001"
-    assert events[-1].correlation.main_agent_run_id == "main-agent-run-001"
-
-
-def test_tool_checkpoint_callback_runs_after_gate_and_finish(
+def test_tool_checkpoint_callback_runs_after_gate_and_report(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
@@ -885,31 +796,6 @@ def test_tool_checkpoint_callback_runs_after_gate_and_finish(
         final_status="succeeded",
         summary="QA task passed Quality Gate.",
     )
-    service.finish_task(task.task_id)
 
-    assert len(checkpoints) >= 3
+    assert len(checkpoints) >= 2
     assert set(checkpoints) == {"checkpoint"}
-
-
-def test_finish_task_rejects_cancelled_task_without_overwrite(
-    db_session: Session,
-    service: AgentToolService,
-) -> None:
-    task = classified_task(db_session, qa=True)
-    cancelled = task.model_copy(
-        deep=True,
-        update={
-            "status": TaskStatus.CANCELLED.value,
-            "phase": TaskPhase.COMPLETED.value,
-        },
-    )
-    TaskRepository(db_session).update_task_state(cancelled)
-
-    result = service.finish_task(task.task_id)
-    updated = TaskRepository(db_session).get_task(task.task_id)
-
-    assert result.status == "rejected"
-    assert result.violation is not None
-    assert result.violation.code == "terminal_task"
-    assert updated.status == "cancelled"
-    assert EventService(db_session).list_visible_events(task.task_id) == []

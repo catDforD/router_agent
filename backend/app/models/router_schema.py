@@ -141,6 +141,12 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class AgentSessionStatus(str, Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    CANCELLED = "cancelled"
+
+
 class TaskPhase(str, Enum):
     INTAKE = "intake"
     CLARIFYING = "clarifying"
@@ -280,6 +286,8 @@ class EventType(str, Enum):
     MAIN_AGENT_FINALIZING = "agent.finalizing"
     MAIN_AGENT_TURN_STARTED = "agent.turn_started"
     MAIN_AGENT_MESSAGE = "agent.message"
+    MAIN_AGENT_FINAL_RESPONSE = "agent.final_response"
+    MAIN_AGENT_STOP_BLOCKED = "agent.stop_blocked"
     MAIN_AGENT_TOOL_CALLED = "agent.tool_called"
     MAIN_AGENT_TOOL_RESULT = "agent.tool_result"
     MAIN_AGENT_COMPLETED = "agent.completed"
@@ -943,6 +951,8 @@ class EventSource(RouterBaseModel):
 
 class EventCorrelation(RouterBaseModel):
     parent_event_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
     openai_trace_id: str | None = None
     main_agent_run_id: str | None = None
     worker_job_id: str | None = None
@@ -965,6 +975,34 @@ class RouterEvent(RouterBaseModel):
     correlation: EventCorrelation
     payload: dict[str, JsonValue]
     created_at: datetime
+
+
+class AgentSessionRunRef(RouterBaseModel):
+    run_id: str
+    task_id: str
+    status: str
+    user_message: str
+    final_response: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class AgentSession(RouterBaseModel):
+    schema_version: SchemaVersion
+    session_id: str
+    user_id: str | None = None
+    title: str
+    status: AgentSessionStatus
+    project_context: ProjectContext
+    workspace: WorkspaceContext | None = None
+    latest_task_id: str | None = None
+    latest_run_id: str | None = None
+    summary: str | None = None
+    event_seq: int = Field(ge=0)
+    runs: list[AgentSessionRunRef] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
 
 ROUTER_V1_SCHEMA_MODELS: dict[str, type[BaseModel]] = {

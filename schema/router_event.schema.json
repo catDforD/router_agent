@@ -15,6 +15,30 @@
           "default": null,
           "title": "Parent Event Id"
         },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
         "openai_trace_id": {
           "anyOf": [
             {
@@ -171,6 +195,8 @@
         "agent.finalizing",
         "agent.turn_started",
         "agent.message",
+        "agent.final_response",
+        "agent.stop_blocked",
         "agent.tool_called",
         "agent.tool_result",
         "agent.completed",

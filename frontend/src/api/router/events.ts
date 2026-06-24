@@ -5,6 +5,7 @@ export type StreamState = "idle" | "connecting" | "connected" | "reconnecting" |
 
 export interface TaskEventStreamOptions {
   afterSeq?: number;
+  scope?: "task" | "session";
   onOpen?: () => void;
   onEvent: (event: RouterEvent) => void;
   onError?: (error: Event) => void;
@@ -30,6 +31,8 @@ export const ROUTER_EVENT_TYPES: EventType[] = [
   "agent.finalizing",
   "agent.turn_started",
   "agent.message",
+  "agent.final_response",
+  "agent.stop_blocked",
   "agent.tool_called",
   "agent.tool_result",
   "agent.completed",
@@ -53,16 +56,23 @@ export const ROUTER_EVENT_TYPES: EventType[] = [
   "repair.round_failed",
 ];
 
-export function eventStreamUrl(taskId: string, afterSeq = 0): string {
-  const encoded = encodeURIComponent(taskId);
-  return apiUrl(`/api/tasks/${encoded}/events?after_seq=${afterSeq}`);
+export function eventStreamUrl(
+  id: string,
+  afterSeq = 0,
+  scope: "task" | "session" = "task",
+): string {
+  const encoded = encodeURIComponent(id);
+  const prefix = scope === "session" ? "sessions" : "tasks";
+  return apiUrl(`/api/${prefix}/${encoded}/events?after_seq=${afterSeq}`);
 }
 
 export function openTaskEventStream(
-  taskId: string,
+  id: string,
   options: TaskEventStreamOptions,
 ): TaskEventStream {
-  const source = new EventSource(eventStreamUrl(taskId, options.afterSeq ?? 0));
+  const source = new EventSource(
+    eventStreamUrl(id, options.afterSeq ?? 0, options.scope ?? "task"),
+  );
 
   source.onopen = () => options.onOpen?.();
   source.onerror = (error) => options.onError?.(error);

@@ -808,6 +808,8 @@ export type EventType =
   | "agent.finalizing"
   | "agent.turn_started"
   | "agent.message"
+  | "agent.final_response"
+  | "agent.stop_blocked"
   | "agent.tool_called"
   | "agent.tool_result"
   | "agent.completed"
@@ -860,6 +862,9 @@ export interface EventSource {
 export interface EventCorrelation {
   parent_event_id?: string | null;
 
+  session_id?: string | null;
+  run_id?: string | null;
+
   openai_trace_id?: string | null;
   main_agent_run_id?: string | null;
 
@@ -868,6 +873,36 @@ export interface EventCorrelation {
 
   artifact_ids?: string[];
   failure_ids?: string[];
+}
+
+export type AgentSessionStatus = "active" | "archived" | "cancelled";
+
+export interface AgentSessionRunRef {
+  run_id: string;
+  task_id: string;
+  status: string;
+  user_message: string;
+  final_response?: string | null;
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
+  completed_at?: ISODateTime | null;
+}
+
+export interface AgentSession {
+  schema_version: SchemaVersion;
+  session_id: string;
+  user_id?: string | null;
+  title: string;
+  status: AgentSessionStatus;
+  project_context: ProjectContext;
+  workspace?: WorkspaceContext | null;
+  latest_task_id?: string | null;
+  latest_run_id?: string | null;
+  summary?: string | null;
+  event_seq: number;
+  runs: AgentSessionRunRef[];
+  created_at: ISODateTime;
+  updated_at: ISODateTime;
 }
 
 export interface RouterEvent {

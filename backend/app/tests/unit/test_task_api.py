@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api import events as event_api
+from app.api import sessions as sessions_api
 from app.api import tasks as tasks_api
 from app.core.config import Settings
 from app.core.database import get_engine_for_url, get_session_factory_for_url
@@ -60,6 +61,23 @@ def limited_event_stream(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(event_api, "iter_event_stream", limited_stream)
 
+    def limited_session_stream(
+        session_factory: sessionmaker[Session],
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> Iterator[str]:
+        yield from event_service_module.iter_session_event_stream(
+            session_factory,
+            session_id,
+            after_seq=after_seq,
+            poll_interval_seconds=0,
+            heartbeat_interval_seconds=0,
+            stop_after_idle_heartbeats=1,
+        )
+
+    monkeypatch.setattr(sessions_api, "iter_session_event_stream", limited_session_stream)
+
 
 @pytest.fixture(autouse=True)
 def scheduled_runtime(
@@ -79,6 +97,7 @@ def scheduled_runtime(
 
     monkeypatch.setattr(tasks_api, "run_runtime_start_task", fake_start)
     monkeypatch.setattr(tasks_api, "run_runtime_resume_task", fake_resume)
+    monkeypatch.setattr(sessions_api, "run_runtime_start_task", fake_start)
     return scheduled
 
 
@@ -146,6 +165,87 @@ def test_create_task_endpoint_returns_handle_and_persists_side_effects(
     assert "event: task.created\n" in stream.text
 
 
+def test_create_session_endpoint_returns_session_and_streams_session_events(
+    api_context: tuple[Settings, sessionmaker[Session]],
+    limited_event_stream: None,
+    scheduled_runtime: list[tuple[str, str, str | None]],
+) -> None:
+    settings, session_factory = api_context
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post("/api/sessions", json=task_payload())
+
+    assert response.status_code == 201
+    payload = response.json()
+    session_id = payload["session"]["session_id"]
+    task_id = payload["task_id"]
+    assert payload["session"]["latest_task_id"] == task_id
+    assert payload["session"]["latest_run_id"] == task_id
+    assert payload["events_url"] == f"/api/sessions/{session_id}/events"
+    assert scheduled_runtime == [("start", task_id, settings.database_url)]
+
+    with session_factory() as session:
+        task = TaskRepository(session).get_task(task_id)
+        task_events = EventService(session).list_visible_events(task_id)
+        session_events = EventService(session).list_visible_session_events(session_id)
+
+    assert task.session_id == session_id
+    assert [event.type for event in task_events] == ["task.created"]
+    assert [event.type for event in session_events] == ["task.created"]
+    assert session_events[0].seq == 1
+    assert session_events[0].payload["message"] == task_payload()["message"]
+
+    with TestClient(create_app(settings)) as client:
+        stream = client.get(f"/api/sessions/{session_id}/events")
+
+    assert stream.status_code == 200
+    assert "event: task.created\n" in stream.text
+
+
+def test_append_session_message_creates_new_run_after_completed_task(
+    api_context: tuple[Settings, sessionmaker[Session]],
+    scheduled_runtime: list[tuple[str, str, str | None]],
+) -> None:
+    settings, session_factory = api_context
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/api/sessions", json=task_payload()).json()
+    session_id = created["session"]["session_id"]
+    first_task_id = created["task_id"]
+
+    with session_factory() as session:
+        task = TaskRepository(session).get_task(first_task_id)
+        TaskRepository(session).update_task_state(
+            task.model_copy(update={"status": "succeeded", "phase": "completed"})
+        )
+        session.commit()
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"message": "继续说明上一次回答。"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    second_task_id = payload["task_id"]
+    assert second_task_id != first_task_id
+    assert payload["session"]["latest_task_id"] == second_task_id
+    assert scheduled_runtime[-1] == ("start", second_task_id, settings.database_url)
+
+    with session_factory() as session:
+        first = TaskRepository(session).get_task(first_task_id)
+        second = TaskRepository(session).get_task(second_task_id)
+        session_events = EventService(session).list_visible_session_events(session_id)
+
+    assert first.status == "succeeded"
+    assert second.status == "created"
+    assert second.session_id == session_id
+    assert [event.payload.get("message") for event in session_events] == [
+        task_payload()["message"],
+        "继续说明上一次回答。",
+    ]
+
+
 def test_create_task_endpoint_rejects_blank_message(
     api_context: tuple[Settings, sessionmaker[Session]],
     scheduled_runtime: list[tuple[str, str, str | None]],
@@ -201,7 +301,10 @@ def test_get_task_trace_endpoint_returns_compact_summary(
     assert payload["main_agent_run_ids"] == []
     assert [event["type"] for event in payload["events"]] == ["task.created"]
     assert payload["events"][0]["payload_keys"] == [
+        "message",
         "raw_user_request_artifact_id",
+        "run_id",
+        "session_id",
         "status",
         "task_id",
     ]

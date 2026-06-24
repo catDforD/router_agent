@@ -117,8 +117,6 @@ class ScriptedToolRunner:
                 continue
             elif action == "gate":
                 result = tools.run_quality_gate(task_id)
-            elif action == "finish":
-                result = tools.finish_task(task_id)
             else:
                 raise AssertionError(f"unknown fake action: {action}")
             self.tool_results.append(result)
@@ -152,7 +150,7 @@ class ScriptedToolRunner:
                 task_id=task_id,
                 event_type=EventType.MAIN_AGENT_FINALIZING,
                 title="Main Agent finalizing",
-                message="Fake runner is running Quality Gate before finish.",
+                message="Fake runner is running Quality Gate before final response.",
                 openai_trace_id=task.trace.openai_trace_id,
                 main_agent_run_id=task.trace.latest_main_agent_run_id,
                 payload={"task_id": task_id},
@@ -337,7 +335,7 @@ def test_cancelled_task_is_not_started_by_scheduled_runtime_job(
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
         classifications=[classification()],
-        sequence=["dev", "test", "gate", "finish"],
+        sequence=["dev", "test", "gate"],
     )
     scheduler = InProcessRuntimeScheduler(runtime_service(settings, session_factory, runner))
     task_id = create_task(settings, session_factory)

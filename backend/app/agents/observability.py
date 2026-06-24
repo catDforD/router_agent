@@ -75,6 +75,19 @@ class MainAgentObservabilityRecorder:
         phase: str = "orchestration",
         turn_index: int | None = None,
     ) -> RouterEvent:
+        return self.record_progress_message(
+            content=content,
+            phase=phase,
+            turn_index=turn_index,
+        )
+
+    def record_progress_message(
+        self,
+        *,
+        content: str,
+        phase: str = "orchestration",
+        turn_index: int | None = None,
+    ) -> RouterEvent:
         index = turn_index or self._ensure_turn()
         message = _bounded_text(content, limit=MAX_SUMMARY_CHARS) or ""
         payload = {
@@ -82,6 +95,8 @@ class MainAgentObservabilityRecorder:
             "turn_index": index,
             "phase": phase,
             "visibility": "public",
+            "message_kind": "progress",
+            "display_region": "process",
             "content": message,
         }
         self._record_entry("message", payload)
@@ -90,6 +105,59 @@ class MainAgentObservabilityRecorder:
             title="Main Agent message",
             message=message,
             payload=payload,
+        )
+
+    def record_final_response(
+        self,
+        *,
+        content: str,
+        final_status: str,
+        source: str,
+        turn_index: int | None = None,
+    ) -> RouterEvent:
+        index = turn_index or self._ensure_turn()
+        message = _bounded_text(content, limit=MAX_SUMMARY_CHARS) or ""
+        payload = {
+            "task_id": self.task_id,
+            "main_agent_run_id": self.main_agent_run_id,
+            "turn_index": index,
+            "content": message,
+            "final_status": final_status,
+            "source": source,
+        }
+        self._record_entry("final_response", payload)
+        return self._append_event(
+            event_type=EventType.MAIN_AGENT_FINAL_RESPONSE,
+            title="Main Agent final response",
+            message=message,
+            payload=payload,
+        )
+
+    def record_stop_blocked(
+        self,
+        *,
+        reason: str,
+        blocked_count: int,
+        max_blocked_count: int,
+        turn_index: int | None = None,
+    ) -> RouterEvent:
+        index = turn_index or self._ensure_turn()
+        message = _bounded_text(reason, limit=MAX_SUMMARY_CHARS) or ""
+        payload = {
+            "task_id": self.task_id,
+            "main_agent_run_id": self.main_agent_run_id,
+            "turn_index": index,
+            "reason": message,
+            "blocked_count": blocked_count,
+            "max_blocked_count": max_blocked_count,
+        }
+        self._record_entry("stop_blocked", payload)
+        return self._append_event(
+            event_type=EventType.MAIN_AGENT_STOP_BLOCKED,
+            title="Main Agent stop blocked",
+            message=message,
+            payload=payload,
+            severity=EventSeverity.WARNING,
         )
 
     def record_tool_call(

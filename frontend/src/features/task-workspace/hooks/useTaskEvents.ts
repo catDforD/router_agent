@@ -7,7 +7,11 @@ import {
 } from "../../../api/router/events";
 import type { RouterEvent } from "../../../api/router/types";
 
-export function useTaskEvents(taskId: string | null, enabled = true) {
+export function useTaskEvents(
+  streamId: string | null,
+  enabled = true,
+  scope: "task" | "session" = "task",
+) {
   const [events, setEvents] = useState<RouterEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("idle");
   const [latestSeq, setLatestSeq] = useState(0);
@@ -25,10 +29,10 @@ export function useTaskEvents(taskId: string | null, enabled = true) {
     setLatestSeq(0);
     setEvents([]);
     setStreamError(undefined);
-  }, [taskId]);
+  }, [streamId, scope]);
 
   useEffect(() => {
-    if (!taskId || !enabled) {
+    if (!streamId || !enabled) {
       setStreamState("idle");
       return undefined;
     }
@@ -38,8 +42,9 @@ export function useTaskEvents(taskId: string | null, enabled = true) {
 
     const connect = (state: StreamState) => {
       setStreamState(state);
-      stream = openTaskEventStream(taskId, {
+      stream = openTaskEventStream(streamId, {
         afterSeq: latestSeqRef.current,
+        scope,
         onOpen: () => {
           if (!closed) {
             setStreamState("connected");
@@ -54,6 +59,7 @@ export function useTaskEvents(taskId: string | null, enabled = true) {
           setLatestSeq(latestSeqRef.current);
           setEvents((current) => appendUniqueEvent(current, event));
           if (
+            scope === "task" &&
             isTerminalEvent(event) &&
             terminalCloseTimerRef.current === undefined
           ) {
@@ -95,7 +101,7 @@ export function useTaskEvents(taskId: string | null, enabled = true) {
       }
       stream?.close();
     };
-  }, [taskId, enabled]);
+  }, [streamId, enabled, scope]);
 
   return useMemo(
     () => ({

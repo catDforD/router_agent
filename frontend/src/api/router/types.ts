@@ -1,4 +1,7 @@
 export type {
+  AgentSession,
+  AgentSessionRunRef,
+  AgentSessionStatus,
   Artifact,
   ArtifactRef,
   ArtifactType,
@@ -21,6 +24,7 @@ export type {
 } from "../../../../schema/ts/router_contract";
 
 import type {
+  AgentSession,
   Artifact,
   EventCorrelation,
   JsonValue,
@@ -43,6 +47,30 @@ export interface CreateTaskResponse {
   task_id: string;
   status: string;
   events_url: string;
+}
+
+export interface CreateSessionResponse {
+  session: AgentSession;
+  task: TaskState;
+  task_id: string;
+  run_id: string;
+  events_url: string;
+}
+
+export interface SessionResponse {
+  session: AgentSession;
+  latest_task?: TaskState | null;
+}
+
+export interface ListSessionsResponse {
+  sessions: AgentSession[];
+}
+
+export interface AppendSessionMessageResponse {
+  session: AgentSession;
+  task: TaskState;
+  task_id: string;
+  run_id: string;
 }
 
 export interface AppendUserMessageResponse {

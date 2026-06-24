@@ -24,9 +24,12 @@ def test_orchestration_instructions_cover_guarded_finalization() -> None:
     assert "write_file" in instructions
     assert "apply_patch" in instructions
     assert "exec_command" in instructions
-    assert "Call finish_task" in instructions or "finish_task" in instructions
-    assert "Assistant text alone never completes the task" in instructions
-    assert "Runtime policy is authoritative" in instructions
+    assert "finish_task" not in instructions
+    assert "return the final answer as normal" in instructions
+    assert "assistant text with no tool calls" in instructions
+    assert "Do not add" in instructions
+    assert "Runtime policy is" in instructions
+    assert "authoritative" in instructions
 
 
 def test_orchestration_instructions_cover_artifact_boundaries() -> None:

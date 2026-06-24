@@ -55,18 +55,30 @@ type ProcessTranscriptItem =
   | StatusTranscriptItem;
 
 interface TranscriptView {
+  runs: TranscriptRunView[];
+}
+
+interface TranscriptRunView {
+  id: string;
+  taskId?: string;
+  runId?: string;
   userMessage?: UserTranscriptItem;
   processItems: ProcessTranscriptItem[];
   finalAnswer?: AgentTranscriptItem;
   terminalStatus?: StatusTranscriptItem;
   finalReportArtifactId?: string;
   isTerminal: boolean;
+  latestSeq: number;
+  createdAt?: string;
+  latestAt?: string;
 }
 
 interface BaseTranscriptItem {
   id: string;
   seq: number;
   createdAt?: string;
+  taskId?: string;
+  runId?: string;
 }
 
 interface UserTranscriptItem extends BaseTranscriptItem {
@@ -132,17 +144,23 @@ export function SseConsole({
   onArtifactClick,
 }: SseConsoleProps) {
   const [message, setMessage] = useState("");
-  const [processOpen, setProcessOpen] = useState(true);
-  const [processTouched, setProcessTouched] = useState(false);
+  const [processOpenByRun, setProcessOpenByRun] = useState<Record<string, boolean>>({});
+  const [processTouchedByRun, setProcessTouchedByRun] = useState<Record<string, boolean>>({});
   const endRef = useRef<HTMLDivElement | null>(null);
-  const previousTaskIdRef = useRef<string | null>(null);
   const transcriptView = useMemo(() => buildTranscriptView(task, events), [task, events]);
-  const transcriptContentCount =
-    (transcriptView.userMessage ? 1 : 0) +
-    transcriptView.processItems.length +
-    (transcriptView.finalAnswer ? 1 : 0);
-  const latestEventAt = events.at(-1)?.created_at ?? task?.updated_at ?? task?.created_at;
-  const elapsedLabel = formatElapsed(task?.created_at, latestEventAt);
+  const transcriptContentCount = transcriptView.runs.reduce(
+    (count, run) =>
+      count +
+      (run.userMessage ? 1 : 0) +
+      run.processItems.length +
+      (run.finalAnswer ? 1 : 0),
+    0,
+  );
+  const latestRun = transcriptView.runs.at(-1);
+  const latestEventAt =
+    latestRun?.latestAt ?? events.at(-1)?.created_at ?? task?.updated_at ?? task?.created_at;
+  const elapsedLabel = formatElapsed(latestRun?.createdAt ?? task?.created_at, latestEventAt);
+  const runKey = transcriptView.runs.map((run) => run.id).join(":");
   const openQuestions = useMemo(
     () => task?.unresolved_questions.filter((question) => question.status === "open") ?? [],
     [task?.unresolved_questions],
@@ -152,24 +170,13 @@ export function SseConsole({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [transcriptContentCount, latestSeq, streamState, processOpen]);
+  }, [transcriptContentCount, latestSeq, streamState, processOpenByRun]);
 
   useEffect(() => {
-    const taskId = task?.task_id ?? null;
-    if (previousTaskIdRef.current === taskId) {
-      return;
-    }
-    previousTaskIdRef.current = taskId;
-    setProcessOpen(true);
-    setProcessTouched(false);
-  }, [task?.task_id]);
-
-  useEffect(() => {
-    if (processTouched) {
-      return;
-    }
-    setProcessOpen(!transcriptView.isTerminal);
-  }, [processTouched, transcriptView.isTerminal]);
+    const activeRunIds = new Set(transcriptView.runs.map((run) => run.id));
+    setProcessOpenByRun((current) => pruneRunState(current, activeRunIds));
+    setProcessTouchedByRun((current) => pruneRunState(current, activeRunIds));
+  }, [runKey, transcriptView.runs]);
 
   const submitMessage = async (event: FormEvent) => {
     event.preventDefault();
@@ -260,11 +267,7 @@ export function SseConsole({
           </div>
         ) : null}
 
-        {task &&
-        transcriptView.userMessage &&
-        !transcriptView.processItems.length &&
-        !transcriptView.finalAnswer &&
-        events.length === 0 ? (
+        {task && transcriptContentCount === 0 && events.length === 0 ? (
           <div className="console-empty compact">
             <h2>{task.normalized_goal ?? task.raw_user_request}</h2>
             <p>等待 Main Agent 输出。</p>
@@ -273,34 +276,54 @@ export function SseConsole({
 
         {transcriptContentCount ? (
           <div className="agent-transcript" aria-label="Main Agent transcript">
-            {transcriptView.userMessage ? (
-              <TranscriptRow
-                item={transcriptView.userMessage}
-                key={transcriptView.userMessage.id}
-                onArtifactClick={onArtifactClick}
-              />
-            ) : null}
-            {transcriptView.processItems.length ? (
-              <ExecutionProcessPanel
-                elapsedLabel={elapsedLabel}
-                items={transcriptView.processItems}
-                latestSeq={latestSeq}
-                onArtifactClick={onArtifactClick}
-                onToggle={() => {
-                  setProcessTouched(true);
-                  setProcessOpen((value) => !value);
-                }}
-                open={processOpen}
-                streamState={streamState}
-                terminalStatus={transcriptView.terminalStatus}
-              />
-            ) : null}
-            {transcriptView.finalAnswer ? (
-              <FinalAnswer
-                item={transcriptView.finalAnswer}
-                onArtifactClick={onArtifactClick}
-              />
-            ) : null}
+            {transcriptView.runs.map((run) => {
+              const processOpen = processPanelOpen(
+                run,
+                processOpenByRun,
+                processTouchedByRun,
+              );
+              return (
+                <div className="transcript-run" key={run.id}>
+                  {run.userMessage ? (
+                    <TranscriptRow
+                      item={run.userMessage}
+                      onArtifactClick={onArtifactClick}
+                    />
+                  ) : null}
+                  {run.processItems.length ? (
+                    <ExecutionProcessPanel
+                      elapsedLabel={formatElapsed(run.createdAt, run.latestAt)}
+                      items={run.processItems}
+                      latestSeq={run.latestSeq}
+                      onArtifactClick={onArtifactClick}
+                      onToggle={() => {
+                        setProcessTouchedByRun((current) => ({
+                          ...current,
+                          [run.id]: true,
+                        }));
+                        setProcessOpenByRun((current) => ({
+                          ...current,
+                          [run.id]: !processPanelOpen(
+                            run,
+                            current,
+                            processTouchedByRun,
+                          ),
+                        }));
+                      }}
+                      open={processOpen}
+                      streamState={streamState}
+                      terminalStatus={run.terminalStatus}
+                    />
+                  ) : null}
+                  {run.finalAnswer ? (
+                    <FinalAnswer
+                      item={run.finalAnswer}
+                      onArtifactClick={onArtifactClick}
+                    />
+                  ) : null}
+                </div>
+              );
+            })}
             <div ref={endRef} />
           </div>
         ) : null}
@@ -604,40 +627,105 @@ function buildTranscriptView(
   events: RouterEvent[],
 ): TranscriptView {
   const items = buildTranscript(task, events);
-  const userMessage = items.find(
-    (item): item is UserTranscriptItem => item.kind === "user",
-  );
-  const finalReportArtifactId = latestFinalReportArtifactId(events);
-  const finalAnswer = pickFinalAnswer(items, events, finalReportArtifactId);
-  const terminalStatus = [...items]
-    .reverse()
-    .find(
-      (item): item is StatusTranscriptItem =>
-        item.kind === "status" && isTerminalEventType(item.eventType),
+  const runIds = orderedRunIds(task, items, events);
+  const runs = runIds
+    .map((runId) => {
+      const runItems = items.filter((item) => item.runId === runId);
+      const runEvents = events.filter((event) => eventRunId(event) === runId);
+      const userMessage = runItems.find(
+        (item): item is UserTranscriptItem => item.kind === "user",
+      );
+      const finalReportArtifactId = latestFinalReportArtifactId(runEvents);
+      const finalAnswer = pickFinalAnswer(runItems, runEvents, finalReportArtifactId);
+      const isTerminal = isTerminalRun(task, runEvents, runId);
+      const terminalStatus = isTerminal
+        ? [...runItems]
+            .reverse()
+            .find(
+              (item): item is StatusTranscriptItem =>
+                item.kind === "status" && isTerminalEventType(item.eventType),
+            )
+        : undefined;
+      const processItems: ProcessTranscriptItem[] = [];
+
+      for (const item of runItems) {
+        if (item.kind === "user") {
+          continue;
+        }
+        if (finalAnswer && item.id === finalAnswer.id) {
+          continue;
+        }
+        if (item.kind === "agent" && item.label) {
+          continue;
+        }
+        processItems.push(item);
+      }
+
+      const latestSeq = Math.max(
+        0,
+        ...runItems.map((item) => item.seq),
+        ...runEvents.map((event) => event.seq),
+      );
+      const createdAt = userMessage?.createdAt ?? runItems.at(0)?.createdAt;
+      const latestAt =
+        [...runItems].reverse().find((item) => item.createdAt)?.createdAt ??
+        runEvents.at(-1)?.created_at ??
+        createdAt;
+
+      return {
+        id: runId,
+        taskId: runItems.at(0)?.taskId ?? runEvents.at(0)?.task_id,
+        runId,
+        userMessage,
+        processItems,
+        finalAnswer,
+        terminalStatus,
+        finalReportArtifactId,
+        isTerminal,
+        latestSeq,
+        createdAt,
+        latestAt,
+      };
+    })
+    .filter(
+      (run) =>
+        run.userMessage || run.processItems.length || run.finalAnswer || run.terminalStatus,
     );
-  const processItems: ProcessTranscriptItem[] = [];
 
-  for (const item of items) {
-    if (item.kind === "user") {
-      continue;
-    }
-    if (finalAnswer && item.id === finalAnswer.id) {
-      continue;
-    }
-    if (item.kind === "agent" && item.label) {
-      continue;
-    }
-    processItems.push(item);
-  }
+  return { runs };
+}
 
-  return {
-    userMessage,
-    processItems,
-    finalAnswer,
-    terminalStatus,
-    finalReportArtifactId,
-    isTerminal: isTerminalTask(task, events),
+function orderedRunIds(
+  task: TaskState | null,
+  items: TranscriptItem[],
+  events: RouterEvent[],
+): string[] {
+  const runIds: string[] = [];
+  const seen = new Set<string>();
+  const addRunId = (value?: string) => {
+    if (!value || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    runIds.push(value);
   };
+
+  for (const event of events) {
+    addRunId(eventRunId(event));
+  }
+  for (const item of items) {
+    addRunId(item.runId ?? item.taskId);
+  }
+  addRunId(task?.task_id);
+  return runIds;
+}
+
+function eventRunId(event: RouterEvent): string {
+  return (
+    payloadString(event, "run_id") ??
+    stringValue(event.correlation.run_id) ??
+    event.task_id
+  );
 }
 
 function pickFinalAnswer(
@@ -645,6 +733,24 @@ function pickFinalAnswer(
   events: RouterEvent[],
   finalReportArtifactId?: string,
 ): AgentTranscriptItem | undefined {
+  const finalResponseEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "agent.final_response");
+  const finalResponse = finalResponseEvent
+    ? payloadString(finalResponseEvent, "content") ?? finalResponseEvent.message
+    : undefined;
+  if (finalResponseEvent && finalResponse) {
+    return {
+      id: finalResponseEvent.event_id,
+      kind: "agent",
+      seq: finalResponseEvent.seq,
+      createdAt: finalResponseEvent.created_at,
+      label: payloadString(finalResponseEvent, "final_status"),
+      content: finalResponse,
+      finalReportArtifactId,
+    };
+  }
+
   const latestAgentMessage = [...items]
     .reverse()
     .find(
@@ -704,18 +810,41 @@ function buildTranscript(
 ): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const pendingTools = new Map<string, ToolTranscriptItem[]>();
+  const hasUserEvents = events.some(
+    (event) => event.type === "task.created" && payloadString(event, "message"),
+  );
 
-  if (task?.raw_user_request) {
+  if (task?.raw_user_request && !hasUserEvents) {
     items.push({
       id: `user-${task.task_id}`,
       kind: "user",
       seq: 0,
+      taskId: task.task_id,
+      runId: task.task_id,
       content: task.raw_user_request,
       createdAt: task.created_at,
     });
   }
 
   for (const event of events) {
+    const taskId = event.task_id;
+    const runId = eventRunId(event);
+    if (event.type === "task.created") {
+      const content = payloadString(event, "message");
+      if (content) {
+        items.push({
+          id: `user-${event.event_id}`,
+          kind: "user",
+          seq: event.seq,
+          taskId,
+          runId,
+          content,
+          createdAt: event.created_at,
+        });
+      }
+      continue;
+    }
+
     if (event.type === "agent.message") {
       const content = payloadString(event, "content") ?? event.message;
       if (content) {
@@ -723,6 +852,8 @@ function buildTranscript(
           id: event.event_id,
           kind: "agent",
           seq: event.seq,
+          taskId,
+          runId,
           createdAt: event.created_at,
           content,
         });
@@ -735,6 +866,8 @@ function buildTranscript(
         id: event.event_id,
         kind: "plan",
         seq: event.seq,
+        taskId,
+        runId,
         createdAt: event.created_at,
         summary: payloadString(event, "summary") ?? event.message ?? undefined,
         steps: planSteps(event.payload.plan),
@@ -749,6 +882,8 @@ function buildTranscript(
         id: event.event_id,
         kind: "tool",
         seq: event.seq,
+        taskId,
+        runId,
         createdAt: event.created_at,
         toolName,
         title: toolTitle(toolName),
@@ -802,6 +937,8 @@ function buildTranscript(
           id: event.event_id,
           kind: "tool",
           seq: event.seq,
+          taskId,
+          runId,
           createdAt: event.created_at,
           toolName,
           title: `${toolTitle(toolName)} result`,
@@ -826,6 +963,8 @@ function buildTranscript(
         id: event.event_id,
         kind: "agent",
         seq: event.seq,
+        taskId,
+        runId,
         createdAt: event.created_at,
         label: payloadString(event, "final_task_status") ?? "completed",
         content: payloadString(event, "summary") ?? event.message ?? "Main Agent completed.",
@@ -840,12 +979,15 @@ function buildTranscript(
       event.type === "task.partial_failed" ||
       event.type === "task.failed" ||
       event.type === "task.cancelled" ||
+      event.type === "agent.stop_blocked" ||
       event.type === "agent.clarification_requested"
     ) {
       items.push({
         id: event.event_id,
         kind: "status",
         seq: event.seq,
+        taskId,
+        runId,
         createdAt: event.created_at,
         eventType: event.type,
         title: event.title,
@@ -867,16 +1009,23 @@ function latestFinalReportArtifactId(events: RouterEvent[]): string | undefined 
     : undefined;
 }
 
-function isTerminalTask(task: TaskState | null, events: RouterEvent[]): boolean {
-  if (
-    task?.status === "succeeded" ||
-    task?.status === "partial_failed" ||
-    task?.status === "failed" ||
-    task?.status === "cancelled"
-  ) {
+function isTerminalRun(
+  task: TaskState | null,
+  events: RouterEvent[],
+  runId: string,
+): boolean {
+  if (events.some((event) => isTerminalEventType(event.type))) {
     return true;
   }
-  return events.some((event) => isTerminalEventType(event.type));
+  if (task?.task_id === runId) {
+    return (
+      task.status === "succeeded" ||
+      task.status === "partial_failed" ||
+      task.status === "failed" ||
+      task.status === "cancelled"
+    );
+  }
+  return false;
 }
 
 function isTerminalEventType(type: string): boolean {
@@ -933,8 +1082,6 @@ function toolParameterPreview(toolName: string, value: unknown): string[] {
     addString("cwd");
   } else if (toolName === "call_mcp_tool") {
     addString("tool_name", "tool");
-  } else if (toolName === "finish_task") {
-    addString("final_status", "status");
   } else if (toolName === "read_artifact") {
     addString("artifact_id", "artifact");
   } else if (toolName === "write_artifact") {
@@ -997,7 +1144,6 @@ function toolTitle(toolName: string): string {
     call_plc_formal: "调用 plc-formal",
     call_plc_repair: "调用 plc-repair",
     read_artifact: "读取 Artifact",
-    finish_task: "完成任务",
   };
   return labels[toolName] ?? toolName;
 }
@@ -1020,9 +1166,6 @@ function toolIcon(toolName: string, status: ToolTranscriptItem["status"]) {
     toolName === "apply_patch"
   ) {
     return <FileText size={15} />;
-  }
-  if (toolName === "finish_task") {
-    return <Sparkles size={15} />;
   }
   return <SquareTerminal size={15} />;
 }
@@ -1130,4 +1273,31 @@ function shortId(value: string): string {
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function processPanelOpen(
+  run: TranscriptRunView,
+  openByRun: Record<string, boolean>,
+  touchedByRun: Record<string, boolean>,
+): boolean {
+  if (touchedByRun[run.id]) {
+    return openByRun[run.id] ?? false;
+  }
+  return !run.isTerminal;
+}
+
+function pruneRunState(
+  current: Record<string, boolean>,
+  activeRunIds: Set<string>,
+): Record<string, boolean> {
+  let changed = false;
+  const next: Record<string, boolean> = {};
+  for (const [runId, value] of Object.entries(current)) {
+    if (activeRunIds.has(runId)) {
+      next[runId] = value;
+    } else {
+      changed = true;
+    }
+  }
+  return changed ? next : current;
 }

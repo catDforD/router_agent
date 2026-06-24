@@ -2,77 +2,58 @@
 
 ### 当前 agent loop 工具集
 
-当前 Main Agent 已切到 Codex-like 通用工具集，核心工具是：
+Main Agent 当前暴露的是一组 Codex-like 通用工具：
 
-- Workspace 文件工具：`list_files`、`read_file`、`write_file`、`apply_patch`
-- 本地执行工具：`exec_command`、`git_status`
-- Artifact 工具：`read_artifact`、`write_artifact`
-- Domain/MCP 工具：`call_mcp_tool`
-- 终态工具：`finish_task`
+- `list_files` / `read_file` / `write_file` / `apply_patch`
+- `exec_command` / `git_status`
+- `read_artifact` / `write_artifact`
+- `call_mcp_tool`
 
-其中 `call_mcp_tool` 负责把 PLC worker 降级为可选 domain tool，例如
-`plc_dev.run`、`plc_test.run`、`plc_formal.run`、`plc_repair.run`。本地文件和命令工具需要显式开启
-`AGENT_EXECUTION_MODE=local_full_access`。
-
+`finish_task` 已删除，不再作为工具或兼容入口存在。任务终止由 runtime lifecycle 控制。
 
 ### 当前 agent loop 链路
 
-当前链路是通用 Chat Completions tool loop：
+当前链路是：
 
-1. `/api/tasks` 创建任务，保存 `TaskState`、raw request artifact、workspace/project context。
-2. Runtime 启动 Main Agent run，写入 `agent.started` 和 trace id。
-3. Main Agent 用 system prompt + task context + tool schemas 发起多轮模型调用。
-4. 模型按需探索 workspace、读写文件、执行命令、写 artifact，或通过 `call_mcp_tool` 调用 PLC domain worker。
-5. 每次工具调用都会记录 `agent.tool_called` / `agent.tool_result`；worker 路径额外记录 `worker.started`、`artifact.created`、`worker.completed/error`。
-6. Agent 最后调用 `finish_task` 写 final report / replay log，并把任务置为 `succeeded`、`partial_failed`、`failed` 或 `cancelled`。
+1. 用户创建 session 或在 session 内追加 message。
+2. 后端为这次输入创建一个新的 run/task。
+3. 默认直接进入 Orchestration Chat Completions tool loop。
+4. 模型可输出公开进展、调用工具、读取/修改文件、执行命令或调用 MCP。
+5. 当模型返回“只有自然语言、没有 tool call”时，runtime 视为请求停止。
+6. StopPolicy 通过后，runtime 写 `agent.final_response`、`agent.completed` 和 run terminal event。
 
-现在不再强制旧的 `update_plan -> PLC worker -> quality_gate -> final_report -> finish_task`
-固定流程；是否测试、修复、调用 worker 由 Agent 根据任务自行选择。
+也就是说，模型负责执行和回答，runtime 负责最终状态落库。
+当前默认 `MAIN_AGENT_PROVIDER=openai_compatible` 不跑独立 Intake；`legacy_openai_agents` 和部分测试/mock runner 才会走旧 Intake 分类路径。
 
 ### 当前系统提示词是什么？
 
-当前主 Agent 的 system prompt 由 `build_orchestration_instructions()` 生成，定位是：
+默认链路只使用 Orchestration 提示词：
 
-> Router Main Agent 是一个超级 Agent ，在配置的 workspace 内读文件、改文件、跑命令、写 artifact、按需调用 MCP/domain tools，最后必须通过 `finish_task` 结束任务。
+- 把 Main Agent 定义为 Codex-like 执行代理。
+- 要求它探索 workspace、读写文件、运行命令、记录 artifact、可选调用 MCP/domain tools。
+- 完成时直接给自然最终回答。
 
-核心规则：
-
-- 先理解任务和 workspace；缺上下文时用 `list_files`、`read_file`、`git_status`、`read_artifact`。
-- 修改文件用 `write_file` 或 `apply_patch`，改已有文件优先 patch。
-- 修改后尽量用 `exec_command` 跑可用的验证命令。
-- 大输出、报告、长期证据写入 `write_artifact`。
-- `call_mcp_tool` 只用于可配置的外部/domain tools；PLC worker 不是默认路径。
-- 纯 assistant 文本不能结束任务，必须调用 `finish_task`。
-- 对用户可见的进度要简洁，不暴露 hidden reasoning。
-
+提示词明确要求不展示 hidden reasoning，不输出链式思考，只展示公开进展、执行结果、假设、验证和阻塞点。
+旧 Intake 提示词仍在代码中供 legacy runner 使用，但不是默认路径。
 
 ### 后端提供的 SSE 接口目前输出是哪些信息？
 
-SSE 接口是：
+主要 SSE 信息包括：
 
-```http
-GET /api/tasks/{task_id}/events
-```
+- task/run 生命周期：`task.created`、`task.updated`、`task.succeeded/failed/cancelled`
+- agent 生命周期：`agent.started`、`agent.turn_started`、`agent.message`、`agent.final_response`、`agent.completed`
+- 工具过程：`agent.tool_called`、`agent.tool_result`
+- stop 控制：`agent.stop_blocked`
+- artifact / worker / gate 事件：例如 `artifact.created`、`worker.completed`、`gate.passed/failed`
 
-返回 `text/event-stream`，只推送 `visibility=user` 的 `RouterEvent`。支持：
+前端消费的是 session SSE：`GET /api/sessions/{session_id}/events`。单次 run 结束后 SSE 不应永久关闭，后续 message 会继续推送新的 run 事件。
 
-- `after_seq` query 参数续传
-- `Last-Event-ID` header 续传
-- 空闲时发送 `: keepalive`
+### 当前 agent loop 是怎么做的会话管理？
 
-每个 SSE frame 结构是：
+现在采用 Claude Code-like 的 session/run 分层：
 
-```text
-id: <event.seq>
-event: <event.type>
-data: <RouterEvent JSON>
-```
-
-当前主要事件类型包括：
-
-- task：`task.created`、`task.updated`、`task.succeeded`、`task.partial_failed`、`task.failed`、`task.cancelled`
-- agent：`agent.started`、`agent.message`、`agent.tool_called`、`agent.tool_result`、`agent.completed`
-- worker：`worker.started`、`worker.completed`、`worker.error`、`worker.timeout`
-- artifact/gate：`artifact.created`、`gate.started`、`gate.passed`、`gate.failed`
-
-`RouterEvent` 里会带 `seq`、`type`、`title`、`message`、`source`、`severity`、`correlation`、`payload`、`created_at`。
+- `AgentSession` 表示可持续对话，绑定 workspace、上下文、最近 run 和事件序列。
+- `AgentRun` 表示一次用户输入触发的执行；一个 session 可以有多个 run。
+- 每次追问都会在同一 session 下创建新的 run/task，而不是复用已 terminal 的 task。
+- 下一轮模型输入会带上 bounded recent transcript：最近几轮 user message、final response、artifact 线索和 workspace 状态。
+- session 只有显式 archive/cancel 才结束；单次 run 成功只结束该 run。
