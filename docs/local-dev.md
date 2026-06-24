@@ -127,7 +127,7 @@ uv run main.py
 
 - 读取 `.env` 中的本地配置。
 - 确保 `ARTIFACT_ROOT` 目录存在。
-- 通过 Docker Compose 启动 `postgres` 服务并等待数据库端口可用。
+- 使用 `.env` 中的 `DATABASE_URL`，并等待数据库端口可用。
 - 执行 `alembic upgrade head`。
 - 启动后端 API：`http://127.0.0.1:8000`。
 - 启动前端 Vite dev server：`http://127.0.0.1:5173`。
@@ -169,6 +169,7 @@ http://127.0.0.1:5173
 
 ```bash
 uv run main.py --install-frontend-deps
+uv run main.py --with-postgres
 uv run main.py --no-postgres
 uv run main.py --no-migrate
 uv run main.py --with-worker
@@ -178,8 +179,10 @@ uv run main.py --dry-run
 
 说明：
 
-- 如果本机已经有 PostgreSQL 并且不希望启动 Docker Compose 服务，请使用 `--no-postgres`。
+- 默认使用本机已有 PostgreSQL；只有加 `--with-postgres` 才会启动 Docker Compose PostgreSQL。
+- `--no-postgres` 保留为兼容选项，含义是明确使用本地数据库。
 - 如果前端依赖尚未安装，启动器会提示运行 `cd frontend && npm install`，或可使用 `--install-frontend-deps` 让启动器先执行安装。
+- 启动器会在启动子进程前检查 8000、5173、9000 等托管端口；如果已有服务占用，请先停止它，或用 `--no-frontend` / `--no-backend` / `--no-worker` 复用外部服务。
 - `Ctrl-C` 会停止启动器管理的后端、前端和 worker 子进程。
 - Docker Compose PostgreSQL 默认保留运行时数据和 volume；需要停止服务可使用 `docker compose stop postgres`。
 

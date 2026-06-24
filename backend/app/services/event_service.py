@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.models.router_schema import EventVisibility, RouterEvent
 from app.repositories._helpers import enum_value
 from app.repositories.event_repo import EventRepository
+from app.repositories.session_repo import AgentSessionRepository
 from app.repositories.task_repo import TaskRepository
 
 
@@ -31,6 +32,9 @@ class EventService:
 
     def ensure_task_exists(self, task_id: str) -> None:
         self.task_repository.get_task(task_id)
+
+    def ensure_session_exists(self, session_id: str) -> None:
+        AgentSessionRepository(self.event_repository.session).get_session(session_id)
 
     def list_events(
         self,
@@ -58,6 +62,37 @@ class EventService:
     ) -> list[RouterEvent]:
         return self.list_events(
             task_id,
+            after_seq=after_seq,
+            include_internal=False,
+            limit=limit,
+        )
+
+    def list_session_events(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        include_internal: bool = False,
+        limit: int | None = None,
+    ) -> list[RouterEvent]:
+        self.ensure_session_exists(session_id)
+        visibility = None if include_internal else EventVisibility.USER
+        return AgentSessionRepository(self.event_repository.session).list_session_events(
+            session_id,
+            after_seq=after_seq,
+            visibility=visibility,
+            limit=limit,
+        )
+
+    def list_visible_session_events(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int | None = None,
+    ) -> list[RouterEvent]:
+        return self.list_session_events(
+            session_id,
             after_seq=after_seq,
             include_internal=False,
             limit=limit,
@@ -118,6 +153,51 @@ def iter_event_stream(
         with session_factory() as session:
             events = EventService(session).list_visible_events(
                 task_id,
+                after_seq=cursor,
+                limit=batch_limit,
+            )
+
+        if events:
+            idle_heartbeat_count = 0
+            for event in events:
+                yield format_sse_event(event)
+                cursor = event.seq
+            continue
+
+        now = time.monotonic()
+        if now - last_heartbeat_at >= heartbeat_interval_seconds:
+            yield SSE_HEARTBEAT_FRAME
+            last_heartbeat_at = now
+            idle_heartbeat_count += 1
+            if (
+                stop_after_idle_heartbeats is not None
+                and idle_heartbeat_count >= stop_after_idle_heartbeats
+            ):
+                return
+
+        time.sleep(poll_interval_seconds)
+
+
+def iter_session_event_stream(
+    session_factory: sessionmaker[Session],
+    session_id: str,
+    *,
+    after_seq: int = 0,
+    poll_interval_seconds: float = DEFAULT_EVENT_POLL_INTERVAL_SECONDS,
+    heartbeat_interval_seconds: float = DEFAULT_EVENT_HEARTBEAT_INTERVAL_SECONDS,
+    batch_limit: int = DEFAULT_EVENT_BATCH_LIMIT,
+    stop_after_idle_heartbeats: int | None = None,
+) -> Iterator[str]:
+    """Yield frontend-visible events for a session as SSE frames."""
+
+    cursor = after_seq
+    last_heartbeat_at = time.monotonic()
+    idle_heartbeat_count = 0
+
+    while True:
+        with session_factory() as session:
+            events = EventService(session).list_visible_session_events(
+                session_id,
                 after_seq=cursor,
                 limit=batch_limit,
             )

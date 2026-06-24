@@ -1,6 +1,9 @@
 from pathlib import Path
 import importlib.util
+import socket
 import sys
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -55,6 +58,23 @@ def test_should_start_worker_respects_modes_and_flags() -> None:
         explicit_with_worker=False,
         explicit_no_worker=True,
     ) is False
+
+
+def test_launcher_uses_local_database_by_default() -> None:
+    args = launcher.parse_args([])
+
+    config = launcher.config_from_args(args, {})
+
+    assert config.manage_postgres is False
+
+
+def test_launcher_can_manage_postgres_when_requested() -> None:
+    args = launcher.parse_args(["--with-postgres", "--stop-postgres-on-exit"])
+
+    config = launcher.config_from_args(args, {})
+
+    assert config.manage_postgres is True
+    assert config.stop_postgres_on_exit is True
 
 
 def test_build_access_urls_includes_core_endpoints() -> None:
@@ -113,3 +133,24 @@ def test_build_process_specs_respects_disabled_services() -> None:
     assert [item.name for item in specs] == ["plc-worker", "frontend"]
     assert specs[0].port == 9000
     assert specs[1].port == 5173
+
+
+def test_managed_port_check_rejects_existing_listener() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        specs = [
+            launcher.ProcessSpec(
+                name="frontend",
+                command=["npm", "run", "dev"],
+                cwd=ROOT / "frontend",
+                host="127.0.0.1",
+                port=port,
+                service="vite",
+            )
+        ]
+
+        with pytest.raises(RuntimeError, match="frontend.*--no-frontend"):
+            launcher.ensure_managed_ports_available(specs)

@@ -210,58 +210,6 @@ def validate_parallel_jobs(
         validate_worker_call(state, _job_worker_type(job), _job_input_artifacts(job))
 
 
-def validate_finish_task(
-    state: TaskState,
-    final_status: TaskStatus | str,
-) -> None:
-    """Validate a proposed terminal status before Runtime marks the task done."""
-
-    if _value(final_status) != TaskStatus.SUCCEEDED.value:
-        return
-
-    if _has_open_required_clarification(state):
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.REQUIRED_CLARIFICATION_OPEN,
-            "cannot finish as succeeded with open required clarification",
-        )
-
-    if state.gates.has_blocking_failure or _has_open_blocking_failure(state):
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.BLOCKING_FAILURE_PRESENT,
-            "cannot finish as succeeded while blocking failures remain",
-        )
-
-    if state.gates.test_required and state.gates.latest_test_passed is not True:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.REQUIRED_TEST_MISSING,
-            "cannot finish as succeeded before required tests pass",
-        )
-
-    if state.gates.formal_required and state.gates.latest_formal_passed is not True:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.REQUIRED_FORMAL_MISSING,
-            "cannot finish as succeeded before required formal verification passes",
-        )
-
-    if state.gates.regression_required:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.REGRESSION_REQUIRED,
-            "cannot finish as succeeded while regression testing is required",
-        )
-
-    if state.gates.formal_regression_required:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.FORMAL_REGRESSION_REQUIRED,
-            "cannot finish as succeeded while formal regression is required",
-        )
-
-    if state.gates.can_finish_as_success is not True:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.QUALITY_GATE_REQUIRED,
-            "cannot finish as succeeded before Quality Gate passes",
-        )
-
-
 def _validate_common_worker_preconditions(state: TaskState, worker_type: str) -> None:
     if _value(state.status) in TERMINAL_STATUSES:
         raise SchedulerGuardViolation(

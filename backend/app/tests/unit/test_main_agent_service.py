@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -251,8 +252,8 @@ class ScriptedChatClient:
     ) -> dict[str, Any]:
         self.requests.append(
             {
-                "messages": messages,
-                "tools": tools,
+                "messages": deepcopy(messages),
+                "tools": deepcopy(tools),
                 "model": model,
                 "stream": stream,
             }
@@ -546,7 +547,7 @@ def test_start_main_agent_run_persists_trace_and_started_event(
     assert len(started.trace.main_agent_run_ids) == 1
     assert started.trace.latest_main_agent_run_id == started.trace.main_agent_run_ids[0]
     assert started.started_at is not None
-    assert started_event.type == "main_agent.started"
+    assert started_event.type == "agent.started"
     assert started_event.correlation.openai_trace_id == started.trace.openai_trace_id
     assert (
         started_event.correlation.main_agent_run_id
@@ -625,7 +626,7 @@ def test_apply_classification_persists_planning_state_and_events(
     assert result.task.difficulty.requires_test is True
     assert result.task.gates.test_required is True
     assert event_types(db_session, task_id)[-2:] == [
-        "main_agent.decision",
+        "agent.decision",
         "task.updated",
     ]
 
@@ -708,7 +709,7 @@ def test_clarification_classification_waits_for_user_without_workers(
     assert result.task.phase == "clarifying"
     assert result.task.unresolved_questions[0].status == "open"
     assert event_types(db_session, task_id)[-2:] == [
-        "main_agent.clarification_requested",
+        "agent.clarification_requested",
         "task.waiting_user",
     ]
     assert row_count(db_session, WorkerJobRow) == 0
@@ -737,8 +738,8 @@ def test_plan_and_finalizing_event_helpers_emit_correlated_events(
         summary="Running Quality Gate before finish.",
     )
 
-    assert plan_event.type == "main_agent.plan_updated"
-    assert finalizing_event.type == "main_agent.finalizing"
+    assert plan_event.type == "agent.plan_updated"
+    assert finalizing_event.type == "agent.finalizing"
     assert plan_event.correlation.openai_trace_id == started.trace.openai_trace_id
     assert finalizing_event.correlation.main_agent_run_id == started.trace.latest_main_agent_run_id
 
@@ -767,57 +768,46 @@ def test_run_episode_with_legacy_runner_classifies_before_orchestration(
     assert row_count(db_session, WorkerJobRow) == 0
 
 
-def test_tool_loop_runner_plans_and_requests_clarification_without_intake(
+def test_tool_loop_runner_executes_workspace_tools_without_intake(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
 ) -> None:
     task_id = create_task(task_service)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     chat_client = ScriptedChatClient(
         [
             chat_response(
-                content="I will first capture the plan and check what is missing.",
+                content="I will inspect the workspace first.",
                 tool_calls=[
                     tool_call(
-                        "update_plan",
+                        "list_files",
                         {
                             "task_id": task_id,
-                            "summary": "Plan created before worker dispatch.",
-                            "plan": [
-                                {
-                                    "order": 1,
-                                    "action": "Ask for missing IO details",
-                                    "status": "planned",
-                                }
-                            ],
-                            "normalized_goal": "Create motor logic after IO details are confirmed.",
-                            "task_type": "new_plc_development",
-                            "requires_test": True,
-                            "requires_formal": False,
+                            "path": ".",
                         },
-                        call_id="call-plan",
+                        call_id="call-list",
                     )
                 ],
             ),
             chat_response(
-                content="The IO list is required before safe worker dispatch.",
+                content="I will write a small deliverable.",
                 tool_calls=[
                     tool_call(
-                        "request_clarification",
+                        "write_file",
                         {
                             "task_id": task_id,
-                            "questions": [
-                                {
-                                    "question": "Which input and output tags should the logic use?",
-                                    "reason": "PLC code generation needs concrete IO names.",
-                                    "required": True,
-                                }
-                            ],
-                            "rationale_summary": "Missing IO details block safe PLC worker dispatch.",
+                            "path": "notes/result.txt",
+                            "content": "done\n",
+                            "create_dirs": True,
                         },
-                        call_id="call-clarify",
+                        call_id="call-write",
                     )
                 ],
+            ),
+            chat_response(
+                content="Created `notes/result.txt` with the requested deliverable.",
             ),
         ]
     )
@@ -827,6 +817,8 @@ def test_tool_loop_runner_plans_and_requests_clarification_without_intake(
         model="fake-main-agent",
         chat_client=chat_client,
         stream=False,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
     )
 
     output = service.run_episode(task_id)
@@ -834,18 +826,55 @@ def test_tool_loop_runner_plans_and_requests_clarification_without_intake(
     events = EventService(db_session).list_visible_events(task_id)
     types = [event.type for event in events]
 
-    assert output.final_task_status == "waiting_user"
-    assert task.status == "waiting_user"
-    assert task.phase == "clarifying"
-    assert task.unresolved_questions[0].status == "open"
-    assert "main_agent.message" in types
-    assert "main_agent.plan_updated" in types
-    assert "main_agent.clarification_requested" in types
-    assert "task.waiting_user" in types
+    assert output.final_task_status == "succeeded"
+    assert task.status == "succeeded"
+    assert (workspace / "notes/result.txt").read_text(encoding="utf-8") == "done\n"
+    assert "agent.message" in types
+    assert "agent.final_response" in types
+    assert "agent.tool_called" in types
+    assert "agent.tool_result" in types
+    assert "agent.completed" in types
+    assert "task.succeeded" in types
+    progress_messages = [
+        event.payload["content"]
+        for event in events
+        if event.type == "agent.message"
+    ]
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+    assert progress_messages == [
+        "I will inspect the workspace first.",
+        "I will write a small deliverable.",
+    ]
+    assert final_response.payload["content"] == (
+        "Created `notes/result.txt` with the requested deliverable."
+    )
     assert row_count(db_session, WorkerJobRow) == 0
     assert chat_client.requests[0]["model"] == "fake-main-agent"
     assert chat_client.requests[0]["messages"][0]["role"] == "system"
     assert chat_client.requests[0]["tools"][0]["type"] == "function"
+    assert task.workspace is not None
+    assert task.workspace.root == str(workspace)
+    assert task.workspace.writable is True
+    assert task.execution_policy is not None
+    assert task.execution_policy.mode == "local_full_access"
+    assert task.agent_runs
+    latest_run = task.agent_runs[-1]
+    assert latest_run.status == "succeeded"
+    assert latest_run.completed_at is not None
+    assert latest_run.workspace is not None
+    assert latest_run.workspace.root == str(workspace)
+    assert latest_run.execution_policy is not None
+    assert latest_run.execution_policy.mode == "local_full_access"
+    assert [call.tool_name for call in latest_run.tool_calls] == [
+        "list_files",
+        "write_file",
+    ]
+    assert [call.status for call in latest_run.tool_calls] == [
+        "applied",
+        "applied",
+    ]
     assert "response_format" not in chat_client.requests[0]
 
 
@@ -855,40 +884,25 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
     task_service: TaskService,
 ) -> None:
     task_id = create_task(task_service)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     chat_client = ScriptedChatClient(
         [
             streamed_chat_chunks(
-                content="I will capture a public plan.",
+                content="I will inspect the workspace.",
                 tool_calls=[
                     tool_call(
-                        "update_plan",
+                        "list_files",
                         {
                             "task_id": task_id,
-                            "summary": "Streaming plan captured.",
-                            "plan": [
-                                {
-                                    "order": 1,
-                                    "action": "Clarify platform",
-                                    "status": "planned",
-                                }
-                            ],
+                            "path": ".",
                         },
-                        call_id="call-stream-plan",
+                        call_id="call-stream-list",
                     )
                 ],
             ),
             streamed_chat_chunks(
-                content="I need one user detail before dispatching workers.",
-                tool_calls=[
-                    tool_call(
-                        "request_clarification",
-                        {
-                            "task_id": task_id,
-                            "questions": ["Which PLC platform should be targeted?"],
-                        },
-                        call_id="call-stream-clarify",
-                    )
-                ],
+                content="Workspace inspected. No files were present.",
             ),
         ]
     )
@@ -898,19 +912,22 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
         model="fake-main-agent",
         chat_client=chat_client,
         stream=True,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
     )
 
     output = service.run_episode(task_id)
     events = EventService(db_session).list_visible_events(task_id)
-    message_event = next(event for event in events if event.type == "main_agent.message")
+    message_event = next(event for event in events if event.type == "agent.message")
 
-    assert output.final_task_status == "waiting_user"
+    assert output.final_task_status == "succeeded"
     assert chat_client.requests[0]["stream"] is True
-    assert message_event.payload["content"] == "I will capture a public plan."
-    assert "main_agent.plan_updated" in [event.type for event in events]
+    assert message_event.payload["content"] == "I will inspect the workspace."
+    assert "agent.final_response" in [event.type for event in events]
+    assert "agent.completed" in [event.type for event in events]
 
 
-def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
+def test_tool_loop_runner_finalizes_from_content_only_stop(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -920,39 +937,7 @@ def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
     chat_client = ScriptedChatClient(
         [
             chat_response(
-                content="The task is ready for report-first finalization.",
-                tool_calls=[
-                    tool_call(
-                        "write_final_report",
-                        {
-                            "task_id": task_id,
-                            "final_status": "succeeded",
-                            "summary": "Validation passed and delivery is complete.",
-                            "plan": [
-                                {
-                                    "order": 1,
-                                    "action": "Finalize ready task",
-                                    "status": "completed",
-                                }
-                            ],
-                        },
-                        call_id="call-report",
-                    )
-                ],
-            ),
-            chat_response(
-                content="The report is durable, so I will apply terminal status.",
-                tool_calls=[
-                    tool_call(
-                        "finish_task",
-                        {
-                            "task_id": task_id,
-                            "final_status": "succeeded",
-                            "rationale_summary": "Final report exists and Quality Gate allows success.",
-                        },
-                        call_id="call-finish",
-                    )
-                ],
+                content="Validation passed and delivery is complete.",
             ),
         ]
     )
@@ -971,11 +956,104 @@ def test_tool_loop_runner_finalizes_through_report_and_finish_tools(
     assert output.final_task_status == "succeeded"
     assert task.status == "succeeded"
     assert task.current_artifacts.final_report is not None
-    assert types.index("main_agent.completed") < types.index("task.succeeded")
-    assert any(
-        message["role"] == "tool" and message["tool_call_id"] == "call-report"
-        for message in chat_client.requests[1]["messages"]
+    assert types.index("agent.final_response") < types.index("agent.completed")
+    assert types.index("agent.completed") < types.index("task.succeeded")
+    assert "finish_task" not in [
+        tool["function"]["name"] for tool in chat_client.requests[0]["tools"]
+    ]
+
+
+def test_tool_loop_blocks_stop_without_execution_evidence_then_continues(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(content="I can complete this without inspecting anything."),
+            chat_response(
+                content="I will inspect the workspace first.",
+                tool_calls=[
+                    tool_call(
+                        "list_files",
+                        {
+                            "task_id": task_id,
+                            "path": ".",
+                        },
+                        call_id="call-list-after-block",
+                    )
+                ],
+            ),
+            chat_response(content="Workspace inspected; no files needed changes."),
+        ]
     )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
+    )
+
+    output = service.run_episode(task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    types = [event.type for event in events]
+    blocked = next(event for event in events if event.type == "agent.stop_blocked")
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+
+    assert output.final_task_status == "succeeded"
+    assert types.index("agent.stop_blocked") < types.index("agent.tool_called")
+    assert types.index("agent.tool_result") < types.index("agent.final_response")
+    assert blocked.payload["blocked_count"] == 1
+    assert final_response.payload["content"] == "Workspace inspected; no files needed changes."
+    assert chat_client.requests[1]["messages"][-1]["role"] == "user"
+    assert "Runtime stop was blocked" in chat_client.requests[1]["messages"][-1]["content"]
+
+
+def test_tool_loop_stop_block_limit_fails_with_runtime_fallback(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(content="I can answer without any execution evidence."),
+            chat_response(content="I still think this is done without tools."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    task = persisted_task(db_session, task_id)
+    events = EventService(db_session).list_visible_events(task_id)
+    types = [event.type for event in events]
+    final_response = next(
+        event for event in events if event.type == "agent.final_response"
+    )
+
+    assert output.final_task_status == "failed"
+    assert task.status == "failed"
+    assert types.count("agent.stop_blocked") == 2
+    assert final_response.payload["source"] == "runtime_fallback"
+    assert final_response.payload["final_status"] == "failed"
+    assert "required execution evidence is missing" in final_response.payload["content"]
+    assert types.index("agent.final_response") < types.index("agent.completed")
+    assert types.index("agent.completed") < types.index("task.failed")
+    assert "task.succeeded" not in types
 
 
 def test_tool_loop_records_malformed_tool_arguments_and_continues(
@@ -990,24 +1068,14 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
                 content="I will update the plan.",
                 tool_calls=[
                     raw_tool_call(
-                        "update_plan",
+                        "read_file",
                         "{",
                         call_id="call-bad-plan",
                     )
                 ],
             ),
             chat_response(
-                content="The previous tool arguments were invalid, so I will pause safely.",
-                tool_calls=[
-                    tool_call(
-                        "request_clarification",
-                        {
-                            "task_id": task_id,
-                            "questions": ["Which PLC platform should be targeted?"],
-                        },
-                        call_id="call-clarify-after-error",
-                    )
-                ],
+                content="Stopped after invalid tool arguments.",
             ),
         ]
     )
@@ -1024,11 +1092,12 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
     failed_tool_result = next(
         event
         for event in events
-        if event.type == "main_agent.tool_result"
-        and event.payload["tool_name"] == "update_plan"
+        if event.type == "agent.tool_result"
+        and event.payload["tool_name"] == "read_file"
     )
 
-    assert output.final_task_status == "waiting_user"
+    assert output.final_task_status == "failed"
+    assert "agent.final_response" in [event.type for event in events]
     assert failed_tool_result.payload["status"] == "failed"
     assert failed_tool_result.payload["details"]["error"]["error_code"] == (
         "invalid_tool_arguments"
@@ -1062,7 +1131,7 @@ def test_tool_loop_runner_max_turns_records_failure_without_success(
 
     assert output.error_code == "MAIN_AGENT_MAX_TURNS_EXCEEDED"
     assert task.status == "failed"
-    assert "main_agent.message" in types
+    assert "agent.message" in types
     assert "task.succeeded" not in types
     assert types[-1] == "task.failed"
 
@@ -1114,10 +1183,51 @@ def test_run_episode_persists_report_before_terminal_success(
 
     assert output.final_task_status == "succeeded"
     assert updated.status == "succeeded"
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.succeeded"
     )
     assert {"final_report", "main_agent_log"} <= {row.type for row in artifact_rows}
+    assert updated.current_artifacts.final_report is not None
+
+
+def test_run_episode_terminal_output_does_not_require_quality_gate(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    task = TaskRepository(db_session).get_task(task_id)
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(
+            deep=True,
+            update={
+                "status": TaskStatus.RUNNING.value,
+                "phase": TaskPhase.PLANNING.value,
+                "task_type": "qa",
+                "gates": GateState(
+                    test_required=False,
+                    formal_required=False,
+                    regression_required=False,
+                    formal_regression_required=False,
+                    latest_test_passed=None,
+                    latest_formal_passed=None,
+                    has_blocking_failure=False,
+                    can_finish_as_success=False,
+                ),
+            },
+        )
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        runner=TerminalOutputRunner("succeeded"),
+    )
+
+    output = service.run_episode(task_id)
+    updated = TaskRepository(db_session).get_task(task_id)
+
+    assert output.final_task_status == "succeeded"
+    assert updated.status == "succeeded"
     assert updated.current_artifacts.final_report is not None
 
 
@@ -1144,7 +1254,7 @@ def test_run_episode_persists_report_before_non_success_terminal_status(
     assert output.final_task_status == final_status
     assert updated.status == final_status
     assert updated.current_artifacts.final_report is not None
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         f"task.{final_status}"
     )
     report = ArtifactStore(
@@ -1184,7 +1294,7 @@ def test_run_episode_report_persistence_failure_does_not_mark_success(
     ]
 
     assert updated.status == "running"
-    assert "main_agent.completed" not in event_types
+    assert "agent.completed" not in event_types
     assert "task.succeeded" not in event_types
 
 
@@ -1217,7 +1327,7 @@ def test_run_episode_model_behavior_error_does_not_write_final_report_or_termina
     assert updated.status == "running"
     assert updated.current_artifacts.final_report is None
     assert "final_report" not in artifact_types
-    assert "main_agent.completed" not in event_types
+    assert "agent.completed" not in event_types
     assert "task.succeeded" not in event_types
 
 
@@ -1312,8 +1422,8 @@ def test_run_episode_records_max_turns_error_without_success(
     assert task.completed_at is not None
     assert task.current_artifacts.final_report is not None
     assert [event.type for event in events[-3:]] == [
-        "main_agent.decision",
-        "main_agent.completed",
+        "agent.decision",
+        "agent.completed",
         "task.failed",
     ]
     assert events[-3].severity == "error"
@@ -1419,7 +1529,7 @@ def test_openai_runner_uses_streaming_when_observability_is_enabled(
 
     assert FakeRunner.run_streamed_called is True
     assert streamed.summary == "Fake streamed orchestration completed."
-    assert [event.type for event in events][-1] == "main_agent.turn_started"
+    assert [event.type for event in events][-1] == "agent.turn_started"
 
 
 def row_count(db_session: Session, row_type: type[Any]) -> int:

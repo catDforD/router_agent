@@ -21,7 +21,7 @@
         "worker_sequence": [],
         "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request", "gate_report", "final_report", "main_agent_log"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.started", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -37,7 +37,7 @@
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "requirements_ir", "io_contract", "plc_code", "test_report", "gate_report", "final_report", "main_agent_log"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -60,7 +60,7 @@
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report", "main_agent_log"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -82,7 +82,7 @@
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -104,7 +104,7 @@
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -126,7 +126,7 @@
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -148,7 +148,7 @@
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -168,7 +168,7 @@
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -187,7 +187,7 @@
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -219,7 +219,7 @@
         "worker_sequence": [],
         "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "main_agent.decision", "main_agent.clarification_requested", "task.waiting_user"],
+        "required_event_subsequence": ["task.created", "agent.started", "agent.decision", "agent.clarification_requested", "task.waiting_user"],
         "invariants": ["no_worker_for_clarification"]
       }
     },
@@ -240,7 +240,7 @@
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -261,7 +261,7 @@
         "required_workers": ["plc-dev", "plc-test", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
         "artifact_versions": {"plc_code": [1, 2], "test_report": [1, 2]},
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["repair_requires_regression", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -286,7 +286,7 @@
         "required_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "counterexample", "patch", "repair_summary", "gate_report", "final_report"],
         "artifact_versions": {"plc_code": [1, 2], "formal_report": [1, 2]},
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "main_agent.completed", "task.succeeded"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.completed", "worker.started", "worker.completed", "gate.passed", "agent.completed", "task.succeeded"],
         "invariants": ["l3_requires_formal", "repair_requires_regression", "formal_repair_requires_formal_regression", "no_success_without_quality_gate", "final_report_before_terminal_event"]
       }
     },
@@ -308,7 +308,7 @@
         "required_workers": ["plc-dev", "plc-test", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
         "artifact_versions": {"plc_code": [1, 2, 3, 4], "test_report": [1, 2, 3, 4]},
-        "required_event_subsequence": ["task.created", "main_agent.started", "gate.failed", "main_agent.completed", "task.partial_failed"],
+        "required_event_subsequence": ["task.created", "agent.started", "gate.failed", "agent.completed", "task.partial_failed"],
         "expected_rejections": {"repair_limit_rejected": "repair_limit_reached"},
         "invariants": ["repair_requires_regression", "no_fourth_repair_round", "final_report_before_terminal_event"]
       }
@@ -328,7 +328,7 @@
         "required_workers": ["plc-dev"],
         "forbidden_workers": ["plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request", "final_report", "main_agent_log"],
-        "required_event_subsequence": ["task.created", "main_agent.started", "worker.started", "worker.timeout", "main_agent.completed"],
+        "required_event_subsequence": ["task.created", "agent.started", "worker.started", "worker.timeout", "agent.completed"],
         "expected_execution_statuses": {"dev": "timeout"},
         "invariants": ["no_false_success_on_worker_error"]
       }

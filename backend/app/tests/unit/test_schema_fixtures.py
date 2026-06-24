@@ -47,7 +47,7 @@ def test_valid_schema_fixture_parses(file_name: str, model: type[BaseModel]) -> 
 
     parsed = model.model_validate(payload)
 
-    assert parsed.schema_version == "router.v1"
+    assert parsed.schema_version in {"router.v1", "router.v2"}
 
 
 def test_json_schema_export_writes_required_files(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_json_schema_export_writes_required_files(tmp_path: Path) -> None:
     for path in written_paths:
         schema = json.loads(path.read_text(encoding="utf-8"))
         assert schema["$schema"] == JSON_SCHEMA_DIALECT
-        assert schema["$id"].startswith("https://schemas.router.local/router.v1/")
+        assert schema["$id"].startswith("https://schemas.router.local/router.v2/")
         assert schema["x-schema-version"] == SCHEMA_VERSION
 
 

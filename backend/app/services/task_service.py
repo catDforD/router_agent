@@ -11,12 +11,16 @@ from sqlalchemy.orm import Session
 
 from app.core.ids import new_artifact_id, new_event_id, new_session_id, new_task_id
 from app.core.time import utc_now
+from app.core.errors import RepositoryNotFoundError
 from app.models.router_schema import (
     ArtifactCreator,
     ArtifactCreatorType,
     ArtifactType,
     ArtifactVisibility,
+    AgentSession,
+    AgentSessionStatus,
     CurrentArtifacts,
+    DEFAULT_SCHEMA_VERSION,
     DifficultyProfile,
     DifficultySignals,
     EventCorrelation,
@@ -34,8 +38,10 @@ from app.models.router_schema import (
     TaskStatus,
     TaskTrace,
     TaskType,
+    WorkspaceContext,
 )
 from app.repositories._helpers import enum_value
+from app.repositories.session_repo import AgentSessionRepository
 from app.repositories.task_repo import TaskRepository
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
@@ -86,17 +92,58 @@ class TaskService:
         *,
         message: str,
         project_context: ProjectContext | dict[str, Any] | None = None,
+        session_id: str | None = None,
         user_id: str | None = None,
     ) -> TaskCreateResult:
         now = utc_now()
         context = _project_context(project_context)
+        task_session_id = session_id or new_session_id()
         task = self._build_initial_task_state(
             message=message,
             project_context=context,
+            session_id=task_session_id,
             user_id=user_id,
             now=now,
         )
         self.task_repository.create_task(task)
+        session_repository = AgentSessionRepository(self.task_repository.session)
+        try:
+            agent_session = session_repository.get_session(task_session_id)
+        except RepositoryNotFoundError:
+            agent_session = AgentSession(
+                schema_version=DEFAULT_SCHEMA_VERSION,
+                session_id=task_session_id,
+                user_id=user_id,
+                title=_task_title(message),
+                status=AgentSessionStatus.ACTIVE,
+                project_context=context,
+                workspace=task.workspace,
+                latest_task_id=task.task_id,
+                latest_run_id=task.task_id,
+                event_seq=0,
+                runs=[],
+                created_at=now,
+                updated_at=now,
+            )
+            session_repository.create_session(agent_session)
+        else:
+            agent_session = agent_session.model_copy(
+                update={
+                    "latest_task_id": task.task_id,
+                    "latest_run_id": task.task_id,
+                    "updated_at": now,
+                }
+            )
+            session_repository.update_session(agent_session)
+
+        session_repository.create_run(
+            run_id=task.task_id,
+            session_id=task_session_id,
+            task_id=task.task_id,
+            status="created",
+            user_message=message,
+            created_at=now,
+        )
 
         raw_artifact = self.artifact_store.write_artifact_content(
             ArtifactContentWrite(
@@ -133,7 +180,10 @@ class TaskService:
                 artifact_ids=[raw_artifact.artifact_id],
                 payload={
                     "task_id": task.task_id,
+                    "session_id": task_session_id,
+                    "run_id": task.task_id,
                     "status": TaskStatus.CREATED.value,
+                    "message": message,
                     "raw_user_request_artifact_id": raw_artifact.artifact_id,
                 },
                 source_id=user_id,
@@ -247,13 +297,14 @@ class TaskService:
         *,
         message: str,
         project_context: ProjectContext,
+        session_id: str,
         user_id: str | None,
         now: datetime,
     ) -> TaskState:
         return TaskState(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             task_id=new_task_id(),
-            session_id=new_session_id(),
+            session_id=session_id,
             user_id=user_id,
             title=_task_title(message),
             status=TaskStatus.CREATED,
@@ -287,6 +338,15 @@ class TaskService:
                 need_clarification=False,
             ),
             project_context=project_context,
+            workspace=(
+                WorkspaceContext(
+                    root=project_context.workspace_root,
+                    current_directory=project_context.workspace_root,
+                    writable=True,
+                )
+                if project_context.workspace_root is not None
+                else None
+            ),
             runtime_limits=RuntimeLimits(
                 max_repair_rounds=3,
                 repair_rounds=0,
@@ -330,7 +390,7 @@ class TaskService:
         main_agent_run_id: str | None = None,
     ) -> RouterEvent:
         return RouterEvent(
-            schema_version="router.v1",
+            schema_version=DEFAULT_SCHEMA_VERSION,
             event_id=new_event_id(),
             task_id=task_id,
             seq=0,
@@ -341,6 +401,16 @@ class TaskService:
             title=title,
             message=message,
             correlation=EventCorrelation(
+                session_id=(
+                    payload.get("session_id")
+                    if isinstance(payload.get("session_id"), str)
+                    else None
+                ),
+                run_id=(
+                    payload.get("run_id")
+                    if isinstance(payload.get("run_id"), str)
+                    else None
+                ),
                 openai_trace_id=openai_trace_id,
                 main_agent_run_id=main_agent_run_id,
                 artifact_ids=artifact_ids,

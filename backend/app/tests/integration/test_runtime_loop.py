@@ -117,8 +117,6 @@ class ScriptedToolRunner:
                 continue
             elif action == "gate":
                 result = tools.run_quality_gate(task_id)
-            elif action == "finish":
-                result = tools.finish_task(task_id)
             else:
                 raise AssertionError(f"unknown fake action: {action}")
             self.tool_results.append(result)
@@ -152,7 +150,7 @@ class ScriptedToolRunner:
                 task_id=task_id,
                 event_type=EventType.MAIN_AGENT_FINALIZING,
                 title="Main Agent finalizing",
-                message="Fake runner is running Quality Gate before finish.",
+                message="Fake runner is running Quality Gate before final response.",
                 openai_trace_id=task.trace.openai_trace_id,
                 main_agent_run_id=task.trace.latest_main_agent_run_id,
                 payload={"task_id": task_id},
@@ -322,13 +320,13 @@ def test_checkpointed_progress_is_visible_from_separate_session(
     events = event_types(session_factory, task_id)
 
     assert result.status == "completed"
-    assert "main_agent.started" in events
+    assert "agent.started" in events
     assert "worker.started" in events
     assert "artifact.created" in events
     assert "worker.completed" in events
     assert "gate.passed" in events
     assert "task.succeeded" in events
-    assert "main_agent.completed" in events
+    assert "agent.completed" in events
 
 
 def test_cancelled_task_is_not_started_by_scheduled_runtime_job(
@@ -337,7 +335,7 @@ def test_cancelled_task_is_not_started_by_scheduled_runtime_job(
     settings, session_factory = runtime_context
     runner = ScriptedToolRunner(
         classifications=[classification()],
-        sequence=["dev", "test", "gate", "finish"],
+        sequence=["dev", "test", "gate"],
     )
     scheduler = InProcessRuntimeScheduler(runtime_service(settings, session_factory, runner))
     task_id = create_task(settings, session_factory)
@@ -383,7 +381,7 @@ def test_cancellation_during_runtime_episode_preserves_cancelled_state(
     assert worker_jobs(session_factory) == []
     assert "task.cancelled" in events
     assert "worker.started" not in events
-    assert events.count("main_agent.started") == 1
+    assert events.count("agent.started") == 1
 
 
 def test_duplicate_runtime_trigger_skips_while_lease_is_active(

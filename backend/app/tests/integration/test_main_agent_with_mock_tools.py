@@ -114,8 +114,6 @@ class ToolSequenceRunner:
                 continue
             elif action == "gate":
                 result = tools.run_quality_gate(task_id)
-            elif action == "finish":
-                result = tools.finish_task(task_id)
             else:
                 raise AssertionError(f"unknown fake action: {action}")
             self.tool_results.append(result)
@@ -131,7 +129,7 @@ class ToolSequenceRunner:
                 task_id=task_id,
                 event_type=EventType.MAIN_AGENT_FINALIZING,
                 title="Main Agent finalizing",
-                message="Fake runner is running Quality Gate before finish.",
+                message="Fake runner is running Quality Gate before final response.",
                 openai_trace_id=task.trace.openai_trace_id,
                 main_agent_run_id=task.trace.latest_main_agent_run_id,
                 payload={"task_id": task_id},
@@ -148,7 +146,7 @@ class ToolSequenceRunner:
                 MainAgentDecision(
                     decision_type="tool_sequence",
                     summary="Ran deterministic Main Agent tool sequence.",
-                    action="finish",
+                    action="return_final_response",
                     artifact_refs=_output_artifact_refs(self.tool_results),
                     details={
                         "tools": [result.tool for result in self.tool_results],
@@ -305,7 +303,7 @@ def read_report_content(
     return json.loads(stored.content)
 
 
-def test_ordinary_l2_development_completes_with_dev_test_gate_finish(
+def test_ordinary_l2_development_completes_with_dev_test_gate_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -363,7 +361,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
     event_types = [event.type for event in events]
-    completed_event = next(event for event in events if event.type == "main_agent.completed")
+    completed_event = next(event for event in events if event.type == "agent.completed")
     artifact_rows = list(
         db_session.execute(select(ArtifactRow).where(ArtifactRow.task_id == task_id))
         .scalars()
@@ -381,7 +379,7 @@ def test_report_first_success_writes_artifacts_completed_event_then_terminal_suc
     assert {"final_report", "main_agent_log"} <= {row.type for row in artifact_rows}
     assert completed_event.payload["final_report_artifact_id"] in artifact_ids
     assert completed_event.payload["main_agent_log_artifact_id"] in artifact_ids
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.succeeded"
     )
     assert task.current_artifacts.final_report is not None
@@ -431,7 +429,7 @@ def test_report_first_partial_failed_report_records_unresolved_failures(
     assert task.gates.has_blocking_failure is True
     assert any(failure.status == "open" for failure in task.failures)
     assert task.current_artifacts.final_report is not None
-    assert event_types.index("main_agent.completed") < event_types.index(
+    assert event_types.index("agent.completed") < event_types.index(
         "task.partial_failed"
     )
     report = read_report_content(
@@ -469,7 +467,7 @@ def test_guard_rejection_is_visible_through_main_agent_tool_result(
     )
     task = TaskRepository(db_session).get_task(task_id)
     events = EventService(db_session).list_visible_events(task_id)
-    tool_result = next(event for event in events if event.type == "main_agent.tool_result")
+    tool_result = next(event for event in events if event.type == "agent.tool_result")
 
     assert runner.calls == ["intake", "orchestration"]
     assert runner.tool_result is not None
@@ -481,7 +479,7 @@ def test_guard_rejection_is_visible_through_main_agent_tool_result(
     assert worker_jobs(db_session) == []
 
 
-def test_safety_critical_l3_development_runs_test_and_formal_before_finish(
+def test_safety_critical_l3_development_runs_test_and_formal_before_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -514,7 +512,7 @@ def test_safety_critical_l3_development_runs_test_and_formal_before_finish(
     assert task.gates.latest_formal_passed is True
 
 
-def test_test_failure_triggers_repair_and_regression_before_finish(
+def test_test_failure_triggers_repair_and_regression_before_final_response(
     db_session: Session,
     tmp_path: Path,
     task_service: TaskService,
@@ -697,10 +695,10 @@ def test_main_agent_events_are_visible_in_orchestration_timeline(
     )
     events = [event.type for event in EventService(db_session).list_visible_events(task_id)]
 
-    assert "main_agent.started" in events
-    assert "main_agent.decision" in events
-    assert "main_agent.finalizing" in events
-    assert "main_agent.completed" in events
+    assert "agent.started" in events
+    assert "agent.decision" in events
+    assert "agent.finalizing" in events
+    assert "agent.completed" in events
     assert "gate.passed" in events
     assert "task.succeeded" in events
 

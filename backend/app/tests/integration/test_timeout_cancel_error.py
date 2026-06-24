@@ -264,9 +264,9 @@ def test_worker_call_budget_exhaustion_is_guard_rejected_before_dispatch(
     assert rows == []
     assert [event.type for event in events] == [
         "task.created",
-        "main_agent.turn_started",
-        "main_agent.tool_called",
-        "main_agent.tool_result",
+        "agent.turn_started",
+        "agent.tool_called",
+        "agent.tool_result",
     ]
     assert events[-1].payload["details"]["violation"]["code"] == (
         "worker_call_limit_exceeded"
@@ -297,8 +297,8 @@ def test_main_agent_max_turns_marks_non_terminal_task_failed(
     assert task.completed_at is not None
     assert task.current_artifacts.final_report is not None
     assert event_types[-3:] == [
-        "main_agent.decision",
-        "main_agent.completed",
+        "agent.decision",
+        "agent.completed",
         "task.failed",
     ]
     assert events[-3].severity == "error"

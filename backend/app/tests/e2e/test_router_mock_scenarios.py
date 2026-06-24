@@ -271,8 +271,8 @@ def test_simple_development_mock_e2e_succeeds(
         audit.events,
         [
             "task.created",
-            "main_agent.started",
-            "main_agent.decision",
+            "agent.started",
+            "agent.decision",
             "task.updated",
             "worker.started",
             "artifact.created",
@@ -280,10 +280,10 @@ def test_simple_development_mock_e2e_succeeds(
             "worker.started",
             "artifact.created",
             "worker.completed",
-            "main_agent.finalizing",
+            "agent.finalizing",
             "gate.started",
             "gate.passed",
-            "main_agent.completed",
+            "agent.completed",
             "task.succeeded",
         ],
     )
@@ -509,9 +509,9 @@ def test_clarification_mock_e2e_waits_for_user(
         audit.events,
         [
             "task.created",
-            "main_agent.started",
-            "main_agent.decision",
-            "main_agent.clarification_requested",
+            "agent.started",
+            "agent.decision",
+            "agent.clarification_requested",
             "task.waiting_user",
         ],
     )
@@ -590,7 +590,7 @@ def test_repair_budget_exhaustion_mock_e2e_partial_failed(
             "worker.started",
             "worker.completed",
             "gate.failed",
-            "main_agent.completed",
+            "agent.completed",
             "task.partial_failed",
         ],
     )
