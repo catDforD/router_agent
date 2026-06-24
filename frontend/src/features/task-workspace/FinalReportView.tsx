@@ -1,6 +1,7 @@
 import { ClipboardCheck } from "lucide-react";
 
 import type { ArtifactContentResponse } from "../../api/router/types";
+import { MarkdownText } from "./MarkdownText";
 
 interface FinalReportViewProps {
   finalReport?: ArtifactContentResponse;
@@ -54,9 +55,27 @@ function ReportSection({ title, value }: { title: string; value: unknown }) {
   return (
     <article className="report-section">
       <h3>{title}</h3>
-      <pre className="small">{formatValue(value)}</pre>
+      <ReportValue value={value} />
     </article>
   );
+}
+
+function ReportValue({ value }: { value: unknown }) {
+  if (typeof value === "string") {
+    return <MarkdownText content={value} variant="report" />;
+  }
+  if (isStringArray(value)) {
+    return (
+      <ul className="report-string-list">
+        {value.map((item, index) => (
+          <li key={`${index}-${item.slice(0, 16)}`}>
+            <MarkdownText content={item} variant="compact" />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <pre className="small">{formatValue(value)}</pre>;
 }
 
 function parseReport(content: string): Record<string, unknown> {
@@ -76,4 +95,8 @@ function formatValue(value: unknown): string {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
