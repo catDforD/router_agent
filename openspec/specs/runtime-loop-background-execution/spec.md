@@ -69,7 +69,7 @@ The backend SHALL commit meaningful Runtime progress checkpoints so other databa
 - **AND** an SSE client connected to the task event stream can receive those events without waiting for final task completion
 
 #### Scenario: Terminal completion is visible
-- **WHEN** background Runtime completes a task through Quality Gate and `finish_task`
+- **WHEN** background Runtime completes a task through an allowed final response and runtime finalization
 - **THEN** the terminal task state and terminal task event are committed and visible through the task read API and event stream
 
 ### Requirement: User messages resume waiting tasks
@@ -124,4 +124,3 @@ The backend SHALL record Runtime or Main Agent execution failures without falsel
 - **WHEN** `MainAgentService.run_episode` returns an error output for max turns or model behavior failure
 - **THEN** Runtime commits the emitted Main Agent error event or equivalent observable state
 - **AND** does not create a false terminal success state
-

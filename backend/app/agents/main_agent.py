@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -10,46 +9,13 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 from pydantic import JsonValue
 from sqlalchemy.orm import Session
 
-try:
-    from agents import (
-        Agent,
-        AgentOutputSchema,
-        MaxTurnsExceeded,
-        ModelBehaviorError,
-        RunConfig,
-        Runner,
-        gen_trace_id,
-    )
-    from agents.lifecycle import RunHooksBase
-
-    AGENTS_SDK_AVAILABLE = True
-except ImportError:  # pragma: no cover - SDK is a runtime dependency.
-    Agent = Any  # type: ignore[assignment]
-    AgentOutputSchema = Any  # type: ignore[assignment]
-    RunHooksBase = object  # type: ignore[assignment]
-    RunConfig = Any  # type: ignore[assignment]
-    Runner = None  # type: ignore[assignment]
-    AGENTS_SDK_AVAILABLE = False
-
-    class MaxTurnsExceeded(Exception):  # type: ignore[no-redef]
-        pass
-
-    class ModelBehaviorError(Exception):  # type: ignore[no-redef]
-        pass
-
-    def gen_trace_id() -> str:  # type: ignore[no-redef]
-        from uuid import uuid4
-
-        return f"trace_{uuid4().hex}"
-
 from app.agents.instructions import (
-    INTAKE_AGENT_NAME,
     ORCHESTRATION_AGENT_NAME,
-    build_intake_instructions,
     build_orchestration_instructions,
     build_state_view_prompt,
 )
@@ -61,7 +27,6 @@ from app.agents.chat_completions import (
 )
 from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.output_schema import (
-    IntakeClassificationOutput,
     MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentEpisodeOutput,
@@ -75,7 +40,6 @@ from app.agents.tools import (
     call_main_agent_tool,
     get_main_agent_tool_specs,
     get_main_agent_tool_names,
-    get_main_agent_tools,
 )
 from app.core.ids import new_event_id, prefixed_id
 from app.core.logging import log_with_context
@@ -84,11 +48,9 @@ from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     AgentRunState,
     ArtifactRef,
-    ClarificationQuestion,
     CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
-    DifficultyProfile,
     ExecutionPolicy,
     EventCorrelation,
     EventSeverity,
@@ -97,7 +59,6 @@ from app.models.router_schema import (
     EventType,
     EventVisibility,
     Failure,
-    GateState,
     RouterEvent,
     TaskPhase,
     TaskState,
@@ -125,25 +86,6 @@ TERMINAL_EVENT_BY_STATUS = {
     TaskStatus.PARTIAL_FAILED.value: EventType.TASK_PARTIAL_FAILED,
     TaskStatus.FAILED.value: EventType.TASK_FAILED,
     TaskStatus.CANCELLED.value: EventType.TASK_CANCELLED,
-}
-SAFETY_SIGNAL_FIELDS = (
-    "has_safety_constraints",
-    "has_emergency_stop",
-    "has_interlock",
-    "has_fault_latching",
-    "has_mode_switching",
-    "has_state_machine",
-)
-DIFFICULTY_RANK = {
-    DifficultyLevel.L0.value: 0,
-    DifficultyLevel.L1.value: 1,
-    DifficultyLevel.L2.value: 2,
-    DifficultyLevel.L3.value: 3,
-    DifficultyLevel.L4.value: 4,
-}
-DIFFICULTY_BY_RANK = {
-    rank: level
-    for level, rank in DIFFICULTY_RANK.items()
 }
 MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
 EVIDENCE_TOOL_NAMES = {
@@ -188,16 +130,24 @@ EXECUTION_REQUEST_KEYWORDS = (
 )
 
 
+class MaxTurnsExceeded(Exception):
+    """Raised when a Main Agent runner exceeds its turn budget."""
+
+
+class ModelBehaviorError(Exception):
+    """Raised when a Main Agent runner reports invalid model behavior."""
+
+
+def gen_trace_id() -> str:
+    return f"trace_{uuid4().hex}"
+
+
 class MainAgentServiceError(Exception):
     """Base class for Main Agent service failures."""
 
 
-class MainAgentRunnerUnavailableError(MainAgentServiceError):
-    """Raised when production SDK execution is requested without the SDK."""
-
-
 class MainAgentRunner(Protocol):
-    """Runner boundary used by production SDK calls and deterministic tests."""
+    """Runner boundary used by production tool-loop calls and deterministic tests."""
 
     def run_orchestration(
         self,
@@ -465,117 +415,6 @@ class OpenAICompatibleToolLoopRunner:
         return _assistant_turn_from_response(response)
 
 
-class OpenAIAgentsRunner:
-    """Production runner backed by the OpenAI Agents SDK."""
-
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        if Runner is None:
-            raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")
-        result = Runner.run_sync(
-            agent,
-            input_text,
-            context=context,
-            max_turns=max_turns,
-            run_config=run_config,
-        )
-        return result.final_output_as(IntakeClassificationOutput, raise_if_incorrect_type=True)
-
-    def run_orchestration(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> MainAgentEpisodeOutput:
-        if Runner is None:
-            raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")
-        if context.observability_recorder is not None:
-            return self._run_orchestration_streamed(
-                agent=agent,
-                input_text=input_text,
-                context=context,
-                max_turns=max_turns,
-                run_config=run_config,
-            )
-        result = Runner.run_sync(
-            agent,
-            input_text,
-            context=context,
-            max_turns=max_turns,
-            run_config=run_config,
-        )
-        return result.final_output_as(MainAgentEpisodeOutput, raise_if_incorrect_type=True)
-
-    def _run_orchestration_streamed(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> MainAgentEpisodeOutput:
-        async def run_streamed() -> MainAgentEpisodeOutput:
-            result = Runner.run_streamed(
-                agent,
-                input_text,
-                context=context,
-                max_turns=max_turns,
-                run_config=run_config,
-                hooks=_ObservabilityRunHooks(context.observability_recorder),
-            )
-            async for _event in result.stream_events():
-                # Tool calls/results are persisted by AgentToolService. Draining the
-                # SDK stream keeps the model run live without exposing raw SDK events.
-                pass
-            return result.final_output_as(
-                MainAgentEpisodeOutput,
-                raise_if_incorrect_type=True,
-            )
-
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(run_streamed())
-        raise MainAgentServiceError(
-            "streamed OpenAI Agents runner cannot run inside an active event loop"
-        )
-
-
-class _ObservabilityRunHooks(RunHooksBase):  # type: ignore[misc, valid-type]
-    """SDK lifecycle hook adapter for Router observability."""
-
-    def __init__(self, recorder: Any | None) -> None:
-        self.recorder = recorder
-
-    async def on_llm_start(
-        self,
-        context: Any,
-        agent: Any,
-        system_prompt: str | None,
-        input_items: list[Any],
-    ) -> None:
-        if self.recorder is not None:
-            self.recorder.start_turn(phase="orchestration")
-
-
-@dataclass(frozen=True)
-class ClassificationApplyResult:
-    task: TaskState
-    classification: IntakeClassificationOutput
-    clarification_requested: bool
-
-
 class MainAgentService:
     """Coordinates one Main Agent episode over persisted Router state."""
 
@@ -668,67 +507,18 @@ class MainAgentService:
 
         try:
             current = started
-            legacy_structured_runner = _uses_legacy_structured_runner(self.runner)
-            if legacy_structured_runner and _needs_classification(current):
-                current = self._run_and_apply_intake(current, context).task
-                if current.status == TaskStatus.WAITING_USER.value:
-                    output = episode_output_from_task(
-                        current,
-                        main_agent_run_id=current.trace.latest_main_agent_run_id
-                        or "not-started",
-                        summary="Task is waiting for user clarification.",
-                    )
-                    log_with_context(
-                        LOGGER,
-                        logging.INFO,
-                        "Main Agent episode paused",
-                        task_id=task_id,
-                        openai_trace_id=current.trace.openai_trace_id,
-                        main_agent_run_id=current.trace.latest_main_agent_run_id,
-                        status=current.status,
-                    )
-                    self._complete_latest_agent_run(task_id, "waiting_user")
-                    return output
-
-            if _is_terminal(current):
-                output = episode_output_from_task(
-                    current,
-                    main_agent_run_id=current.trace.latest_main_agent_run_id
-                    or "not-started",
-                    summary="Task reached a terminal state during intake.",
-                )
-                log_with_context(
-                    LOGGER,
-                    logging.INFO,
-                    "Main Agent episode completed during intake",
-                    task_id=task_id,
-                    openai_trace_id=current.trace.openai_trace_id,
-                    main_agent_run_id=current.trace.latest_main_agent_run_id,
-                    status=current.status,
-                )
-                self._complete_latest_agent_run(
-                    task_id,
-                    _agent_run_status_from_final_status(_value(current.status)),
-                )
-                return output
-
             state_view = build_state_view(current)
             session_context = build_session_context_view(self.session, current)
             if session_context:
                 state_view["session_context"] = session_context
             output = self.runner.run_orchestration(
-                agent=(
-                    build_orchestration_agent(model=self.model)
-                    if legacy_structured_runner
-                    else build_tool_loop_agent(model=self.model)
-                ),
+                agent=build_tool_loop_agent(model=self.model),
                 input_text=build_state_view_prompt(state_view),
                 context=context,
                 max_turns=self.max_turns,
-                run_config=(
-                    build_run_config(current, phase="orchestration")
-                    if legacy_structured_runner
-                    else build_tool_loop_run_config(current, phase="orchestration")
+                run_config=build_tool_loop_run_config(
+                    current,
+                    phase="orchestration",
                 ),
             )
             persisted_output = (
@@ -857,161 +647,6 @@ class MainAgentService:
         self._checkpoint()
         return self._fresh_task(task_id)
 
-    def apply_intake_classification(
-        self,
-        task_id: str,
-        classification: IntakeClassificationOutput,
-    ) -> ClassificationApplyResult:
-        normalized = normalize_classification(classification)
-        task = self._fresh_task_for_update(task_id)
-        if _is_terminal(task):
-            return ClassificationApplyResult(
-                task=task,
-                classification=normalized,
-                clarification_requested=False,
-            )
-
-        now = utc_now()
-        questions = (
-            [
-                ClarificationQuestion(
-                    question_id=prefixed_id("question"),
-                    question=question.question,
-                    reason=question.reason,
-                    required=question.required,
-                    status="open",
-                    asked_at=now,
-                )
-                for question in normalized.clarification_questions
-            ]
-            if normalized.need_clarification
-            else []
-        )
-        difficulty = DifficultyProfile(
-            level=normalized.difficulty_level,
-            score=normalized.difficulty_score,
-            confidence=normalized.difficulty_confidence,
-            reasons=normalized.difficulty_reasons,
-            signals=normalized.difficulty_signals,
-            requires_test=normalized.requires_test,
-            requires_formal=normalized.requires_formal,
-            requires_repair_loop=normalized.requires_repair_loop,
-            need_clarification=normalized.need_clarification,
-        )
-        gates = GateState(
-            test_required=normalized.requires_test,
-            formal_required=normalized.requires_formal,
-            regression_required=task.gates.regression_required,
-            formal_regression_required=task.gates.formal_regression_required,
-            latest_test_passed=task.gates.latest_test_passed,
-            latest_formal_passed=task.gates.latest_formal_passed,
-            has_blocking_failure=task.gates.has_blocking_failure,
-            can_finish_as_success=False,
-        )
-        status = (
-            TaskStatus.WAITING_USER.value
-            if normalized.need_clarification
-            else TaskStatus.RUNNING.value
-        )
-        phase = (
-            TaskPhase.CLARIFYING.value
-            if normalized.need_clarification
-            else TaskPhase.PLANNING.value
-        )
-        updated = task.model_copy(
-            deep=True,
-            update={
-                "normalized_goal": normalized.normalized_goal,
-                "task_type": normalized.task_type,
-                "difficulty": difficulty,
-                "gates": gates,
-                "status": status,
-                "phase": phase,
-                "unresolved_questions": questions or task.unresolved_questions,
-                "updated_at": now,
-            },
-        )
-        self.task_repository.update_task_state(updated)
-        self.event_service.append_event(
-            build_main_agent_event(
-                task_id=task_id,
-                event_type=EventType.MAIN_AGENT_DECISION,
-                title="Main Agent classified task",
-                message="Main Agent intake classification was applied.",
-                openai_trace_id=updated.trace.openai_trace_id,
-                main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                payload={
-                    "task_id": task_id,
-                    "task_type": _value(normalized.task_type),
-                    "difficulty_level": _value(normalized.difficulty_level),
-                    "requires_test": normalized.requires_test,
-                    "requires_formal": normalized.requires_formal,
-                    "need_clarification": normalized.need_clarification,
-                },
-                created_at=now,
-            )
-        )
-        if normalized.need_clarification:
-            self.event_service.append_event(
-                build_main_agent_event(
-                    task_id=task_id,
-                    event_type=EventType.MAIN_AGENT_CLARIFICATION_REQUESTED,
-                    title="Main Agent requested clarification",
-                    message="Main Agent paused execution for user clarification.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "question_ids": [question.question_id for question in questions],
-                    },
-                    created_at=now,
-                )
-            )
-            self.event_service.append_event(
-                build_task_event(
-                    task_id=task_id,
-                    event_type=EventType.TASK_WAITING_USER,
-                    title="Task waiting for user",
-                    message="The task needs user clarification before workers can run.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "status": TaskStatus.WAITING_USER.value,
-                        "phase": TaskPhase.CLARIFYING.value,
-                        "question_ids": [question.question_id for question in questions],
-                    },
-                    created_at=now,
-                )
-            )
-        else:
-            self.event_service.append_event(
-                build_task_event(
-                    task_id=task_id,
-                    event_type=EventType.TASK_UPDATED,
-                    title="Task classified",
-                    message="The task was classified and is ready for planning.",
-                    openai_trace_id=updated.trace.openai_trace_id,
-                    main_agent_run_id=updated.trace.latest_main_agent_run_id,
-                    payload={
-                        "task_id": task_id,
-                        "status": TaskStatus.RUNNING.value,
-                        "phase": TaskPhase.PLANNING.value,
-                        "task_type": _value(normalized.task_type),
-                        "difficulty_level": _value(normalized.difficulty_level),
-                    },
-                    created_at=now,
-                )
-            )
-
-        self._checkpoint()
-        persisted = self.task_repository.get_task(task_id)
-        return ClassificationApplyResult(
-            task=persisted,
-            classification=normalized,
-            clarification_requested=normalized.need_clarification,
-        )
-
     def emit_plan_updated(
         self,
         task_id: str,
@@ -1051,20 +686,6 @@ class MainAgentService:
         )
         self._checkpoint()
         return event
-
-    def _run_and_apply_intake(
-        self,
-        task: TaskState,
-        context: AgentToolContext,
-    ) -> ClassificationApplyResult:
-        classification = self.runner.run_intake(
-            agent=build_intake_agent(model=self.model),
-            input_text=build_state_view_prompt(build_state_view(task)),
-            context=context,
-            max_turns=self.max_turns,
-            run_config=build_run_config(task, phase="intake"),
-        )
-        return self.apply_intake_classification(task.task_id, classification)
 
     def _persist_orchestration_output(
         self,
@@ -1305,51 +926,11 @@ class MainAgentService:
         return self.task_repository.get_task_for_update(task_id)
 
 
-def build_intake_agent(*, model: str | None = None) -> Any:
-    _require_agents_sdk()
-    return Agent(
-        name=INTAKE_AGENT_NAME,
-        instructions=build_intake_instructions(),
-        model=model,
-        output_type=_agent_output_schema(IntakeClassificationOutput),
-    )
-
-
 def build_tool_loop_agent(*, model: str | None = None) -> ToolLoopAgent:
     return ToolLoopAgent(
         name=ORCHESTRATION_AGENT_NAME,
         instructions=build_orchestration_instructions(),
         model=model,
-    )
-
-
-def build_orchestration_agent(*, model: str | None = None) -> Any:
-    _require_agents_sdk()
-    return Agent(
-        name=ORCHESTRATION_AGENT_NAME,
-        instructions=build_orchestration_instructions(),
-        model=model,
-        tools=get_main_agent_tools(),
-        output_type=_agent_output_schema(MainAgentEpisodeOutput),
-    )
-
-
-def _agent_output_schema(output_type: type[Any]) -> Any:
-    return AgentOutputSchema(output_type, strict_json_schema=False)
-
-
-def build_run_config(task: TaskState, *, phase: str) -> Any:
-    _require_agents_sdk()
-    return RunConfig(
-        workflow_name="Router Main Agent",
-        trace_id=task.trace.openai_trace_id,
-        group_id=task.task_id,
-        trace_metadata={
-            "task_id": task.task_id,
-            "session_id": task.session_id,
-            "main_agent_run_id": task.trace.latest_main_agent_run_id or "",
-            "phase": phase,
-        },
     )
 
 
@@ -1506,41 +1087,6 @@ def _agent_run_status_from_final_status(status: str) -> str:
     if status == TaskStatus.WAITING_USER.value:
         return status
     return TaskStatus.FAILED.value
-
-
-def normalize_classification(
-    classification: IntakeClassificationOutput,
-) -> IntakeClassificationOutput:
-    level = _value(classification.difficulty_level)
-    reasons = list(classification.difficulty_reasons)
-    requires_test = classification.requires_test
-    requires_formal = classification.requires_formal
-    requires_repair_loop = classification.requires_repair_loop
-
-    if DIFFICULTY_RANK[level] >= DIFFICULTY_RANK[DifficultyLevel.L2.value]:
-        requires_test = True
-
-    if _has_safety_signal(classification):
-        if DIFFICULTY_RANK[level] < DIFFICULTY_RANK[DifficultyLevel.L3.value]:
-            level = DifficultyLevel.L3.value
-            reasons.append(
-                "Runtime elevated difficulty to L3 for safety-critical signals."
-            )
-        requires_test = True
-        requires_formal = True
-
-    if classification.task_type == TaskType.REPAIR_EXISTING_CODE.value:
-        requires_repair_loop = True
-
-    return classification.model_copy(
-        update={
-            "difficulty_level": level,
-            "difficulty_reasons": reasons,
-            "requires_test": requires_test,
-            "requires_formal": requires_formal,
-            "requires_repair_loop": requires_repair_loop,
-        }
-    )
 
 
 def episode_output_from_task(
@@ -2186,29 +1732,9 @@ def _default_runner(
     stream: bool,
     chat_client: MainAgentChatClient | None,
 ) -> MainAgentRunner:
-    if provider == "legacy_openai_agents":
-        return OpenAIAgentsRunner()
     return OpenAICompatibleToolLoopRunner(
         chat_client=chat_client,
         stream=stream,
-    )
-
-
-def _uses_legacy_structured_runner(runner: MainAgentRunner) -> bool:
-    return (
-        isinstance(runner, OpenAIAgentsRunner)
-        or (
-            hasattr(runner, "run_intake")
-            and not getattr(runner, "uses_tool_loop_side_effects", False)
-        )
-    )
-
-
-def _needs_classification(task: TaskState) -> bool:
-    return (
-        _value(task.status) == TaskStatus.CREATED.value
-        or _value(task.phase) == TaskPhase.INTAKE.value
-        or _value(task.task_type) == TaskType.UNKNOWN.value
     )
 
 
@@ -2226,13 +1752,6 @@ def _terminal_event_title(final_status: str) -> str:
     if final_status == TaskStatus.CANCELLED.value:
         return "Task cancelled"
     return "Task completed"
-
-
-def _has_safety_signal(classification: IntakeClassificationOutput) -> bool:
-    return any(
-        bool(getattr(classification.difficulty_signals, field_name))
-        for field_name in SAFETY_SIGNAL_FIELDS
-    )
 
 
 def _json_payload(payload: dict[str, Any]) -> dict[str, JsonValue]:
@@ -2263,8 +1782,3 @@ def _value(value: Any) -> str:
     if isinstance(value, Enum):
         return str(value.value)
     return str(value)
-
-
-def _require_agents_sdk() -> None:
-    if not AGENTS_SDK_AVAILABLE:
-        raise MainAgentRunnerUnavailableError("OpenAI Agents SDK is not available")

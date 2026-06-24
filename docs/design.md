@@ -1,6 +1,6 @@
 # 湖州 Router 方案
 
-> 当前实现状态：Router Main Agent 已经改为 OpenAI 兼容 Chat Completions tool loop。它不依赖 OpenAI Responses API，也不依赖 `response_format` 结构化输出；最终报告和终态变更通过 `write_final_report`、`finish_task` 等工具完成。本文仍保留原始设计思路，但涉及 OpenAI Agents SDK 的描述应按这一实现状态理解。
+> 当前实现状态：Router Main Agent 已经改为 OpenAI 兼容 Chat Completions tool loop。它不依赖 OpenAI Responses API，也不依赖 `response_format` 结构化输出；最终报告和终态变更由 runtime finalization 在模型给出可接受最终回答后完成。本文仍保留原始设计思路，但涉及 OpenAI Agents SDK、standalone Intake 或旧终结工具的描述应按这一实现状态理解。
 
 1.  **Agent + 外部 Worker 架构**
 
@@ -135,17 +135,15 @@
 
     ```typescript
     type MainAgentTool =
-      | "update_plan"
-      | "request_clarification"
-      | "call_plc_dev"
-      | "call_plc_test"
-      | "call_plc_formal"
-      | "call_plc_repair"
-      | "run_parallel_workers"
+      | "list_files"
+      | "read_file"
+      | "write_file"
+      | "apply_patch"
+      | "exec_command"
+      | "git_status"
       | "read_artifact"
-      | "run_quality_gate"
-      | "write_final_report"
-      | "finish_task";
+      | "write_artifact"
+      | "call_mcp_tool";
     ```
 
     这些工具由 Backend Runtime 提供给 Main Agent。Main Agent 可以选择工具和参数，但并发上限、修复轮次、schema 校验、artifact 写入权限由 Runtime 强制执行。

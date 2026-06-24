@@ -23,7 +23,7 @@ Main Agent 当前暴露的是一组 Codex-like 通用工具：
 6. StopPolicy 通过后，runtime 写 `agent.final_response`、`agent.completed` 和 run terminal event。
 
 也就是说，模型负责执行和回答，runtime 负责最终状态落库。
-当前默认 `MAIN_AGENT_PROVIDER=openai_compatible` 不跑独立 Intake；`legacy_openai_agents` 和部分测试/mock runner 才会走旧 Intake 分类路径。
+当前 `MAIN_AGENT_PROVIDER` 只支持 `openai_compatible`，不再保留旧 provider 或独立 Intake 分类路径。新任务仍以 `created/intake/unknown/L0` 创建，但默认 Main Agent 直接进入 tool-loop orchestration；需要调度 PLC/domain worker 时由工具路径准备任务上下文。
 
 ### 当前系统提示词是什么？
 
@@ -34,7 +34,7 @@ Main Agent 当前暴露的是一组 Codex-like 通用工具：
 - 完成时直接给自然最终回答。
 
 提示词明确要求不展示 hidden reasoning，不输出链式思考，只展示公开进展、执行结果、假设、验证和阻塞点。
-旧 Intake 提示词仍在代码中供 legacy runner 使用，但不是默认路径。
+旧 Intake 提示词和 standalone structured Intake runner 已删除。
 
 ### 后端提供的 SSE 接口目前输出是哪些信息？
 

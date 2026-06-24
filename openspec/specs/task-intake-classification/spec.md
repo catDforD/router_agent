@@ -1,90 +1,48 @@
 # task-intake-classification Specification
 
 ## Purpose
-Classify conservatively created Router tasks before worker execution so Runtime can apply validated task type, difficulty, gate, and clarification state to `TaskState`.
+Preserve conservative task creation while allowing the default Main Agent
+tool loop to run without a standalone structured Intake classifier.
 
 ## Requirements
 
-### Requirement: Runtime classifies intake tasks before worker execution
-The backend SHALL classify a created intake task before Runtime dispatches any PLC worker that requires task type or difficulty context.
+### Requirement: Task API creation remains conservative
+The backend SHALL keep the public task creation contract conservative.
 
-#### Scenario: Created task is classified before first worker call
-- **WHEN** Runtime starts execution for a task with `status` equal to `created`, `phase` equal to `intake`, `task_type` equal to `unknown`, and `difficulty.level` equal to `L0`
-- **THEN** Runtime obtains an intake classification decision before creating any worker job
-
-#### Scenario: Task API creation remains conservative
+#### Scenario: New task starts with unknown intake state
 - **WHEN** a client creates a task through `POST /api/tasks`
-- **THEN** the initial persisted `TaskState` remains `status: "created"`, `phase: "intake"`, `task_type: "unknown"`, and `difficulty.level: "L0"` until Runtime intake classification runs
+- **THEN** the initial persisted `TaskState` has `status: "created"`, `phase: "intake"`, `task_type: "unknown"`, and `difficulty.level: "L0"`
 
-### Requirement: Intake classification output is structured
-The backend SHALL represent Main Agent intake classification as a structured object that can be validated before it is applied to `TaskState`.
+### Requirement: Runtime starts without standalone intake classification
+The backend SHALL start Main Agent orchestration for a newly created task without first obtaining a separate structured intake classification model output.
 
-#### Scenario: Valid classification includes required state fields
-- **WHEN** the Main Agent returns an intake classification decision
-- **THEN** the decision contains a normalized goal, task type, difficulty level, difficulty reasons, difficulty signals, test requirement, formal requirement, repair-loop requirement, and clarification flag
+#### Scenario: Created task can enter tool-loop orchestration
+- **WHEN** Runtime starts execution for a task with `status` equal to `created`, `phase` equal to `intake`, `task_type` equal to `unknown`, and `difficulty.level` equal to `L0`
+- **THEN** Runtime starts the Main Agent tool-loop orchestration directly
+- **AND** no standalone intake model call or structured classification object is required before the first orchestration turn
 
-#### Scenario: Invalid classification is rejected
-- **WHEN** the Main Agent returns an intake classification decision with an invalid task type, invalid difficulty level, or missing required difficulty signals
-- **THEN** Runtime rejects the decision and does not update the task state from that decision
+### Requirement: Worker dispatch still requires prepared state
+The backend SHALL prevent worker side effects until the task is prepared for worker dispatch or the selected domain tool can prepare it deterministically.
 
-### Requirement: Runtime applies validated classification to TaskState
-The backend SHALL persist validated intake classification results to the current task state.
+#### Scenario: Direct worker call for unprepared task is rejected
+- **WHEN** a PLC worker call is proposed for a task whose `status` is `created`, `phase` is `intake`, or `task_type` is `unknown`
+- **THEN** Scheduler Guard rejects the worker call
+- **AND** no worker job, worker event, artifact, or task mutation is created by that rejected call
 
-#### Scenario: Classified task moves to planning
-- **WHEN** Runtime applies a valid classification decision that does not require clarification
-- **THEN** the persisted `TaskState` contains the normalized goal, task type, difficulty profile, and gate requirements from the validated decision
-- **AND** the task has `status` equal to `running` and `phase` equal to `planning`
+#### Scenario: Domain tool prepares created task before worker dispatch
+- **WHEN** the default tool loop calls a configured PLC/domain MCP tool for a newly created intake task
+- **THEN** the backend prepares the task context with runnable `status`, `phase`, `task_type`, and `normalized_goal`
+- **AND** it emits an observable `task.updated` event before worker lifecycle events
 
-#### Scenario: Classification updates task timestamp
-- **WHEN** Runtime applies a valid classification decision
-- **THEN** the persisted `TaskState.updated_at` value is advanced
+### Requirement: Clarification uses explicit tools
+The backend SHALL pause task execution for missing information through explicit tool/service calls rather than a structured intake classification output.
 
-### Requirement: Runtime elevates safety-critical gates
-The backend MUST enforce deterministic minimum difficulty and gate requirements for safety-critical PLC tasks regardless of the Main Agent's requested values.
-
-#### Scenario: L2 or higher task requires tests
-- **WHEN** a classification decision has `difficulty.level` equal to `L2`, `L3`, or `L4`
-- **THEN** the persisted task has `gates.test_required` equal to true and `difficulty.requires_test` equal to true
-
-#### Scenario: Emergency stop requires formal verification
-- **WHEN** a classification decision has `difficulty.signals.has_emergency_stop` equal to true
-- **THEN** the persisted task has difficulty at least `L3`, `gates.test_required` equal to true, and `gates.formal_required` equal to true
-
-#### Scenario: Interlock requires formal verification
-- **WHEN** a classification decision has `difficulty.signals.has_interlock` equal to true
-- **THEN** the persisted task has difficulty at least `L3`, `gates.test_required` equal to true, and `gates.formal_required` equal to true
-
-#### Scenario: Fault latching requires formal verification
-- **WHEN** a classification decision has `difficulty.signals.has_fault_latching` equal to true
-- **THEN** the persisted task has difficulty at least `L3`, `gates.test_required` equal to true, and `gates.formal_required` equal to true
-
-#### Scenario: Mode switching or state machine requires formal verification
-- **WHEN** a classification decision has `difficulty.signals.has_mode_switching` equal to true or `difficulty.signals.has_state_machine` equal to true
-- **THEN** the persisted task has difficulty at least `L3`, `gates.test_required` equal to true, and `gates.formal_required` equal to true
-
-### Requirement: Clarification-required classification pauses worker execution
-The backend SHALL pause task execution and ask for clarification when intake classification determines that the requirement is incomplete.
-
-#### Scenario: Classification asks user for missing information
-- **WHEN** Runtime applies a classification decision with `need_clarification` equal to true and at least one clarification question
+#### Scenario: Clarification request pauses task
+- **WHEN** the Main Agent scripted runner or runtime service requests clarification with at least one required question
 - **THEN** the persisted task has `status` equal to `waiting_user`, `phase` equal to `clarifying`, and open unresolved clarification questions
-- **AND** Runtime does not create a PLC worker job for that task
+- **AND** no PLC worker job is created by that clarification path
 
-#### Scenario: Clarification decision without questions is rejected
-- **WHEN** Runtime receives a classification decision with `need_clarification` equal to true and no clarification questions
-- **THEN** Runtime rejects the decision and does not update the task state from that decision
-
-### Requirement: Intake classification is observable
-The backend SHALL record observable events when Runtime runs and applies intake classification.
-
-#### Scenario: Classification emits Main Agent decision event
-- **WHEN** Runtime receives an intake classification decision from the Main Agent
-- **THEN** the task event log contains a `main_agent.decision` event summarizing the classification decision
-
-#### Scenario: Classification state change emits task update event
-- **WHEN** Runtime applies a classification decision to `TaskState`
-- **THEN** the task event log contains a `task.updated` event correlated with the classification update
-
-#### Scenario: Clarification emits waiting-user event
-- **WHEN** Runtime applies a classification decision that moves the task to `waiting_user`
-- **THEN** the task event log contains a `task.waiting_user` event identifying the open clarification questions
+#### Scenario: Clarification without questions is rejected
+- **WHEN** clarification is requested without any question
+- **THEN** Runtime rejects the request
+- **AND** does not update task state from that invalid request

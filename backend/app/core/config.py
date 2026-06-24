@@ -134,11 +134,8 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_main_agent_provider(cls, value: str) -> str:
         normalized = value.lower()
-        if normalized not in {"openai_compatible", "legacy_openai_agents"}:
-            raise ValueError(
-                "main_agent_provider must be 'openai_compatible' or "
-                "'legacy_openai_agents'"
-            )
+        if normalized != "openai_compatible":
+            raise ValueError("main_agent_provider must be 'openai_compatible'")
         return normalized
 
     @field_validator("agent_execution_mode")

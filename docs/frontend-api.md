@@ -166,7 +166,7 @@ GET /api/tasks/{task_id}
 | --- | --- |
 | `status` | 任务顶层状态：`created`、`running`、`waiting_user`、`succeeded`、`partial_failed`、`failed`、`cancelled` |
 | `phase` | 当前执行阶段，可用于时间线和加载状态文案 |
-| `task_type` | Main Agent 通过 `update_plan` 写入或后端规范化后的任务类型，可用于 badge 或路由显示 |
+| `task_type` | Main Agent tool loop 或后端 domain tool 准备路径写入/规范化后的任务类型，可用于 badge 或路由显示 |
 | `difficulty` | 当前难度、原因，以及是否要求 test / formal 等信号；它可能来自初始默认值、Main Agent 计划更新和后端策略提升 |
 | `gates` | test / formal / regression 要求，以及通过或阻塞状态 |
 | `current_artifacts` | 当前代码、最新报告、最终报告和所有 Artifact ID 的引用 |
@@ -288,9 +288,9 @@ data: {"schema_version":"router.v1","event_id":"event_worker_started_001","task_
 | 事件分组 | 示例 | UI 用途 |
 | --- | --- | --- |
 | 任务生命周期 | `task.created`、`task.waiting_user`、`task.succeeded`、`task.partial_failed`、`task.failed`、`task.cancelled` | 顶层状态和终态展示 |
-| Main Agent 生命周期 | `main_agent.started`、`main_agent.turn_started`、`main_agent.completed` | 展示主 Agent 已启动、正在进行第几轮、已完成 |
-| Main Agent 公开发言 | `main_agent.message` | 渲染到聊天区或步骤说明区；这是公开摘要，不是隐藏 chain-of-thought |
-| Main Agent 计划和决策 | `main_agent.plan_updated`、`main_agent.clarification_requested`、`main_agent.tool_called`、`main_agent.tool_result` | 展示计划、澄清请求、工具调用意图和工具结果 |
+| Main Agent 生命周期 | `agent.started`、`agent.turn_started`、`agent.completed` | 展示主 Agent 已启动、正在进行第几轮、已完成 |
+| Main Agent 公开发言 | `agent.message` | 渲染到聊天区或步骤说明区；这是公开摘要，不是隐藏 chain-of-thought |
+| Main Agent 计划和决策 | `agent.plan_updated`、`agent.clarification_requested`、`agent.tool_called`、`agent.tool_result` | 展示计划、澄清请求、工具调用意图和工具结果 |
 | Worker 生命周期 | `worker.started`、`worker.completed`、`worker.error`、`worker.timeout` | Agent Card 和 worker 时间线 |
 | Artifact | `artifact.created`、`artifact.available`、`artifact.failed` | 刷新 Artifact Panel |
 | Quality Gate | `gate.started`、`gate.passed`、`gate.failed` | 验证状态 |
@@ -302,63 +302,65 @@ data: {"schema_version":"router.v1","event_id":"event_worker_started_001","task_
 
 ```text
 task.created
-main_agent.started
-main_agent.turn_started
-main_agent.message
-main_agent.tool_called        update_plan
-main_agent.plan_updated
-main_agent.tool_result        update_plan
-main_agent.turn_started
-main_agent.message
-main_agent.tool_called        call_plc_dev
+agent.started
+agent.turn_started
+agent.message
+agent.tool_called        list_files
+agent.tool_result        list_files
+agent.turn_started
+agent.message
+agent.tool_called        call_mcp_tool
+agent.tool_called        call_plc_dev
 worker.started
 artifact.created
 worker.completed
-main_agent.tool_result        call_plc_dev
+agent.tool_result        call_plc_dev
+agent.tool_result        call_mcp_tool
 ...
-main_agent.tool_called        run_quality_gate
 gate.started
 gate.passed
-main_agent.tool_result        run_quality_gate
-main_agent.tool_called        write_final_report
-main_agent.completed          final_report_artifact_id, main_agent_log_artifact_id
-main_agent.tool_result        write_final_report
-main_agent.tool_called        finish_task
+agent.final_response
+agent.completed          final_report_artifact_id, main_agent_log_artifact_id
 task.succeeded
-main_agent.tool_result        finish_task
 ```
 
 常用 Main Agent event payload：
 
 | Event type | 关键 payload 字段 | 前端建议 |
 | --- | --- | --- |
-| `main_agent.started` | `task_id`、`main_agent_run_id`、`phase`、`status`；trace 字段在事件关联信息和 `TaskState.trace` 中 | 初始化 Agent Card 和 trace 关联 |
-| `main_agent.turn_started` | `task_id`、`turn_index`、`phase` | 可作为时间线分隔点；通常不需要在聊天区单独展示 |
-| `main_agent.message` | `task_id`、`turn_index`、`phase`、`content` | 渲染为 Main Agent 的公开消息 |
-| `main_agent.plan_updated` | `task_id`、`plan` | 更新计划面板；也可作为时间线事件 |
-| `main_agent.tool_called` | `task_id`、`turn_index`、`tool_name`、`rationale_summary`、`arguments`、`input_artifact_ids` | 展示“正在调用某工具/worker”；参数已清洗但仍建议做折叠展示 |
-| `main_agent.tool_result` | `task_id`、`turn_index`、`tool_name`、`status`、`summary`、`artifact_ids`、`failure_ids`、`worker_job_id`、`worker_type`、`next_recommended_action` | 更新步骤状态；`status=failed` 或 `rejected` 不一定是任务失败，Main Agent 可能会在下一轮修正 |
-| `main_agent.completed` | `task_id`、`main_agent_run_id`、`final_task_status`、`summary`、`final_report_artifact_id`、`main_agent_log_artifact_id` | 读取最终报告；注意终态任务事件可能紧随其后才到达 |
+| `agent.started` | `task_id`、`main_agent_run_id`、`phase`、`status`；trace 字段在事件关联信息和 `TaskState.trace` 中 | 初始化 Agent Card 和 trace 关联 |
+| `agent.turn_started` | `task_id`、`turn_index`、`phase` | 可作为时间线分隔点；通常不需要在聊天区单独展示 |
+| `agent.message` | `task_id`、`turn_index`、`phase`、`content` | 渲染为 Main Agent 的公开消息 |
+| `agent.plan_updated` | `task_id`、`plan` | 更新计划面板；也可作为时间线事件 |
+| `agent.tool_called` | `task_id`、`turn_index`、`tool_name`、`rationale_summary`、`arguments`、`input_artifact_ids` | 展示“正在调用某工具/worker”；参数已清洗但仍建议做折叠展示 |
+| `agent.tool_result` | `task_id`、`turn_index`、`tool_name`、`status`、`summary`、`artifact_ids`、`failure_ids`、`worker_job_id`、`worker_type`、`next_recommended_action` | 更新步骤状态；`status=failed` 或 `rejected` 不一定是任务失败，Main Agent 可能会在下一轮修正 |
+| `agent.completed` | `task_id`、`main_agent_run_id`、`final_task_status`、`summary`、`final_report_artifact_id`、`main_agent_log_artifact_id` | 读取最终报告；注意终态任务事件可能紧随其后才到达 |
 
-`write_final_report` 写入的 `final_report` 和 `main_agent_log` 不要求额外产生 `artifact.created` 事件。前端应优先从 `main_agent.completed.payload.final_report_artifact_id` 或刷新后的 Artifact 列表中发现最终报告。
+Runtime finalization 写入的 `final_report` 和 `main_agent_log` 不要求额外产生 `artifact.created` 事件。前端应优先从 `agent.completed.payload.final_report_artifact_id` 或刷新后的 Artifact 列表中发现最终报告。
 
 Main Agent 工具名是后端实现细节，但当前前端可用于展示的常见值包括：
 
 ```text
 update_plan
 request_clarification
+list_files
+read_file
+write_file
+apply_patch
+exec_command
+git_status
+read_artifact
+write_artifact
+call_mcp_tool
 call_plc_dev
 call_plc_test
 call_plc_formal
 call_plc_repair
-run_parallel_workers
-read_artifact
 run_quality_gate
 write_final_report
-finish_task
 ```
 
-前端应把工具结果当作“步骤状态”，不要把 `main_agent.tool_result.payload.details` 当作稳定 UI 契约。稳定字段优先使用上表列出的 `summary`、`artifact_ids`、`failure_ids`、`worker_job_id`、`worker_type` 和 `status`。
+前端应把工具结果当作“步骤状态”，不要把 `agent.tool_result.payload.details` 当作稳定 UI 契约。稳定字段优先使用上表列出的 `summary`、`artifact_ids`、`failure_ids`、`worker_job_id`、`worker_type` 和 `status`。
 
 ### 浏览器 EventSource
 
@@ -366,13 +368,13 @@ finish_task
 const source = new EventSource(`${baseUrl}${eventsUrl}`);
 let lastSeq = 0;
 
-source.addEventListener("main_agent.message", (message) => {
+source.addEventListener("agent.message", (message) => {
   const event = JSON.parse(message.data);
   lastSeq = Number(message.lastEventId || event.seq);
   renderAgentMessage(event.payload.content);
 });
 
-source.addEventListener("main_agent.tool_called", (message) => {
+source.addEventListener("agent.tool_called", (message) => {
   const event = JSON.parse(message.data);
   lastSeq = Number(message.lastEventId || event.seq);
   markStepRunning({
@@ -382,7 +384,7 @@ source.addEventListener("main_agent.tool_called", (message) => {
   });
 });
 
-source.addEventListener("main_agent.tool_result", (message) => {
+source.addEventListener("agent.tool_result", (message) => {
   const event = JSON.parse(message.data);
   lastSeq = Number(message.lastEventId || event.seq);
   markStepFinished({
@@ -393,7 +395,7 @@ source.addEventListener("main_agent.tool_result", (message) => {
   });
 });
 
-source.addEventListener("main_agent.completed", (message) => {
+source.addEventListener("agent.completed", (message) => {
   const event = JSON.parse(message.data);
   lastSeq = Number(message.lastEventId || event.seq);
   queueFinalReportFetch(event.payload.final_report_artifact_id);
@@ -539,7 +541,7 @@ Artifact Panel 渲染建议：
 
 - `TaskState.current_artifacts.final_report`
 - Artifact 列表中 `type` 为 `final_report` 的条目
-- `main_agent.completed` 事件 payload 中的 `final_report_artifact_id`
+- `agent.completed` 事件 payload 中的 `final_report_artifact_id`
 
 然后读取内容：
 
@@ -547,7 +549,7 @@ Artifact Panel 渲染建议：
 GET /api/artifacts/{final_report_artifact_id}
 ```
 
-最终报告由 Main Agent 通过 `write_final_report` 工具先写入 Artifact，然后再通过 `finish_task` 申请终态状态变更。报告优先收口路径上通常会先看到 `main_agent.completed`，随后看到 `task.succeeded`、`task.partial_failed` 或 `task.failed` 等终态事件。
+最终报告由 runtime finalization 写入 Artifact，并在同一收口路径中产生 `agent.completed`。随后通常会看到 `task.succeeded`、`task.partial_failed` 或 `task.failed` 等终态事件。
 
 最终报告内容是已完成任务页面的推荐主数据源。当前内容是 JSON payload，顶层字段包括：
 

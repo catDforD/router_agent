@@ -5,7 +5,7 @@
       "title": "Simple ST code explanation",
       "tags": ["qa"],
       "message": "解释下面这段 ST 电机启停代码的行为和风险点。",
-      "scripted_classification": {
+      "scripted_plan": {
         "task_type": "qa",
         "difficulty_level": "L1",
         "difficulty_score": 0.20,
@@ -17,7 +17,6 @@
       "scripted_sequence": ["finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L1",
         "worker_sequence": [],
         "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request", "gate_report", "final_report", "main_agent_log"],
@@ -33,7 +32,6 @@
       "scripted_sequence": ["dev", "test", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "requirements_ir", "io_contract", "plc_code", "test_report", "gate_report", "final_report", "main_agent_log"],
@@ -46,7 +44,7 @@
       "title": "Motor start stop with emergency stop",
       "tags": ["emergency_stop"],
       "message": "帮我实现带急停的电机启停逻辑，急停必须立即断开输出。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_score": 0.75,
         "difficulty_reasons": ["Emergency stop requires formal verification."],
@@ -56,7 +54,6 @@
       "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report", "main_agent_log"],
@@ -69,7 +66,7 @@
       "title": "Fault latch and reset",
       "tags": ["fault_latch"],
       "message": "实现故障锁存和复位逻辑，故障后必须保持停机直到复位。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_reasons": ["Fault latching is safety critical."],
         "difficulty_signals": {"has_fault_latching": true, "has_safety_constraints": true},
@@ -78,7 +75,6 @@
       "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
@@ -91,7 +87,7 @@
       "title": "Dual motor interlock",
       "tags": ["interlock"],
       "message": "实现双电机互锁控制，两个电机不能同时运行。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_reasons": ["Mutual exclusion requires formal verification."],
         "difficulty_signals": {"has_interlock": true, "has_safety_constraints": true},
@@ -100,7 +96,6 @@
       "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
@@ -113,7 +108,7 @@
       "title": "Auto manual mode switching",
       "tags": ["mode_switch"],
       "message": "实现自动和手动模式切换，模式切换时输出不能抖动。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_reasons": ["Mode switching needs formal safety checks."],
         "difficulty_signals": {"has_mode_switching": true, "has_safety_constraints": true},
@@ -122,7 +117,6 @@
       "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
@@ -135,7 +129,7 @@
       "title": "Conveyor sequence control",
       "tags": ["sequence"],
       "message": "实现三段输送线顺序启动和顺序停止控制，包含状态机。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_reasons": ["State machine sequencing needs formal checks."],
         "difficulty_signals": {"has_state_machine": true, "multi_module": true, "has_safety_constraints": true},
@@ -144,7 +138,6 @@
       "scripted_sequence": ["dev", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "gate_report", "final_report"],
@@ -157,14 +150,13 @@
       "title": "Timer based control",
       "tags": ["timer"],
       "message": "实现启动后延时 5 秒打开输出的定时器控制逻辑。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_reasons": ["Timer logic needs tests."],
         "difficulty_signals": {"has_timing_logic": true}
       },
       "scripted_sequence": ["dev", "test", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
@@ -177,13 +169,12 @@
       "title": "Counter based control",
       "tags": ["counter"],
       "message": "实现计数到 10 次后触发报警并可复位的计数器控制逻辑。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_reasons": ["Counter logic needs tests."]
       },
       "scripted_sequence": ["dev", "test", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
@@ -196,7 +187,7 @@
       "title": "Incomplete request asks for clarification",
       "tags": ["clarification"],
       "message": "帮我写一段控制逻辑。",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L1",
         "difficulty_score": 0.25,
         "difficulty_reasons": ["I/O and platform details are missing."],
@@ -215,11 +206,10 @@
       "scripted_sequence": [],
       "expected": {
         "final_status": ["waiting_user"],
-        "min_difficulty": "L1",
         "worker_sequence": [],
         "forbidden_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request"],
-        "required_event_subsequence": ["task.created", "agent.started", "agent.decision", "agent.clarification_requested", "task.waiting_user"],
+        "required_event_subsequence": ["task.created", "agent.started", "agent.tool_called", "agent.clarification_requested", "task.waiting_user", "agent.tool_result"],
         "invariants": ["no_worker_for_clarification"]
       }
     },
@@ -228,7 +218,7 @@
       "title": "Modify existing PLC code",
       "tags": ["modify_existing_code"],
       "message": "基于已有 ST 代码增加故障复位输入，并保持原有启动停止行为。",
-      "scripted_classification": {
+      "scripted_plan": {
         "task_type": "modify_existing_code",
         "difficulty_reasons": ["Existing code modification needs regression tests."],
         "difficulty_signals": {"has_existing_code": true}
@@ -236,7 +226,6 @@
       "scripted_sequence": ["dev", "test", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test"],
         "required_workers": ["plc-dev", "plc-test"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "gate_report", "final_report"],
@@ -250,13 +239,12 @@
       "tags": ["test_failure_repair"],
       "message": "实现急停逻辑，并在测试失败后自动修复再回归测试。",
       "mock_scenario": "test_failed_then_repair_pass",
-      "scripted_classification": {
+      "scripted_plan": {
         "requires_repair_loop": true
       },
       "scripted_sequence": ["dev", "test", "repair", "test", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test", "plc-repair", "plc-test"],
         "required_workers": ["plc-dev", "plc-test", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
@@ -271,7 +259,7 @@
       "tags": ["formal_counterexample_repair"],
       "message": "实现带急停的逻辑，如果形式化验证给出反例，需要修复并重新验证。",
       "mock_scenario": "formal_failed_then_repair_pass",
-      "scripted_classification": {
+      "scripted_plan": {
         "difficulty_level": "L3",
         "difficulty_reasons": ["Formal counterexample repair is safety critical."],
         "difficulty_signals": {"has_emergency_stop": true, "has_safety_constraints": true},
@@ -281,7 +269,6 @@
       "scripted_sequence": ["dev", "test", "formal", "repair", "test", "formal", "finalizing", "gate"],
       "expected": {
         "final_status": ["succeeded"],
-        "min_difficulty": "L3",
         "worker_sequence": ["plc-dev", "plc-test", "plc-formal", "plc-repair", "plc-test", "plc-formal"],
         "required_workers": ["plc-dev", "plc-test", "plc-formal", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "formal_report", "counterexample", "patch", "repair_summary", "gate_report", "final_report"],
@@ -296,14 +283,13 @@
       "tags": ["repair_budget_exhausted"],
       "message": "实现急停逻辑，但测试持续失败时最多修复三轮并给出部分失败报告。",
       "mock_scenario": "test_failed_repair_exhausted",
-      "scripted_classification": {
+      "scripted_plan": {
         "requires_repair_loop": true
       },
       "scripted_sequence": ["dev", "test", "repair", "test", "repair", "test", "repair", "test", "repair_limit_rejected", "finalizing", "gate"],
       "scripted_final_status": "partial_failed",
       "expected": {
         "final_status": ["partial_failed"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev", "plc-test", "plc-repair", "plc-test", "plc-repair", "plc-test", "plc-repair", "plc-test"],
         "required_workers": ["plc-dev", "plc-test", "plc-repair"],
         "required_artifacts": ["raw_user_request", "plc_code", "test_report", "failing_trace", "patch", "repair_summary", "gate_report", "final_report"],
@@ -323,7 +309,6 @@
       "scripted_final_status": "running",
       "expected": {
         "final_status": ["running"],
-        "min_difficulty": "L2",
         "worker_sequence": ["plc-dev"],
         "required_workers": ["plc-dev"],
         "forbidden_workers": ["plc-test", "plc-formal", "plc-repair"],

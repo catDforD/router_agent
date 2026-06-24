@@ -15,10 +15,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.agents.main_agent import MainAgentService, episode_output_from_task  # noqa: E402
-from app.agents.output_schema import (  # noqa: E402
-    IntakeClassificationOutput,
-    MainAgentPlanStep,
-)
+from app.agents.output_schema import MainAgentPlanStep  # noqa: E402
 from app.agents.tools import AgentToolContext, AgentToolService  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.database import session_scope  # noqa: E402
@@ -46,19 +43,6 @@ class LocalMockMainAgentRunner:
         self.scenario = scenario
         self.clarification = clarification
 
-    def run_intake(
-        self,
-        *,
-        agent: Any,
-        input_text: str,
-        context: AgentToolContext,
-        max_turns: int,
-        run_config: Any,
-    ) -> IntakeClassificationOutput:
-        return _clarification_classification() if self.clarification else _classification(
-            formal=self.scenario == SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS
-        )
-
     def run_orchestration(
         self,
         *,
@@ -71,6 +55,37 @@ class LocalMockMainAgentRunner:
         task_id = run_config.group_id
         tools = AgentToolService(context)
         plan: list[MainAgentPlanStep] = []
+        if self.clarification:
+            result = tools.request_clarification(
+                task_id,
+                questions=[
+                    {
+                        "question": "Which PLC platform and I/O names should be used?",
+                        "reason": "The worker needs concrete target details.",
+                        "required": True,
+                    }
+                ],
+                rationale_summary="Local mock runner needs user clarification.",
+            )
+            task = TaskRepository(context.session).get_task(task_id)
+            return episode_output_from_task(
+                task,
+                main_agent_run_id=task.trace.latest_main_agent_run_id or "not-started",
+                summary=result.summary,
+            )
+
+        formal = self.scenario == SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS
+        plan_result = tools.update_plan(
+            task_id,
+            summary="Local mock runner prepared task for worker dispatch.",
+            plan=[{"order": 1, "action": "run local mock worker sequence"}],
+            normalized_goal="Create motor control PLC logic with validation.",
+            task_type="new_plc_development",
+            requires_test=True,
+            requires_formal=formal,
+        )
+        if plan_result.status != "applied":
+            raise RuntimeError(plan_result.model_dump_json(indent=2))
         for index, action in enumerate(_sequence_for(self.scenario), start=1):
             result = _run_tool(tools, task_id, action)
             plan.append(
@@ -121,7 +136,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--clarification",
         action="store_true",
-        help="Stop after intake with a required clarification question.",
+        help="Stop after request_clarification with a required question.",
     )
     return parser.parse_args()
 
@@ -156,58 +171,12 @@ def main() -> None:
     print(output.model_dump_json(indent=2))
 
 
-def _classification(*, formal: bool) -> IntakeClassificationOutput:
-    return IntakeClassificationOutput(
-        normalized_goal="Create motor control PLC logic with validation.",
-        task_type="new_plc_development",
-        difficulty_level="L3" if formal else "L2",
-        difficulty_score=0.65 if formal else 0.5,
-        difficulty_confidence=0.85,
-        difficulty_reasons=[
-            (
-                "Safety constraints require formal verification."
-                if formal
-                else "Development requires test validation."
-            )
-        ],
-        difficulty_signals=_signals(has_safety_constraints=formal, has_io_points=True),
-        requires_test=True,
-        requires_formal=formal,
-        requires_repair_loop=False,
-        need_clarification=False,
-        clarification_questions=[],
-    )
-
-
-def _clarification_classification() -> IntakeClassificationOutput:
-    return IntakeClassificationOutput(
-        normalized_goal="Create PLC logic after target details are confirmed.",
-        task_type="new_plc_development",
-        difficulty_level="L1",
-        difficulty_score=0.2,
-        difficulty_confidence=0.75,
-        difficulty_reasons=["The request is missing required target details."],
-        difficulty_signals=_signals(requirement_incomplete=True),
-        requires_test=False,
-        requires_formal=False,
-        requires_repair_loop=False,
-        need_clarification=True,
-        clarification_questions=[
-            {
-                "question": "Which PLC platform and I/O names should be used?",
-                "reason": "The worker needs concrete target details.",
-                "required": True,
-            }
-        ],
-    )
-
-
 def _sequence_for(scenario: str) -> list[str]:
     if scenario == SCENARIO_TEST_FAILED_THEN_REPAIR_PASS:
-        return ["dev", "test", "repair", "test", "gate", "finish"]
+        return ["dev", "test", "repair", "test", "gate"]
     if scenario == SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS:
-        return ["dev", "test", "formal", "repair", "test", "formal", "gate", "finish"]
-    return ["dev", "test", "gate", "finish"]
+        return ["dev", "test", "formal", "repair", "test", "formal", "gate"]
+    return ["dev", "test", "gate"]
 
 
 def _run_tool(tools: AgentToolService, task_id: str, action: str) -> Any:
@@ -221,27 +190,7 @@ def _run_tool(tools: AgentToolService, task_id: str, action: str) -> Any:
         return tools.call_plc_repair(task_id)
     if action == "gate":
         return tools.run_quality_gate(task_id)
-    if action == "finish":
-        return tools.finish_task(task_id)
     raise ValueError(f"unsupported action: {action}")
-
-
-def _signals(**updates: bool) -> dict[str, bool]:
-    values = {
-        "has_existing_code": False,
-        "has_io_points": False,
-        "has_timing_logic": False,
-        "has_state_machine": False,
-        "has_safety_constraints": False,
-        "has_emergency_stop": False,
-        "has_interlock": False,
-        "has_fault_latching": False,
-        "has_mode_switching": False,
-        "multi_module": False,
-        "requirement_incomplete": False,
-    }
-    values.update(updates)
-    return values
 
 
 if __name__ == "__main__":
