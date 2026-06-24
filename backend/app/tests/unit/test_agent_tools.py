@@ -33,6 +33,8 @@ from app.models.router_schema import (
     WorkerType,
 )
 from app.repositories.task_repo import TaskRepository
+from app.repositories.worker_job_repo import WorkerJobRepository
+from app.mcp.mock_worker import run_mock_worker
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 from app.workers.worker_input_builder import (
@@ -216,6 +218,30 @@ def create_requirements_and_code(
     )
 
 
+def create_failed_test_report(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+    code: ArtifactRef,
+) -> ArtifactRef:
+    artifact_store = store(db_session, tmp_path)
+    report = artifact_store.write_artifact_content(
+        ArtifactContentWrite(
+            task_id=task.task_id,
+            artifact_type=ArtifactType.TEST_REPORT,
+            version=1,
+            name="test_report_failed.json",
+            content={"status": "failed", "failed": 1},
+            summary="Failed test report for agent tool test.",
+            created_by=ArtifactCreator(type=ArtifactCreatorType.RUNTIME),
+            parent_artifact_ids=(code.artifact_id,),
+            metadata={"test_metadata": {"status": "failed", "total": 1, "failed": 1}},
+            mime_type="application/json",
+        )
+    ).artifact
+    return artifact_store.get_artifact_ref(report.artifact_id)
+
+
 def create_text_artifact(
     db_session: Session,
     tmp_path: Path,
@@ -344,6 +370,86 @@ def test_call_plc_dev_invokes_mock_worker_and_returns_compact_refs(
     assert updated.runtime_limits.active_parallel_workers == 0
     assert updated.runtime_limits.worker_calls_used == 1
     assert result.worker_job_id in updated.completed_worker_job_ids
+
+
+def test_call_plc_dev_propagates_worker_config_into_worker_job_input(
+    db_session: Session,
+    tmp_path: Path,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session)
+    create_raw_artifact(db_session, tmp_path, task)
+
+    result = service.call_plc_dev(
+        task.task_id,
+        worker_config={
+            "target_language": "FBD",
+            "compiler_type": "matiec",
+            "llm": {
+                "model": "deepseek-worker",
+                "base_url": "https://deepseek.example/v1",
+                "temperature": 0.2,
+                "timeout_seconds": 30,
+                "max_retries": 2,
+            },
+        },
+    )
+    job = WorkerJobRepository(db_session).get_job(result.worker_job_id)
+
+    assert result.status == "applied"
+    assert job.input.worker_config is not None
+    assert job.input.worker_config.target_language == "FBD"
+    assert job.input.worker_config.compiler_type == "matiec"
+    assert job.input.worker_config.llm is not None
+    assert job.input.worker_config.llm.model == "deepseek-worker"
+    assert job.input.worker_config.llm.timeout_seconds == 30
+
+
+def test_worker_input_builder_uses_string_failure_sources_for_repair_defaults(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    _requirements, code = create_requirements_and_code(db_session, tmp_path, task)
+    failed_report = create_failed_test_report(db_session, tmp_path, task, code)
+    current = TaskRepository(db_session).get_task(task.task_id)
+    current = current.model_copy(
+        update={
+            "failures": [blocking_failure(current, failed_report)],
+        }
+    )
+    current = TaskRepository(db_session).update_task_state(current)
+
+    worker_input = build_worker_input(current, WorkerType.PLC_REPAIR)
+
+    assert worker_input.worker_config is not None
+    assert worker_input.worker_config.repair_source == "test_failure"
+    assert worker_input.worker_config.repair_targets == ["test_failure"]
+    assert worker_input.worker_config.repair_failure_notes is not None
+    assert "failure-test-001" in worker_input.worker_config.repair_failure_notes
+
+
+def test_mock_plc_dev_uses_fbd_artifact_details_when_target_language_is_fbd(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    create_raw_artifact(db_session, tmp_path, task)
+    current = TaskRepository(db_session).get_task(task.task_id)
+    worker_input = build_worker_input(
+        current,
+        WorkerType.PLC_DEV,
+        worker_config={"target_language": "FBD"},
+    )
+
+    output = run_mock_worker(worker_input)
+    code_write = next(
+        write for write in output.artifact_writes if write.artifact_type == ArtifactType.PLC_CODE
+    )
+
+    assert code_write.name == "plc_code_v1.fbd"
+    assert code_write.mime_type == "application/xml"
+    assert code_write.summary == "Mock FBD implementation."
 
 
 def test_worker_tool_rationale_is_observable_without_changing_worker_input(

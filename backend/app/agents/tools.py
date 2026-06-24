@@ -53,11 +53,18 @@ from app.models.router_schema import (
     TaskStatus,
     TaskType,
     TraceContext,
+    WorkerCompilerType,
     WorkerExecutionStatus,
+    WorkerConfig,
+    WorkerFuzzMethod,
     WorkerInput,
     WorkerJobRef,
     WorkerJobStatus,
     WorkerResult,
+    WorkerPipelineStage,
+    WorkerRepairSource,
+    WorkerRepairTarget,
+    WorkerTargetLanguage,
     WorkerType,
 )
 from app.repositories.artifact_repo import ArtifactRepository
@@ -203,6 +210,7 @@ class AgentToolResult(ToolBaseModel):
 class ParallelWorkerRequest:
     worker_type: str
     objective: str | None = None
+    worker_config: dict[str, Any] | None = None
 
 
 class AgentToolService:
@@ -506,6 +514,7 @@ class AgentToolService:
         *,
         objective: str | None = None,
         rationale_summary: str | None = None,
+        worker_config: dict[str, Any] | WorkerConfig | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_dev",
@@ -513,6 +522,7 @@ class AgentToolService:
             worker_type=WorkerType.PLC_DEV.value,
             objective=objective,
             rationale_summary=rationale_summary,
+            worker_config=worker_config,
         )
 
     def call_plc_test(
@@ -521,6 +531,7 @@ class AgentToolService:
         *,
         objective: str | None = None,
         rationale_summary: str | None = None,
+        worker_config: dict[str, Any] | WorkerConfig | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_test",
@@ -528,6 +539,7 @@ class AgentToolService:
             worker_type=WorkerType.PLC_TEST.value,
             objective=objective,
             rationale_summary=rationale_summary,
+            worker_config=worker_config,
         )
 
     def call_plc_formal(
@@ -536,6 +548,7 @@ class AgentToolService:
         *,
         objective: str | None = None,
         rationale_summary: str | None = None,
+        worker_config: dict[str, Any] | WorkerConfig | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_formal",
@@ -543,6 +556,7 @@ class AgentToolService:
             worker_type=WorkerType.PLC_FORMAL.value,
             objective=objective,
             rationale_summary=rationale_summary,
+            worker_config=worker_config,
         )
 
     def call_plc_repair(
@@ -551,6 +565,7 @@ class AgentToolService:
         *,
         objective: str | None = None,
         rationale_summary: str | None = None,
+        worker_config: dict[str, Any] | WorkerConfig | None = None,
     ) -> AgentToolResult:
         return self._call_worker_tool(
             tool_name="call_plc_repair",
@@ -558,6 +573,7 @@ class AgentToolService:
             worker_type=WorkerType.PLC_REPAIR.value,
             objective=objective,
             rationale_summary=rationale_summary,
+            worker_config=worker_config,
         )
 
     def run_parallel_workers(
@@ -590,6 +606,7 @@ class AgentToolService:
                     input_artifacts=artifacts,
                 )
             )
+        worker_configs = [request.worker_config for request in requests]
         self._record_tool_call(
             tool_name=tool_name,
             task_id=task_id,
@@ -598,6 +615,7 @@ class AgentToolService:
                 "task_id": task_id,
                 "workers": [request.worker_type for request in requests],
                 "objectives": [request.objective for request in requests],
+                "worker_configs": worker_configs,
             },
             input_artifacts=[
                 artifact
@@ -623,6 +641,7 @@ class AgentToolService:
                         objective=request.objective,
                         input_artifacts=artifacts,
                         trace_context=_trace_context_for_task(task),
+                        worker_config=request.worker_config,
                         metadata={"source": "main_agent_function_tools"},
                     )
                 )
@@ -894,6 +913,7 @@ class AgentToolService:
         worker_type: str,
         objective: str | None,
         rationale_summary: str | None,
+        worker_config: dict[str, Any] | WorkerConfig | None,
     ) -> AgentToolResult:
         task = self._get_task(task_id)
         proposed_artifacts = _proposed_worker_input_artifacts(task, worker_type)
@@ -905,6 +925,7 @@ class AgentToolService:
                 "task_id": task_id,
                 "worker_type": worker_type,
                 "objective": objective,
+                "worker_config": worker_config,
             },
             input_artifacts=proposed_artifacts,
         )
@@ -922,6 +943,7 @@ class AgentToolService:
                 objective=objective,
                 input_artifacts=proposed_artifacts,
                 trace_context=_trace_context_for_task(task),
+                worker_config=worker_config,
                 metadata={"source": "main_agent_function_tools"},
             )
         except WorkerInputBuildError as exc:
@@ -1225,6 +1247,7 @@ def call_plc_dev(
     task_id: str,
     objective: str | None = None,
     rationale_summary: str | None = None,
+    worker_config: dict[str, Any] | WorkerConfig | None = None,
 ) -> AgentToolResult:
     """Generate or update PLC implementation artifacts for a classified task."""
 
@@ -1232,6 +1255,7 @@ def call_plc_dev(
         task_id=task_id,
         objective=objective,
         rationale_summary=rationale_summary,
+        worker_config=worker_config,
     )
 
 
@@ -1241,6 +1265,7 @@ def call_plc_test(
     task_id: str,
     objective: str | None = None,
     rationale_summary: str | None = None,
+    worker_config: dict[str, Any] | WorkerConfig | None = None,
 ) -> AgentToolResult:
     """Run PLC test worker for the task's current code and requirements."""
 
@@ -1248,6 +1273,7 @@ def call_plc_test(
         task_id=task_id,
         objective=objective,
         rationale_summary=rationale_summary,
+        worker_config=worker_config,
     )
 
 
@@ -1257,6 +1283,7 @@ def call_plc_formal(
     task_id: str,
     objective: str | None = None,
     rationale_summary: str | None = None,
+    worker_config: dict[str, Any] | WorkerConfig | None = None,
 ) -> AgentToolResult:
     """Run formal verification worker for the current PLC code."""
 
@@ -1264,6 +1291,7 @@ def call_plc_formal(
         task_id=task_id,
         objective=objective,
         rationale_summary=rationale_summary,
+        worker_config=worker_config,
     )
 
 
@@ -1273,6 +1301,7 @@ def call_plc_repair(
     task_id: str,
     objective: str | None = None,
     rationale_summary: str | None = None,
+    worker_config: dict[str, Any] | WorkerConfig | None = None,
 ) -> AgentToolResult:
     """Run PLC repair worker using current code and latest failure evidence."""
 
@@ -1280,6 +1309,7 @@ def call_plc_repair(
         task_id=task_id,
         objective=objective,
         rationale_summary=rationale_summary,
+        worker_config=worker_config,
     )
 
 
@@ -1289,14 +1319,30 @@ def run_parallel_workers(
     task_id: str,
     workers: list[str],
     objectives: list[str] | None = None,
+    worker_configs: list[dict[str, Any] | None] | None = None,
     rationale_summary: str | None = None,
 ) -> AgentToolResult:
     """Dispatch a guarded parallel batch of non-repair PLC workers."""
+
+    if worker_configs is not None and len(worker_configs) != len(workers):
+        return AgentToolService(ctx.context)._rejected_result(
+            tool_name="run_parallel_workers",
+            task_id=task_id,
+            code="worker_config_count_mismatch",
+            message="worker_configs must match workers length",
+            details={
+                "workers": len(workers),
+                "worker_configs": len(worker_configs),
+            },
+        )
 
     requests = [
         ParallelWorkerRequest(
             worker_type=worker,
             objective=objectives[index] if objectives and index < len(objectives) else None,
+            worker_config=(
+                worker_configs[index] if worker_configs and index < len(worker_configs) else None
+            ),
         )
         for index, worker in enumerate(workers)
     ]
@@ -1452,6 +1498,10 @@ def get_main_agent_tool_specs() -> list[dict[str, Any]]:
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                "worker_configs": {
+                    "type": "array",
+                    "items": _worker_config_schema(),
+                },
                 "rationale_summary": {"type": "string"},
             },
             ["task_id", "workers"],
@@ -1533,11 +1583,27 @@ def call_main_agent_tool(
     if tool_name == "run_parallel_workers":
         workers = tool_arguments.pop("workers")
         objectives = tool_arguments.pop("objectives", None)
+        worker_configs = tool_arguments.pop("worker_configs", None)
+        if worker_configs is not None and len(worker_configs) != len(workers):
+            return service._rejected_result(
+                tool_name="run_parallel_workers",
+                task_id=tool_arguments["task_id"],
+                task=service._get_task(tool_arguments["task_id"]),
+                code="worker_config_count_mismatch",
+                message="worker_configs must match workers length",
+                details={
+                    "workers": len(workers),
+                    "worker_configs": len(worker_configs),
+                },
+            )
         return service.run_parallel_workers(
             requests=[
                 ParallelWorkerRequest(
                     worker_type=worker,
                     objective=objectives[index] if objectives and index < len(objectives) else None,
+                    worker_config=(
+                        worker_configs[index] if worker_configs and index < len(worker_configs) else None
+                    ),
                 )
                 for index, worker in enumerate(workers)
             ],
@@ -1624,9 +1690,71 @@ def _worker_tool_spec(name: str, description: str) -> dict[str, Any]:
             "task_id": {"type": "string"},
             "objective": {"type": "string"},
             "rationale_summary": {"type": "string"},
+            "worker_config": _worker_config_schema(),
         },
         ["task_id"],
     )
+
+
+def _worker_config_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "target_language": {
+                "type": "string",
+                "enum": [item.value for item in WorkerTargetLanguage],
+            },
+            "template": {"type": "string"},
+            "language_hint": {"type": "string"},
+            "enable_socratic_spec": {"type": "boolean"},
+            "socratic_skip": {"type": "boolean"},
+            "compiler_type": {
+                "type": "string",
+                "enum": [item.value for item in WorkerCompilerType],
+            },
+            "rpc_pipeline": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerPipelineStage],
+                },
+            },
+            "repair_source": {
+                "type": "string",
+                "enum": [item.value for item in WorkerRepairSource],
+            },
+            "repair_targets": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerRepairTarget],
+                },
+            },
+            "repair_failure_notes": {"type": "string"},
+            "properties": {
+                "type": ["object", "array", "string", "number", "boolean", "null"],
+            },
+            "natural_language_requirements": {"type": "string"},
+            "fuzz_method": {
+                "type": "string",
+                "enum": [item.value for item in WorkerFuzzMethod],
+            },
+            "case_count": {"type": "integer", "minimum": 1},
+            "enable_fuzz_test": {"type": "boolean"},
+            "llm": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string"},
+                    "base_url": {"type": "string"},
+                    "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+                    "timeout_seconds": {"type": "integer", "minimum": 1},
+                    "max_retries": {"type": "integer", "minimum": 0},
+                },
+                "additionalProperties": False,
+            },
+        },
+        "additionalProperties": False,
+    }
 
 
 def _clarification_question_from_tool(

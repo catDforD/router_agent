@@ -1027,6 +1027,16 @@
     PLC_REPAIR_MODE=mock
     ```
 
+    说明：
+    ```
+    旧设计文档里的二级路由 context 参数已收敛到 WorkerInput.worker_config。
+    其中 target_language / compiler_type / rpc_pipeline / repair_source / repair_targets /
+    repair_failure_notes / fuzz_method / case_count / enable_fuzz_test / properties /
+    natural_language_requirements，以及 worker 模拟用的 llm.model / base_url /
+    temperature / timeout_seconds / max_retries，都是 main agent 可以显式覆盖的配置入口。
+    WorkerContext 继续只放任务语义，不再混入执行参数。
+    ```
+
 19. **真实 plc-dev 接入测试**  
     目标：
     ```

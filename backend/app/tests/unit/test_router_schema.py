@@ -61,6 +61,44 @@ def test_worker_input_missing_task_id_is_rejected() -> None:
         WorkerInput.model_validate(payload)
 
 
+def test_worker_input_with_worker_config_parses() -> None:
+    payload = load_fixture("worker_input.plc_dev.valid.json")
+
+    worker_input = WorkerInput.model_validate(payload)
+
+    assert worker_input.worker_config is not None
+    assert worker_input.worker_config.target_language == "ST"
+    assert worker_input.worker_config.llm is not None
+    assert worker_input.worker_config.llm.model == "deepseek-worker"
+
+
+def test_worker_input_worker_config_reloads_with_null_fields() -> None:
+    payload = load_fixture("worker_input.plc_dev.valid.json")
+    payload["worker_config"].update(
+        {
+            "fuzz_method": None,
+            "case_count": None,
+            "enable_fuzz_test": None,
+            "properties": None,
+            "repair_source": None,
+            "repair_targets": None,
+        }
+    )
+
+    worker_input = WorkerInput.model_validate(payload)
+
+    assert worker_input.worker_config is not None
+    assert worker_input.worker_config.target_language == "ST"
+
+
+def test_worker_input_rejects_unsupported_non_null_worker_config_fields() -> None:
+    payload = load_fixture("worker_input.plc_dev.valid.json")
+    payload["worker_config"]["case_count"] = 10
+
+    with pytest.raises(ValidationError, match="not supported"):
+        WorkerInput.model_validate(payload)
+
+
 def test_worker_result_execution_status_and_outcome_status_are_distinct() -> None:
     worker_result = WorkerResult.model_validate(
         load_fixture("worker_result.test_failed.valid.json")

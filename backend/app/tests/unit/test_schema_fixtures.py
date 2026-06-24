@@ -9,6 +9,7 @@ from app.models.router_schema import (
     Artifact,
     EventType,
     RouterEvent,
+    WorkerConfig,
     TaskState,
     WorkerInput,
     WorkerResult,
@@ -87,6 +88,13 @@ def test_typescript_contract_mentions_core_pydantic_field_surface() -> None:
                 schema_id_name,
                 field_name,
             )
+
+
+def test_worker_config_parses_and_exports() -> None:
+    json_schema = build_json_schema(WorkerConfig, "worker_config")
+
+    assert "target_language" in json_schema["properties"]
+    assert "llm" in json_schema["properties"]
 
 
 def test_typescript_contract_mentions_main_agent_observability_events() -> None:

@@ -33,6 +33,7 @@ eval_report.md
 output/
 docs (2).zip
 docs/assets/
+docs/旧API路由总览与详细设计.md
 
 # Local configuration and secrets
 .env
