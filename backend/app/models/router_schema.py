@@ -192,6 +192,44 @@ class WorkerMode(str, Enum):
     EXPLAIN = "explain"
 
 
+class WorkerTargetLanguage(str, Enum):
+    ST = "ST"
+    SCL = "SCL"
+    FBD = "FBD"
+
+
+class WorkerCompilerType(str, Enum):
+    MATIEC = "matiec"
+    RUSTY = "rusty"
+
+
+class WorkerRepairSource(str, Enum):
+    COMPILE = "compile"
+    TEST_FAILURE = "test_failure"
+    FORMAL_VALIDATION_FAILURE = "formal_validation_failure"
+    MULTI = "multi"
+
+
+class WorkerRepairTarget(str, Enum):
+    COMPILE = "compile"
+    TEST_FAILURE = "test_failure"
+    FORMAL_VALIDATION_FAILURE = "formal_validation_failure"
+
+
+class WorkerFuzzMethod(str, Enum):
+    RANDOM = "random"
+    BOUNDARY = "boundary"
+    SCENARIO = "scenario"
+    DSE = "dse"
+    AFL = "afl"
+    LLM = "llm"
+
+
+class WorkerPipelineStage(str, Enum):
+    FUZZ = "fuzz"
+    FORMAL = "formal"
+
+
 class WorkerConstraintType(str, Enum):
     PLATFORM = "platform"
     LANGUAGE = "language"
@@ -647,6 +685,41 @@ class QualityRequirements(RouterBaseModel):
     must_use_minimal_patch: bool | None = None
 
 
+class WorkerLLMConfig(RouterBaseModel):
+    model: str | None = None
+    base_url: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    max_retries: int | None = Field(default=None, ge=0)
+
+
+class WorkerConfig(RouterBaseModel):
+    target_language: WorkerTargetLanguage | None = None
+    template: str | None = None
+    language_hint: str | None = None
+    enable_socratic_spec: bool | None = None
+    socratic_skip: bool | None = None
+    compiler_type: WorkerCompilerType | None = None
+    rpc_pipeline: list[WorkerPipelineStage] | None = None
+    repair_source: WorkerRepairSource | None = None
+    repair_targets: list[WorkerRepairTarget] | None = None
+    repair_failure_notes: str | None = None
+    properties: JsonValue | None = None
+    natural_language_requirements: str | None = None
+    fuzz_method: WorkerFuzzMethod | None = None
+    case_count: int | None = Field(default=None, ge=1)
+    enable_fuzz_test: bool | None = None
+    llm: WorkerLLMConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_worker_config_rules(self) -> WorkerConfig:
+        if self.rpc_pipeline is not None and len(set(self.rpc_pipeline)) != len(self.rpc_pipeline):
+            raise ValueError("rpc_pipeline must not contain duplicate stages")
+        if self.repair_targets is not None and len(set(self.repair_targets)) != len(self.repair_targets):
+            raise ValueError("repair_targets must not contain duplicate entries")
+        return self
+
+
 class WorkerContext(RouterBaseModel):
     user_goal: str
     task_type: TaskType
@@ -685,6 +758,7 @@ class WorkerInput(RouterBaseModel):
     trace_context: TraceContext
     idempotency_key: str
     created_at: datetime
+    worker_config: WorkerConfig | None = None
     metadata: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
@@ -729,7 +803,64 @@ class WorkerInput(RouterBaseModel):
                     "plc-repair requires failure evidence from test/formal artifacts"
                 )
 
+        if self.worker_config is not None:
+            _validate_worker_config_for_worker(self.worker_type, self.worker_config)
+
         return self
+
+
+_WORKER_CONFIG_FIELDS_BY_TYPE: dict[str, set[str]] = {
+    WorkerType.PLC_DEV.value: {
+        "target_language",
+        "template",
+        "language_hint",
+        "enable_socratic_spec",
+        "socratic_skip",
+        "compiler_type",
+        "rpc_pipeline",
+        "llm",
+    },
+    WorkerType.PLC_TEST.value: {
+        "fuzz_method",
+        "case_count",
+        "enable_fuzz_test",
+        "llm",
+    },
+    WorkerType.PLC_FORMAL.value: {
+        "compiler_type",
+        "properties",
+        "natural_language_requirements",
+        "llm",
+    },
+    WorkerType.PLC_REPAIR.value: {
+        "repair_source",
+        "repair_targets",
+        "repair_failure_notes",
+        "compiler_type",
+        "llm",
+    },
+}
+
+
+def _validate_worker_config_for_worker(
+    worker_type: WorkerType | str,
+    worker_config: WorkerConfig,
+) -> None:
+    worker = worker_type.value if isinstance(worker_type, Enum) else str(worker_type)
+    allowed = _WORKER_CONFIG_FIELDS_BY_TYPE.get(worker)
+    if allowed is None:
+        raise ValueError(f"unsupported worker_type for worker_config: {worker!r}")
+
+    provided = set(worker_config.model_dump(exclude_none=True))
+    invalid = sorted(
+        field_name
+        for field_name in provided
+        if field_name not in allowed
+    )
+    if invalid:
+        raise ValueError(
+            f"worker_config fields not supported for {worker!r}: {', '.join(invalid)}"
+        )
 
 
 # ---------------------------------------------------------------------------

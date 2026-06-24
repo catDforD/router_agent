@@ -481,6 +481,40 @@ export interface WorkerContext {
   };
 }
 
+export interface WorkerLLMConfig {
+  model?: string | null;
+  base_url?: string | null;
+  temperature?: number | null;
+  timeout_seconds?: number | null;
+  max_retries?: number | null;
+}
+
+export interface WorkerConfig {
+  target_language?: "ST" | "SCL" | "FBD" | null;
+  template?: string | null;
+  language_hint?: string | null;
+  enable_socratic_spec?: boolean | null;
+  socratic_skip?: boolean | null;
+  compiler_type?: "matiec" | "rusty" | null;
+  rpc_pipeline?: Array<"fuzz" | "formal"> | null;
+  repair_source?:
+    | "compile"
+    | "test_failure"
+    | "formal_validation_failure"
+    | "multi"
+    | null;
+  repair_targets?: Array<
+    "compile" | "test_failure" | "formal_validation_failure"
+  > | null;
+  repair_failure_notes?: string | null;
+  properties?: JsonValue | null;
+  natural_language_requirements?: string | null;
+  fuzz_method?: "random" | "boundary" | "scenario" | "dse" | "afl" | "llm" | null;
+  case_count?: number | null;
+  enable_fuzz_test?: boolean | null;
+  llm?: WorkerLLMConfig | null;
+}
+
 export interface TraceContext {
   openai_trace_id?: string | null;
   main_agent_run_id?: string | null;
@@ -517,6 +551,8 @@ export interface WorkerInput {
   idempotency_key: string;
 
   created_at: ISODateTime;
+
+  worker_config?: WorkerConfig | null;
 
   metadata?: Record<string, JsonValue>;
 }

@@ -15,10 +15,17 @@ from app.models.router_schema import (
     FailureStatus,
     TraceContext,
     WORKER_TOOL_BY_TYPE,
+    WorkerCompilerType,
     WorkerBudget,
     WorkerContext,
+    WorkerConfig,
+    WorkerFuzzMethod,
     WorkerInput,
     WorkerMode,
+    WorkerPipelineStage,
+    WorkerRepairSource,
+    WorkerRepairTarget,
+    WorkerTargetLanguage,
     WorkerType,
     TaskState,
 )
@@ -72,6 +79,7 @@ def build_worker_input(
     timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     max_iterations: int | None = DEFAULT_WORKER_MAX_ITERATIONS,
     created_at: datetime | None = None,
+    worker_config: WorkerConfig | dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> WorkerInput:
     """Build and validate a Router v1 WorkerInput for one worker dispatch."""
@@ -83,6 +91,7 @@ def build_worker_input(
     now = created_at or utc_now()
     job_id = worker_job_id or _new_worker_job_id(worker)
     selected_artifacts = input_artifacts or select_worker_input_artifacts(task, worker)
+    normalized_worker_config = _build_worker_config(task, worker, worker_config)
     return WorkerInput(
         schema_version="router.v1",
         task_id=task.task_id,
@@ -102,6 +111,7 @@ def build_worker_input(
         trace_context=_trace_context(task, job_id, trace_context),
         idempotency_key=f"{task.task_id}:{job_id}",
         created_at=now,
+        worker_config=normalized_worker_config,
         metadata=metadata,
     )
 
@@ -219,6 +229,123 @@ def _new_worker_job_id(worker_type: str) -> str:
 
 def _worker_type_value(worker_type: WorkerType | str) -> str:
     return _value(worker_type)
+
+
+def _build_worker_config(
+    task: TaskState,
+    worker_type: str,
+    worker_config: WorkerConfig | dict[str, Any] | None,
+) -> WorkerConfig | None:
+    base = _default_worker_config(task, worker_type)
+    if worker_config is None:
+        return base
+    override = (
+        worker_config
+        if isinstance(worker_config, WorkerConfig)
+        else WorkerConfig.model_validate(worker_config)
+    )
+    if base is None:
+        return override
+    merged = {
+        **base.model_dump(exclude_none=True),
+        **override.model_dump(exclude_none=True),
+    }
+    return WorkerConfig.model_validate(merged)
+
+
+def _default_worker_config(task: TaskState, worker_type: str) -> WorkerConfig | None:
+    worker = _worker_type_value(worker_type)
+    project_language = _optional_value(task.project_context.target_plc_language)
+    if worker == WorkerType.PLC_DEV.value:
+        config = WorkerConfig(
+            target_language=_default_target_language(project_language),
+            compiler_type=WorkerCompilerType.MATIEC,
+            enable_socratic_spec=None,
+            socratic_skip=None,
+            rpc_pipeline=_default_pipeline(task),
+        )
+        return config
+    if worker == WorkerType.PLC_TEST.value:
+        return WorkerConfig(
+            fuzz_method=WorkerFuzzMethod.BOUNDARY,
+            case_count=50,
+            enable_fuzz_test=True,
+        )
+    if worker == WorkerType.PLC_FORMAL.value:
+        return WorkerConfig(
+            compiler_type=WorkerCompilerType.MATIEC,
+            natural_language_requirements=task.normalized_goal or task.raw_user_request,
+        )
+    if worker == WorkerType.PLC_REPAIR.value:
+        return WorkerConfig(
+            repair_source=_default_repair_source(task),
+            repair_targets=_default_repair_targets(task),
+            compiler_type=WorkerCompilerType.MATIEC,
+            repair_failure_notes=_repair_failure_notes(task),
+        )
+    return None
+
+
+def _default_target_language(value: str | None) -> WorkerTargetLanguage | None:
+    if value is None:
+        return WorkerTargetLanguage.ST
+    try:
+        return WorkerTargetLanguage(value)
+    except ValueError:
+        return WorkerTargetLanguage.ST
+
+
+def _default_pipeline(task: TaskState) -> list[WorkerPipelineStage] | None:
+    stages: list[WorkerPipelineStage] = []
+    if task.difficulty.requires_test:
+        stages.append(WorkerPipelineStage.FUZZ)
+    if task.difficulty.requires_formal:
+        stages.append(WorkerPipelineStage.FORMAL)
+    return stages or None
+
+
+def _default_repair_source(task: TaskState) -> WorkerRepairSource | None:
+    has_compile = any(_failure_source_value(failure.source) == "compile" for failure in task.failures)
+    has_test = any(_failure_source_value(failure.source) == "test" for failure in task.failures)
+    has_formal = any(_failure_source_value(failure.source) == "formal" for failure in task.failures)
+    if sum(bool(flag) for flag in (has_compile, has_test, has_formal)) > 1:
+        return WorkerRepairSource.MULTI
+    if has_compile:
+        return WorkerRepairSource.COMPILE
+    if has_test:
+        return WorkerRepairSource.TEST_FAILURE
+    if has_formal:
+        return WorkerRepairSource.FORMAL_VALIDATION_FAILURE
+    return WorkerRepairSource.COMPILE
+
+
+def _default_repair_targets(task: TaskState) -> list[WorkerRepairTarget] | None:
+    targets: list[WorkerRepairTarget] = []
+    if any(_failure_source_value(failure.source) == "compile" for failure in task.failures):
+        targets.append(WorkerRepairTarget.COMPILE)
+    if any(_failure_source_value(failure.source) == "test" for failure in task.failures):
+        targets.append(WorkerRepairTarget.TEST_FAILURE)
+    if any(_failure_source_value(failure.source) == "formal" for failure in task.failures):
+        targets.append(WorkerRepairTarget.FORMAL_VALIDATION_FAILURE)
+    return targets or None
+
+
+def _repair_failure_notes(task: TaskState) -> str | None:
+    open_failures = [
+        failure
+        for failure in task.failures
+        if _value(failure.status) == FailureStatus.OPEN.value
+    ]
+    if not open_failures:
+        return None
+    return " | ".join(
+        f"{failure.failure_id}: {failure.title}"
+        for failure in open_failures
+    )
+
+
+def _failure_source_value(value: Any) -> str:
+    return _value(value)
 
 
 def _optional_value(value: Any) -> str | None:

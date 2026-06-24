@@ -484,6 +484,214 @@
       "title": "WorkerBudget",
       "type": "object"
     },
+    "WorkerCompilerType": {
+      "enum": [
+        "matiec",
+        "rusty"
+      ],
+      "title": "WorkerCompilerType",
+      "type": "string"
+    },
+    "WorkerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "target_language": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerTargetLanguage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Template"
+        },
+        "language_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language Hint"
+        },
+        "enable_socratic_spec": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enable Socratic Spec"
+        },
+        "socratic_skip": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Socratic Skip"
+        },
+        "compiler_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerCompilerType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rpc_pipeline": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/WorkerPipelineStage"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rpc Pipeline"
+        },
+        "repair_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerRepairSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "repair_targets": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/WorkerRepairTarget"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repair Targets"
+        },
+        "repair_failure_notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repair Failure Notes"
+        },
+        "properties": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "natural_language_requirements": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Natural Language Requirements"
+        },
+        "fuzz_method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerFuzzMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "case_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Case Count"
+        },
+        "enable_fuzz_test": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enable Fuzz Test"
+        },
+        "llm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerLLMConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "WorkerConfig",
+      "type": "object"
+    },
     "WorkerConstraint": {
       "additionalProperties": false,
       "properties": {
@@ -643,6 +851,89 @@
       "title": "WorkerContext",
       "type": "object"
     },
+    "WorkerFuzzMethod": {
+      "enum": [
+        "random",
+        "boundary",
+        "scenario",
+        "dse",
+        "afl",
+        "llm"
+      ],
+      "title": "WorkerFuzzMethod",
+      "type": "string"
+    },
+    "WorkerLLMConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "base_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Url"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "timeout_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Seconds"
+        },
+        "max_retries": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Retries"
+        }
+      },
+      "title": "WorkerLLMConfig",
+      "type": "object"
+    },
     "WorkerMode": {
       "enum": [
         "create",
@@ -656,6 +947,42 @@
         "explain"
       ],
       "title": "WorkerMode",
+      "type": "string"
+    },
+    "WorkerPipelineStage": {
+      "enum": [
+        "fuzz",
+        "formal"
+      ],
+      "title": "WorkerPipelineStage",
+      "type": "string"
+    },
+    "WorkerRepairSource": {
+      "enum": [
+        "compile",
+        "test_failure",
+        "formal_validation_failure",
+        "multi"
+      ],
+      "title": "WorkerRepairSource",
+      "type": "string"
+    },
+    "WorkerRepairTarget": {
+      "enum": [
+        "compile",
+        "test_failure",
+        "formal_validation_failure"
+      ],
+      "title": "WorkerRepairTarget",
+      "type": "string"
+    },
+    "WorkerTargetLanguage": {
+      "enum": [
+        "ST",
+        "SCL",
+        "FBD"
+      ],
+      "title": "WorkerTargetLanguage",
       "type": "string"
     },
     "WorkerType": {
@@ -738,6 +1065,17 @@
       "format": "date-time",
       "title": "Created At",
       "type": "string"
+    },
+    "worker_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "metadata": {
       "anyOf": [

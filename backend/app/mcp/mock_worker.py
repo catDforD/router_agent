@@ -24,10 +24,17 @@ from app.models.router_schema import (
     RepairMetrics,
     Severity,
     TestMetrics,
+    WorkerCompilerType,
+    WorkerConfig,
+    WorkerFuzzMethod,
     WorkerInput,
     WorkerMetrics,
     WorkerOutcome,
     WorkerOutcomeStatus,
+    WorkerPipelineStage,
+    WorkerRepairSource,
+    WorkerRepairTarget,
+    WorkerTargetLanguage,
     WorkerType,
 )
 
@@ -111,8 +118,11 @@ def run_mock_worker(
 
 def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
     parent_ids = _input_artifact_ids(worker_input)
-    language = worker_input.context.target_plc_language or "ST"
+    config = worker_input.worker_config
+    language = _worker_target_language(worker_input, config)
     platform = worker_input.context.target_platform or "Codesys"
+    compiler_type = _worker_compiler_type(config)
+    code_name, code_mime_type, code_summary = _code_artifact_details(language)
     requirements = {
         "schema_version": "router.v1",
         "goal": worker_input.context.user_goal,
@@ -128,26 +138,10 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
         ],
         "target_plc_language": language,
         "target_platform": platform,
+        "compiler_type": compiler_type,
         "mock_scenario": scenario,
     }
-    code = (
-        "FUNCTION_BLOCK FB_MotorControl\n"
-        "VAR_INPUT\n"
-        "    StartCmd : BOOL;\n"
-        "    StopCmd : BOOL;\n"
-        "    EmergencyStop : BOOL;\n"
-        "    FaultActive : BOOL;\n"
-        "END_VAR\n"
-        "VAR_OUTPUT\n"
-        "    MotorRun : BOOL;\n"
-        "END_VAR\n\n"
-        "IF StopCmd OR EmergencyStop OR FaultActive THEN\n"
-        "    MotorRun := FALSE;\n"
-        "ELSIF StartCmd THEN\n"
-        "    MotorRun := TRUE;\n"
-        "END_IF;\n"
-        "END_FUNCTION_BLOCK\n"
-    )
+    code = _render_worker_code(language, compiler_type)
     io_contract = {
         "inputs": ["StartCmd", "StopCmd", "EmergencyStop", "FaultActive"],
         "outputs": ["MotorRun"],
@@ -180,9 +174,9 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
             MockArtifactWriteIntent(
                 artifact_type=ArtifactType.PLC_CODE,
                 version=1,
-                name="plc_code_v1.st",
+                name=code_name,
                 content=code,
-                summary="Mock Structured Text implementation.",
+                summary=code_summary,
                 parent_artifact_ids=parent_ids,
                 metadata={
                     "target_plc_language": language,
@@ -195,7 +189,7 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
                     },
                     "tags": ["mock", "plc"],
                 },
-                mime_type="text/plain",
+                mime_type=code_mime_type,
             ),
             MockArtifactWriteIntent(
                 artifact_type=ArtifactType.IO_CONTRACT,
@@ -221,12 +215,17 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
         ),
         metrics=WorkerMetrics(duration_ms=120),
         next_recommended_action=NextRecommendedAction.TEST,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(config),
+        },
     )
 
 
 def _plc_test(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
     code_ref = _artifact_ref(worker_input, ArtifactType.PLC_CODE)
+    config = worker_input.worker_config
+    fuzz_method = _worker_fuzz_method(config)
     should_fail = (
         scenario
         in {
@@ -240,11 +239,24 @@ def _plc_test(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
         )
     )
     if should_fail:
-        return _plc_test_failed(worker_input, scenario=scenario)
-    return _plc_test_passed(worker_input, scenario=scenario)
+        return _plc_test_failed(
+            worker_input,
+            scenario=scenario,
+            fuzz_method=fuzz_method,
+        )
+    return _plc_test_passed(
+        worker_input,
+        scenario=scenario,
+        fuzz_method=fuzz_method,
+    )
 
 
-def _plc_test_passed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
+def _plc_test_passed(
+    worker_input: WorkerInput,
+    *,
+    scenario: str,
+    fuzz_method: str | None,
+) -> MockWorkerOutput:
     parent_ids = _input_artifact_ids(worker_input)
     report = {
         "status": "passed",
@@ -306,11 +318,19 @@ def _plc_test_passed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerO
             ),
         ),
         next_recommended_action=NextRecommendedAction.RUN_QUALITY_GATE,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
-def _plc_test_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
+def _plc_test_failed(
+    worker_input: WorkerInput,
+    *,
+    scenario: str,
+    fuzz_method: str | None,
+) -> MockWorkerOutput:
     now = utc_now()
     parent_ids = _input_artifact_ids(worker_input)
     report_version = _report_version(worker_input, ArtifactType.TEST_REPORT)
@@ -320,6 +340,7 @@ def _plc_test_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerO
         "passed": 3,
         "failed": 1,
         "failed_case": "emergency_stop_forces_motor_off",
+        "fuzz_method": fuzz_method,
         "mock_scenario": scenario,
     }
     trace = {
@@ -402,23 +423,51 @@ def _plc_test_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerO
             ),
         ),
         next_recommended_action=NextRecommendedAction.REPAIR,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
 def _plc_formal(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
     code_ref = _artifact_ref(worker_input, ArtifactType.PLC_CODE)
+    config = worker_input.worker_config
+    compiler_type = _worker_compiler_type(config)
+    properties = _worker_properties(config)
+    natural_language_requirements = (
+        config.natural_language_requirements if config is not None else None
+    )
     should_fail = (
         scenario == SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS
         and code_ref is not None
         and code_ref.version <= 1
     )
     if should_fail:
-        return _plc_formal_failed(worker_input, scenario=scenario)
-    return _plc_formal_passed(worker_input, scenario=scenario)
+        return _plc_formal_failed(
+            worker_input,
+            scenario=scenario,
+            compiler_type=compiler_type,
+            properties=properties,
+            natural_language_requirements=natural_language_requirements,
+        )
+    return _plc_formal_passed(
+        worker_input,
+        scenario=scenario,
+        compiler_type=compiler_type,
+        properties=properties,
+        natural_language_requirements=natural_language_requirements,
+    )
 
 
-def _plc_formal_passed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
+def _plc_formal_passed(
+    worker_input: WorkerInput,
+    *,
+    scenario: str,
+    compiler_type: str | None,
+    properties: Any,
+    natural_language_requirements: str | None,
+) -> MockWorkerOutput:
     parent_ids = _input_artifact_ids(worker_input)
     report = {
         "status": "passed",
@@ -430,6 +479,9 @@ def _plc_formal_passed(worker_input: WorkerInput, *, scenario: str) -> MockWorke
         "total_properties": 3,
         "passed_properties": 3,
         "failed_properties": 0,
+        "compiler_type": compiler_type,
+        "properties": properties,
+        "natural_language_requirements": natural_language_requirements,
         "mock_scenario": scenario,
     }
     return MockWorkerOutput(
@@ -477,11 +529,21 @@ def _plc_formal_passed(worker_input: WorkerInput, *, scenario: str) -> MockWorke
             ),
         ),
         next_recommended_action=NextRecommendedAction.RUN_QUALITY_GATE,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
-def _plc_formal_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
+def _plc_formal_failed(
+    worker_input: WorkerInput,
+    *,
+    scenario: str,
+    compiler_type: str | None,
+    properties: Any,
+    natural_language_requirements: str | None,
+) -> MockWorkerOutput:
     now = utc_now()
     parent_ids = _input_artifact_ids(worker_input)
     report_version = _report_version(worker_input, ArtifactType.FORMAL_REPORT)
@@ -491,6 +553,9 @@ def _plc_formal_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorke
         "total_properties": 3,
         "passed_properties": 2,
         "failed_properties": 1,
+        "compiler_type": compiler_type,
+        "properties": properties,
+        "natural_language_requirements": natural_language_requirements,
         "mock_scenario": scenario,
     }
     counterexample = {
@@ -572,7 +637,10 @@ def _plc_formal_failed(worker_input: WorkerInput, *, scenario: str) -> MockWorke
             ),
         ),
         next_recommended_action=NextRecommendedAction.REPAIR,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
@@ -581,6 +649,11 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
     current_version = code_ref.version if code_ref is not None else 1
     next_version = current_version + 1
     repair_round = worker_input.context.repair_round or max(1, next_version - 1)
+    config = worker_input.worker_config
+    repair_source = _worker_repair_source(config)
+    repair_targets = _worker_repair_targets(config)
+    compiler_type = _worker_compiler_type(config)
+    repair_failure_notes = config.repair_failure_notes if config is not None else None
     parent_ids = _input_artifact_ids(worker_input)
     patch = (
         "--- plc_code_v1.st\n"
@@ -612,6 +685,10 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
         "repair_round": repair_round,
         "from_code_artifact_id": code_ref.artifact_id if code_ref else None,
         "to_code_version": next_version,
+        "repair_source": repair_source,
+        "repair_targets": repair_targets,
+        "compiler_type": compiler_type,
+        "repair_failure_notes": repair_failure_notes,
         "changes": [
             "Guarded the start branch with emergency stop and fault conditions.",
         ],
@@ -691,7 +768,10 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
             ),
         ),
         next_recommended_action=NextRecommendedAction.TEST,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
@@ -723,7 +803,10 @@ def _need_clarification(
         ),
         metrics=WorkerMetrics(duration_ms=25),
         next_recommended_action=NextRecommendedAction.ASK_USER,
-        metadata={"mock_scenario": scenario},
+        metadata={
+            "mock_scenario": scenario,
+            "worker_config": _worker_config_metadata(worker_input.worker_config),
+        },
     )
 
 
@@ -767,6 +850,126 @@ def _artifact_ref(
 
 def _input_artifact_ids(worker_input: WorkerInput) -> tuple[str, ...]:
     return tuple(artifact.artifact_id for artifact in worker_input.input_artifacts)
+
+
+def _worker_target_language(
+    worker_input: WorkerInput,
+    config: WorkerConfig | None,
+) -> str:
+    if config is not None and config.target_language is not None:
+        return _value(config.target_language)
+    context_language = worker_input.context.target_plc_language
+    if context_language is not None:
+        return _value(context_language)
+    return WorkerTargetLanguage.ST.value
+
+
+def _worker_compiler_type(config: WorkerConfig | None) -> str | None:
+    if config is None or config.compiler_type is None:
+        return None
+    return _value(config.compiler_type)
+
+
+def _worker_pipeline(config: WorkerConfig | None) -> list[str] | None:
+    if config is None or config.rpc_pipeline is None:
+        return None
+    return [_value(stage) for stage in config.rpc_pipeline]
+
+
+def _worker_fuzz_method(config: WorkerConfig | None) -> str | None:
+    if config is None or config.fuzz_method is None:
+        return None
+    return _value(config.fuzz_method)
+
+
+def _worker_case_count(config: WorkerConfig | None) -> int | None:
+    if config is None:
+        return None
+    return config.case_count
+
+
+def _worker_bool(config: WorkerConfig | None, field_name: str) -> bool | None:
+    if config is None:
+        return None
+    return getattr(config, field_name)
+
+
+def _worker_properties(config: WorkerConfig | None) -> Any:
+    if config is None:
+        return None
+    return config.properties
+
+
+def _worker_repair_source(config: WorkerConfig | None) -> str | None:
+    if config is None or config.repair_source is None:
+        return None
+    return _value(config.repair_source)
+
+
+def _worker_repair_targets(config: WorkerConfig | None) -> list[str] | None:
+    if config is None or config.repair_targets is None:
+        return None
+    return [_value(target) for target in config.repair_targets]
+
+
+def _worker_config_metadata(config: WorkerConfig | None) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    return config.model_dump(mode="json", exclude_none=True)
+
+
+def _render_worker_code(language: str, compiler_type: str | None) -> str:
+    if language == WorkerTargetLanguage.FBD.value:
+        return _render_fbd_xml()
+    return _render_plc_code(language, compiler_type)
+
+
+def _render_plc_code(language: str, compiler_type: str | None) -> str:
+    header = f"// target_language: {language} | compiler: {compiler_type or 'matiec'}\n"
+    if language == WorkerTargetLanguage.SCL.value:
+        header = f"// target_language: {language} | compiler: {compiler_type or 'matiec'}\n"
+    return "".join(
+        [
+            header,
+            "FUNCTION_BLOCK FB_MotorControl\n",
+            "VAR_INPUT\n",
+            "    StartCmd : BOOL;\n",
+            "    StopCmd : BOOL;\n",
+            "    EmergencyStop : BOOL;\n",
+            "    FaultActive : BOOL;\n",
+            "END_VAR\n",
+            "VAR_OUTPUT\n",
+            "    MotorRun : BOOL;\n",
+            "END_VAR\n\n",
+            "IF StopCmd OR EmergencyStop OR FaultActive THEN\n",
+            "    MotorRun := FALSE;\n",
+            "ELSIF StartCmd THEN\n",
+            "    MotorRun := TRUE;\n",
+            "END_IF;\n",
+            "END_FUNCTION_BLOCK\n",
+        ]
+    )
+
+
+def _render_fbd_xml() -> str:
+    return (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<FBD>\n"
+        "  <block name=\"FB_MotorControl\">\n"
+        "    <input name=\"StartCmd\" type=\"BOOL\" />\n"
+        "    <input name=\"StopCmd\" type=\"BOOL\" />\n"
+        "    <input name=\"EmergencyStop\" type=\"BOOL\" />\n"
+        "    <input name=\"FaultActive\" type=\"BOOL\" />\n"
+        "    <output name=\"MotorRun\" type=\"BOOL\" />\n"
+        "  </block>\n"
+        "</FBD>\n"
+    )
+
+
+def _code_artifact_details(language: str) -> tuple[str, str, str]:
+    if language == WorkerTargetLanguage.FBD.value:
+        return "plc_code_v1.fbd", "application/xml", "Mock FBD implementation."
+    return "plc_code_v1.st", "text/plain", "Mock Structured Text implementation."
 
 
 def _mock_id(prefix: str) -> str:

@@ -23,6 +23,25 @@
     "target_platform": "Codesys",
     "assumptions": []
   },
+  "worker_config": {
+    "target_language": "ST",
+    "template": "start_stop",
+    "language_hint": "Structured Text",
+    "enable_socratic_spec": true,
+    "socratic_skip": false,
+    "compiler_type": "matiec",
+    "rpc_pipeline": [
+      "fuzz",
+      "formal"
+    ],
+    "llm": {
+      "model": "deepseek-worker",
+      "base_url": "https://api.example/v1",
+      "temperature": 0.2,
+      "timeout_seconds": 60,
+      "max_retries": 1
+    }
+  },
   "constraints": [
     {
       "constraint_id": "constraint-001",

@@ -23,6 +23,7 @@ from app.mcp.draft import (
 from app.models.router_schema import (
     ArtifactType,
     McpToolName,
+    WorkerConfig,
     WorkerType,
 )
 
@@ -134,7 +135,7 @@ class LlmPlcWorkerService:
         validate_worker_request_tool(request, tool_name)
 
         raw_output = self.json_client.complete_json(
-            system_prompt=_system_prompt(tool_name),
+            system_prompt=_system_prompt(tool_name, request),
             user_prompt=_user_prompt(tool_name, request),
         )
         raw_output = _normalize_common_llm_output_shape(raw_output, tool_name, request)
@@ -145,10 +146,14 @@ class LlmPlcWorkerService:
             draft = _fallback_draft_output(tool_name, request, exc)
             validate_worker_draft_output(draft, request.worker_input)
 
-        return _with_simulation_metadata(draft, tool_name).model_dump(mode="json")
+        return _with_simulation_metadata(
+            draft,
+            tool_name,
+            worker_config=request.worker_input.worker_config,
+        ).model_dump(mode="json")
 
 
-def _system_prompt(tool_name: McpToolName | str) -> str:
+def _system_prompt(tool_name: McpToolName | str, request: McpWorkerRequest) -> str:
     tool = _value(tool_name)
     worker = {
         McpToolName.PLC_DEV_RUN.value: "PLC development",
@@ -157,6 +162,7 @@ def _system_prompt(tool_name: McpToolName | str) -> str:
         McpToolName.PLC_REPAIR_RUN.value: "PLC repair",
     }[tool]
     required = ", ".join(sorted(_required_artifact_types(tool)))
+    worker_config_summary = _worker_config_summary(request.worker_input.worker_config)
     return (
         f"You are simulating a {worker} subagent for Router local integration tests. "
         "Return only one JSON object matching the Router internal LlmWorkerDraftOutput "
@@ -169,11 +175,17 @@ def _system_prompt(tool_name: McpToolName | str) -> str:
         "Do not return persisted artifact references: no artifact_id, type, uri, or "
         "content_truncated fields inside artifact_writes. "
         f"For passed outcomes, include non-empty artifact_writes for: {required}. "
-        "Use schema_version router.v1 concepts, concise summaries, and no markdown."
+        "Use schema_version router.v1 concepts, concise summaries, and no markdown. "
+        f"Worker config: {worker_config_summary}."
     )
 
 
 def _user_prompt(tool_name: McpToolName | str, request: McpWorkerRequest) -> str:
+    worker_config = (
+        request.worker_input.worker_config.model_dump(mode="json")
+        if request.worker_input.worker_config is not None
+        else None
+    )
     return json.dumps(
         {
             "tool_name": _value(tool_name),
@@ -182,6 +194,7 @@ def _user_prompt(tool_name: McpToolName | str, request: McpWorkerRequest) -> str
                 artifact.model_dump(mode="json")
                 for artifact in request.input_artifacts
             ],
+            "worker_config": worker_config,
             "worker_guidance": _worker_guidance(tool_name),
         },
         ensure_ascii=False,
@@ -221,6 +234,45 @@ def _worker_guidance(tool_name: McpToolName | str) -> dict[str, Any]:
     raise LlmWorkerError(f"unsupported MCP tool: {tool}")
 
 
+def _worker_config_summary(config: WorkerConfig | None) -> str:
+    if config is None:
+        return "none"
+    payload: dict[str, Any] = {}
+    if config.target_language is not None:
+        payload["target_language"] = _value(config.target_language)
+    if config.template is not None:
+        payload["template"] = config.template
+    if config.language_hint is not None:
+        payload["language_hint"] = config.language_hint
+    if config.enable_socratic_spec is not None:
+        payload["enable_socratic_spec"] = config.enable_socratic_spec
+    if config.socratic_skip is not None:
+        payload["socratic_skip"] = config.socratic_skip
+    if config.compiler_type is not None:
+        payload["compiler_type"] = _value(config.compiler_type)
+    if config.rpc_pipeline is not None:
+        payload["rpc_pipeline"] = [_value(stage) for stage in config.rpc_pipeline]
+    if config.repair_source is not None:
+        payload["repair_source"] = _value(config.repair_source)
+    if config.repair_targets is not None:
+        payload["repair_targets"] = [_value(target) for target in config.repair_targets]
+    if config.repair_failure_notes is not None:
+        payload["repair_failure_notes"] = config.repair_failure_notes
+    if config.properties is not None:
+        payload["properties"] = config.properties
+    if config.natural_language_requirements is not None:
+        payload["natural_language_requirements"] = config.natural_language_requirements
+    if config.fuzz_method is not None:
+        payload["fuzz_method"] = _value(config.fuzz_method)
+    if config.case_count is not None:
+        payload["case_count"] = config.case_count
+    if config.enable_fuzz_test is not None:
+        payload["enable_fuzz_test"] = config.enable_fuzz_test
+    if config.llm is not None:
+        payload["llm"] = config.llm.model_dump(mode="json", exclude_none=True)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _required_artifact_types(tool_name: McpToolName | str) -> set[str]:
     tool = _value(tool_name)
     return {
@@ -242,6 +294,8 @@ def _required_artifact_types(tool_name: McpToolName | str) -> set[str]:
 def _with_simulation_metadata(
     draft: LlmWorkerDraftOutput,
     tool_name: McpToolName | str,
+    *,
+    worker_config: Any | None = None,
 ) -> LlmWorkerDraftOutput:
     metadata = dict(draft.metadata or {})
     metadata.update(
@@ -250,6 +304,8 @@ def _with_simulation_metadata(
             "mcp_tool": _value(tool_name),
         }
     )
+    if worker_config is not None:
+        metadata["worker_config"] = worker_config.model_dump(mode="json", exclude_none=True)
     return draft.model_copy(update={"metadata": metadata})
 
 
@@ -294,6 +350,11 @@ def _fallback_draft_output(
         "metadata": {
             "llm_output_fallback": True,
             "validation_error": str(validation_error),
+            "worker_config": (
+                request.worker_input.worker_config.model_dump(mode="json", exclude_none=True)
+                if request.worker_input.worker_config is not None
+                else None
+            ),
         },
     }
     return parse_worker_draft_output(payload)
@@ -666,7 +727,19 @@ def _normalize_artifact_metadata(value: Any) -> dict[str, Any]:
         "patch_metadata",
         "tags",
     }
-    metadata = {key: field for key, field in value.items() if key in allowed}
+    metadata = {
+        key: field
+        for key, field in value.items()
+        if key in allowed and field is not None
+    }
+    for nested_key in ("code_metadata", "test_metadata", "formal_metadata", "patch_metadata"):
+        nested_value = metadata.get(nested_key)
+        if isinstance(nested_value, dict):
+            metadata[nested_key] = {
+                key: field for key, field in nested_value.items() if field is not None
+            }
+            if not metadata[nested_key]:
+                metadata.pop(nested_key)
     tags = [
         str(tag)
         for tag in metadata.get("tags", [])
