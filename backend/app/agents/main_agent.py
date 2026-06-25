@@ -97,7 +97,10 @@ EVIDENCE_TOOL_NAMES = {
     "git_status",
     "read_artifact",
     "write_artifact",
-    "call_mcp_tool",
+    "plc_dev",
+    "plc_test",
+    "plc_formal",
+    "plc_repair",
 }
 EXECUTION_REQUEST_KEYWORDS = (
     "plc",

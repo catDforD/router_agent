@@ -143,7 +143,10 @@
       | "git_status"
       | "read_artifact"
       | "write_artifact"
-      | "call_mcp_tool";
+      | "plc_dev"
+      | "plc_test"
+      | "plc_formal"
+      | "plc_repair";
     ```
 
     这些工具由 Backend Runtime 提供给 Main Agent。Main Agent 可以选择工具和参数，但并发上限、修复轮次、schema 校验、artifact 写入权限由 Runtime 强制执行。
@@ -204,8 +207,8 @@
                 return ask_user(decision.question)
 
             if decision.type == "call_worker":
-                result = call_mcp_tool(
-                    worker_type=decision.worker_type,
+                result = call_plc_worker_tool(
+                    tool_name=decision.tool_name,
                     objective=decision.objective,
                     input_artifacts=decision.input_artifacts,
                     expected_schema=decision.expected_schema,

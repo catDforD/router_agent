@@ -9,12 +9,22 @@ from sqlalchemy.pool import StaticPool
 
 from app.mcp.adapter import McpAdapter
 from app.mcp.client import PlcMcpConnectionError, PlcMcpTimeoutError
-from app.mcp.draft import LlmWorkerDraftOutput, McpWorkerRequest
+from app.mcp.draft import (
+    LlmWorkerDraftOutput,
+    McpInputArtifactSnapshot,
+    McpWorkerRequest,
+)
 from app.mcp.mock_worker import SCENARIO_TEST_FAILED_REPAIR_EXHAUSTED
 from app.mcp.normalizer import (
     ERROR_MCP_CONNECTION_ERROR,
     ERROR_MCP_TIMEOUT,
+    ERROR_WORKER_EXECUTION_ERROR,
     ERROR_WORKER_SCHEMA_INVALID,
+)
+from app.mcp.subagent_client import (
+    SubagentConnectionError,
+    SubagentExecutionError,
+    SubagentTimeoutError,
 )
 from app.models.db_models import Base
 from app.models.router_schema import (
@@ -587,6 +597,119 @@ def test_real_mcp_connection_failure_is_normalized(
     assert "worker.error" in visible_event_types(db_session, task.task_id)
 
 
+def test_subagent_dispatch_persists_draft_artifacts_and_trace(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    fake_client = FakeSubagentClient(real_dev_draft())
+    payload = worker_input(task, WorkerType.PLC_DEV, [raw_ref()])
+
+    result = subagent_adapter(db_session, tmp_path, fake_client).call_worker(payload)
+    job = WorkerJobRepository(db_session).get_job(payload.worker_job_id)
+
+    assert fake_client.calls[0][0].trace_context.mcp_request_id is not None
+    assert fake_client.calls[0][1][0].artifact_id == "artifact-raw-request-001"
+    assert result.trace_context.mcp_request_id == job.input.trace_context.mcp_request_id
+    assert result.execution_status == "completed"
+    assert artifact_types(result.produced_artifacts) == {
+        ArtifactType.REQUIREMENTS_IR.value,
+        ArtifactType.PLC_CODE.value,
+        ArtifactType.IO_CONTRACT.value,
+    }
+    assert job.status == "completed"
+    assert "worker.completed" in visible_event_types(db_session, task.task_id)
+
+
+def test_hybrid_mode_routes_subagent_and_mock_workers(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    fake_client = FakeSubagentClient(real_dev_draft())
+    hybrid = subagent_adapter(
+        db_session,
+        tmp_path,
+        fake_client,
+        mcp_mode="hybrid",
+        plc_dev_mode="subagent",
+        plc_test_mode="mock",
+    )
+
+    dev_result = hybrid.call_worker(worker_input(task, WorkerType.PLC_DEV, [raw_ref()]))
+    test_result = hybrid.call_worker(
+        worker_input(
+            task,
+            WorkerType.PLC_TEST,
+            [requirements_ref(), code_ref()],
+        )
+    )
+
+    assert len(fake_client.calls) == 1
+    assert artifact_types(dev_result.produced_artifacts) == {
+        ArtifactType.REQUIREMENTS_IR.value,
+        ArtifactType.PLC_CODE.value,
+        ArtifactType.IO_CONTRACT.value,
+    }
+    assert artifact_types(test_result.produced_artifacts) == {ArtifactType.TEST_REPORT.value}
+
+
+def test_subagent_timeout_is_normalized(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    fake_client = FakeSubagentClient(error=SubagentTimeoutError("subagent timed out"))
+    payload = worker_input(task, WorkerType.PLC_DEV, [raw_ref()])
+
+    result = subagent_adapter(db_session, tmp_path, fake_client).call_worker(payload)
+
+    assert result.execution_status == "timeout"
+    assert result.error is not None
+    assert result.error.error_code == ERROR_MCP_TIMEOUT
+    assert WorkerJobRepository(db_session).get_job(payload.worker_job_id).status == "timeout"
+    assert "worker.timeout" in visible_event_types(db_session, task.task_id)
+
+
+def test_subagent_connection_failure_is_normalized(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    fake_client = FakeSubagentClient(
+        error=SubagentConnectionError(
+            "subagent connection failed",
+            details={"exception_type": "ConnectError"},
+        )
+    )
+    payload = worker_input(task, WorkerType.PLC_DEV, [raw_ref()])
+
+    result = subagent_adapter(db_session, tmp_path, fake_client).call_worker(payload)
+
+    assert result.execution_status == "error"
+    assert result.error is not None
+    assert result.error.error_code == ERROR_MCP_CONNECTION_ERROR
+    assert WorkerJobRepository(db_session).get_job(payload.worker_job_id).status == "error"
+    assert "worker.error" in visible_event_types(db_session, task.task_id)
+
+
+def test_subagent_execution_error_is_normalized(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    fake_client = FakeSubagentClient(error=SubagentExecutionError("subagent failed"))
+    payload = worker_input(task, WorkerType.PLC_DEV, [raw_ref()])
+
+    result = subagent_adapter(db_session, tmp_path, fake_client).call_worker(payload)
+
+    assert result.execution_status == "error"
+    assert result.error is not None
+    assert result.error.error_code == ERROR_WORKER_EXECUTION_ERROR
+    assert WorkerJobRepository(db_session).get_job(payload.worker_job_id).status == "error"
+    assert "worker.error" in visible_event_types(db_session, task.task_id)
+
+
 class FakeRealMcpClient:
     def __init__(
         self,
@@ -604,6 +727,29 @@ class FakeRealMcpClient:
         request: McpWorkerRequest,
     ) -> LlmWorkerDraftOutput:
         self.calls.append((tool_name, request))
+        if self.error is not None:
+            raise self.error
+        assert self.draft is not None
+        return self.draft
+
+
+class FakeSubagentClient:
+    def __init__(
+        self,
+        draft: LlmWorkerDraftOutput | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.draft = draft
+        self.error = error
+        self.calls: list[tuple[WorkerInput, list[McpInputArtifactSnapshot]]] = []
+
+    def call_worker(
+        self,
+        worker_input: WorkerInput,
+        input_artifacts: list[McpInputArtifactSnapshot],
+    ) -> LlmWorkerDraftOutput:
+        self.calls.append((worker_input, input_artifacts))
         if self.error is not None:
             raise self.error
         assert self.draft is not None
@@ -628,6 +774,25 @@ def real_adapter(
         plc_dev_mode=plc_dev_mode,
         plc_test_mode=plc_test_mode,
         plc_worker_artifact_max_chars=plc_worker_artifact_max_chars,
+    )
+
+
+def subagent_adapter(
+    db_session: Session,
+    tmp_path: Path,
+    fake_client: FakeSubagentClient,
+    *,
+    mcp_mode: str = "subagent",
+    plc_dev_mode: str | None = None,
+    plc_test_mode: str | None = None,
+) -> McpAdapter:
+    return McpAdapter(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        mcp_mode=mcp_mode,
+        subagent_client=fake_client,  # type: ignore[arg-type]
+        plc_dev_mode=plc_dev_mode,
+        plc_test_mode=plc_test_mode,
     )
 
 

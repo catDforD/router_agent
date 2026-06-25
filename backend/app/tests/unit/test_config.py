@@ -22,6 +22,9 @@ ENV_KEYS = (
     "PLC_WORKER_MCP_URL",
     "PLC_WORKER_TIMEOUT_SECONDS",
     "PLC_WORKER_ARTIFACT_MAX_CHARS",
+    "SUBAGENT_API_BASE_URL",
+    "SUBAGENT_API_TOKEN",
+    "SUBAGENT_TIMEOUT_SECONDS",
     "PLC_DEV_MODE",
     "PLC_TEST_MODE",
     "PLC_FORMAL_MODE",
@@ -65,6 +68,9 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.plc_worker_mcp_url == "http://localhost:9000/mcp"
     assert settings.plc_worker_timeout_seconds == 300
     assert settings.plc_worker_artifact_max_chars == 12_000
+    assert settings.subagent_api_base_url == "http://60.188.37.6:28080"
+    assert settings.subagent_api_token is None
+    assert settings.subagent_timeout_seconds == 300
     assert settings.plc_dev_mode is None
     assert settings.plc_test_mode is None
     assert settings.plc_formal_mode is None
@@ -93,7 +99,10 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("PLC_WORKER_MCP_URL", "http://worker.example/mcp")
     monkeypatch.setenv("PLC_WORKER_TIMEOUT_SECONDS", "45")
     monkeypatch.setenv("PLC_WORKER_ARTIFACT_MAX_CHARS", "4096")
-    monkeypatch.setenv("PLC_DEV_MODE", "REAL")
+    monkeypatch.setenv("SUBAGENT_API_BASE_URL", "http://subagent.example")
+    monkeypatch.setenv("SUBAGENT_API_TOKEN", "subagent-secret-value")
+    monkeypatch.setenv("SUBAGENT_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("PLC_DEV_MODE", "SUBAGENT")
     monkeypatch.setenv("PLC_TEST_MODE", "mock")
     monkeypatch.setenv("PLC_FORMAL_MODE", "real")
     monkeypatch.setenv("PLC_REPAIR_MODE", "MOCK")
@@ -121,7 +130,10 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.plc_worker_mcp_url == "http://worker.example/mcp"
     assert settings.plc_worker_timeout_seconds == 45
     assert settings.plc_worker_artifact_max_chars == 4096
-    assert settings.plc_dev_mode == "real"
+    assert settings.subagent_api_base_url == "http://subagent.example"
+    assert settings.subagent_api_token == "subagent-secret-value"
+    assert settings.subagent_timeout_seconds == 120
+    assert settings.plc_dev_mode == "subagent"
     assert settings.plc_test_mode == "mock"
     assert settings.plc_formal_mode == "real"
     assert settings.plc_repair_mode == "mock"
@@ -153,12 +165,26 @@ def test_invalid_modes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings()
 
 
+def test_subagent_modes_are_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("MCP_MODE", "SUBAGENT")
+    monkeypatch.setenv("PLC_TEST_MODE", "SUBAGENT")
+
+    settings = Settings()
+
+    assert settings.mcp_mode == "subagent"
+    assert settings.plc_test_mode == "subagent"
+
+
 def test_redacted_diagnostics_do_not_expose_secrets() -> None:
     settings = Settings(
         openai_api_key="openai-secret-value",
         main_agent_api_key="main-agent-secret-value",
         main_agent_base_url="https://user:password@main-agent.example/v1",
         deepseek_api_key="deepseek-secret-value",
+        subagent_api_token="subagent-secret-value",
     )
 
     diagnostics = settings.redacted_diagnostics()
@@ -167,8 +193,10 @@ def test_redacted_diagnostics_do_not_expose_secrets() -> None:
     assert diagnostics["main_agent_api_key"] == "main...alue"
     assert diagnostics["main_agent_base_url"] == "https://[redacted]@main-agent.example/v1"
     assert diagnostics["deepseek_api_key"] == "deep...alue"
+    assert diagnostics["subagent_api_token"] == "suba...alue"
     assert "openai-secret-value" not in str(diagnostics)
     assert "main-agent-secret-value" not in str(diagnostics)
     assert "user:password" not in str(diagnostics)
     assert "deepseek-secret-value" not in str(diagnostics)
+    assert "subagent-secret-value" not in str(diagnostics)
     assert diagnostics["deepseek_model"] == "deepseek-chat"

@@ -1,0 +1,319 @@
+"""Opt-in live smoke call for one remote PLC HTTP subagent worker."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import UTC, datetime
+import json
+from pathlib import Path
+import sys
+from typing import Any
+
+import httpx
+
+
+ROOT = Path(__file__).resolve().parents[1]
+BACKEND = ROOT / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+from app.core.config import get_settings  # noqa: E402
+from app.mcp.draft import McpInputArtifactSnapshot, validate_worker_draft_output  # noqa: E402
+from app.mcp.subagent_client import (  # noqa: E402
+    build_subagent_request,
+    draft_from_subagent_events,
+    parse_sse_events,
+)
+from app.models.router_schema import (  # noqa: E402
+    ArtifactRef,
+    ArtifactType,
+    ExpectedOutputSpec,
+    TraceContext,
+    WORKER_TOOL_BY_TYPE,
+    WorkerBudget,
+    WorkerContext,
+    WorkerInput,
+    WorkerMode,
+    WorkerType,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    settings = get_settings()
+    parser = argparse.ArgumentParser(
+        description="Call one remote PLC HTTP subagent through its SSE API.",
+    )
+    parser.add_argument(
+        "--worker",
+        required=True,
+        choices=[worker.value for worker in WorkerType],
+        help="Worker type to invoke.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=settings.subagent_api_base_url,
+        help="Remote subagent API base URL.",
+    )
+    parser.add_argument(
+        "--api-token",
+        default=settings.subagent_api_token,
+        help="Optional bearer token. Defaults to SUBAGENT_API_TOKEN.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=settings.subagent_timeout_seconds,
+        help="HTTP timeout in seconds.",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Actually call the remote subagent API.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    worker_type = WorkerType(args.worker)
+    payload = worker_input(worker_type)
+    input_artifacts = snapshots(worker_type)
+    request = build_subagent_request(payload, input_artifacts)
+    url = f"{args.base_url.rstrip('/')}/api/chat/stream"
+
+    print(f"worker: {worker_type.value}")
+    print(f"url: {url}")
+    print(f"agent_id: {request['agent_id']}")
+    print("worker_config echo:")
+    print(json.dumps(request["context"], indent=2, ensure_ascii=False))
+
+    if not args.live:
+        print("Refusing live subagent call without --live.")
+        return 0
+
+    headers = {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if args.api_token:
+        headers["Authorization"] = f"Bearer {args.api_token}"
+
+    with httpx.Client(timeout=httpx.Timeout(float(args.timeout))) as client:
+        with client.stream("POST", url, headers=headers, json=request) as response:
+            print(f"HTTP status: {response.status_code}")
+            response.raise_for_status()
+            events = parse_sse_events(response.iter_lines())
+
+    event_types = [str(event.get("type")) for event in events]
+    print("SSE event types:")
+    print(json.dumps(event_types, indent=2, ensure_ascii=False))
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    if error_events:
+        print("error event:")
+        print(json.dumps(error_events[0]["data"], indent=2, ensure_ascii=False))
+        return 2
+
+    draft = draft_from_subagent_events(payload, input_artifacts, events)
+    validate_worker_draft_output(draft, payload)
+    print(f"outcome: {draft.outcome.status}")
+    print(f"summary: {draft.summary}")
+    print("artifact types:")
+    print(
+        json.dumps(
+            [write.artifact_type for write in draft.artifact_writes],
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def worker_input(worker_type: WorkerType) -> WorkerInput:
+    worker = worker_type.value
+    return WorkerInput(
+        schema_version="router.v1",
+        task_id="task-live-subagent-smoke",
+        worker_job_id=f"worker-job-live-{worker}",
+        worker_type=worker,
+        mcp_tool=WORKER_TOOL_BY_TYPE[worker],
+        mode={
+            WorkerType.PLC_DEV: WorkerMode.CREATE,
+            WorkerType.PLC_TEST: WorkerMode.TEST,
+            WorkerType.PLC_FORMAL: WorkerMode.FORMAL_VERIFY,
+            WorkerType.PLC_REPAIR: WorkerMode.REPAIR,
+        }[worker_type],
+        objective=objective(worker_type),
+        input_artifacts=artifact_refs(worker_type),
+        context=WorkerContext(
+            user_goal="Build a safe motor start/stop controller with stop priority.",
+            task_type="new_plc_development",
+            difficulty_level="L1",
+            target_plc_language="ST",
+            target_platform="Codesys",
+            repair_round=0,
+            assumptions=[],
+        ),
+        constraints=[],
+        expected_outputs=expected_outputs(worker_type),
+        budget=WorkerBudget(timeout_seconds=300, max_iterations=1),
+        trace_context=TraceContext(worker_job_id=f"worker-job-live-{worker}"),
+        idempotency_key=f"task-live-subagent-smoke:worker-job-live-{worker}",
+        created_at=datetime.now(UTC),
+        worker_config=worker_config(worker_type),
+    )
+
+
+def objective(worker_type: WorkerType) -> str:
+    return {
+        WorkerType.PLC_DEV: "Generate ST code for safe motor start/stop control.",
+        WorkerType.PLC_TEST: "Run fuzz testing for the supplied ST motor control code.",
+        WorkerType.PLC_FORMAL: "Formally verify the supplied ST motor control code.",
+        WorkerType.PLC_REPAIR: "Repair the supplied ST motor control code based on failure evidence.",
+    }[worker_type]
+
+
+def worker_config(worker_type: WorkerType) -> dict[str, Any]:
+    return {
+        WorkerType.PLC_DEV: {
+            "target_language": "ST",
+            "compiler_type": "rusty",
+            "rpc_pipeline": ["fuzz", "formal"],
+            "enable_socratic_spec": False,
+        },
+        WorkerType.PLC_TEST: {
+            "fuzz_method": "boundary",
+            "case_count": 5,
+            "enable_fuzz_test": True,
+        },
+        WorkerType.PLC_FORMAL: {
+            "compiler_type": "rusty",
+            "natural_language_requirements": "Stop button must always disable MotorRun.",
+        },
+        WorkerType.PLC_REPAIR: {
+            "repair_source": "test_failure",
+            "repair_targets": ["test_failure"],
+            "repair_failure_notes": "Fuzz case tc_023 found MotorRun can remain true after StopBtn.",
+            "compiler_type": "rusty",
+        },
+    }[worker_type]
+
+
+def artifact_refs(worker_type: WorkerType) -> list[ArtifactRef]:
+    return [
+        ArtifactRef(
+            artifact_id=snapshot.artifact_id,
+            type=snapshot.type,
+            version=snapshot.version,
+            uri=f"memory://{snapshot.artifact_id}",
+            summary=snapshot.summary,
+        )
+        for snapshot in snapshots(worker_type)
+    ]
+
+
+def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
+    raw = McpInputArtifactSnapshot(
+        artifact_id="artifact-live-raw",
+        type=ArtifactType.RAW_USER_REQUEST,
+        version=1,
+        summary="Raw live smoke request.",
+        content="Create a safe ST motor start/stop controller with stop priority.",
+        content_chars=62,
+        mime_type="text/plain",
+    )
+    requirements = McpInputArtifactSnapshot(
+        artifact_id="artifact-live-requirements",
+        type=ArtifactType.REQUIREMENTS_IR,
+        version=1,
+        summary="Minimal requirements.",
+        content=json.dumps(
+            {
+                "requirements": [
+                    "StopBtn has priority over StartBtn.",
+                    "MotorRun is false whenever StopBtn is true.",
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        content_chars=96,
+        mime_type="application/json",
+    )
+    code = McpInputArtifactSnapshot(
+        artifact_id="artifact-live-code",
+        type=ArtifactType.PLC_CODE,
+        version=1,
+        summary="Sample ST code.",
+        content=sample_code(),
+        content_chars=len(sample_code()),
+        mime_type="text/plain",
+    )
+    report = McpInputArtifactSnapshot(
+        artifact_id="artifact-live-test-report",
+        type=ArtifactType.TEST_REPORT,
+        version=1,
+        summary="Synthetic failing fuzz report.",
+        content=json.dumps(
+            {
+                "status": "failed",
+                "failed_case": "tc_023",
+                "actual": "MotorRun remained true after StopBtn.",
+            },
+            ensure_ascii=False,
+        ),
+        content_chars=92,
+        mime_type="application/json",
+    )
+    if worker_type == WorkerType.PLC_DEV:
+        return [raw]
+    if worker_type in {WorkerType.PLC_TEST, WorkerType.PLC_FORMAL}:
+        return [requirements, code]
+    return [code, report]
+
+
+def expected_outputs(worker_type: WorkerType) -> list[ExpectedOutputSpec]:
+    outputs = {
+        WorkerType.PLC_DEV: [
+            ArtifactType.REQUIREMENTS_IR,
+            ArtifactType.PLC_CODE,
+            ArtifactType.IO_CONTRACT,
+        ],
+        WorkerType.PLC_TEST: [ArtifactType.TEST_REPORT],
+        WorkerType.PLC_FORMAL: [ArtifactType.FORMAL_REPORT],
+        WorkerType.PLC_REPAIR: [
+            ArtifactType.PATCH,
+            ArtifactType.PLC_CODE,
+            ArtifactType.REPAIR_SUMMARY,
+        ],
+    }[worker_type]
+    return [
+        ExpectedOutputSpec(
+            artifact_type=artifact_type,
+            required=True,
+            description=f"Expected {artifact_type.value}.",
+        )
+        for artifact_type in outputs
+    ]
+
+
+def sample_code() -> str:
+    return (
+        "FUNCTION_BLOCK FB_MotorControl\n"
+        "VAR_INPUT\n"
+        "    StartBtn : BOOL;\n"
+        "    StopBtn : BOOL;\n"
+        "END_VAR\n"
+        "VAR_OUTPUT\n"
+        "    MotorRun : BOOL;\n"
+        "END_VAR\n"
+        "IF StopBtn THEN\n"
+        "    MotorRun := FALSE;\n"
+        "ELSIF StartBtn THEN\n"
+        "    MotorRun := TRUE;\n"
+        "END_IF;\n"
+        "END_FUNCTION_BLOCK\n"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

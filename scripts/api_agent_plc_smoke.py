@@ -449,21 +449,20 @@ print("contract ok")
     ),
     SmokeCase(
         case_id="mcp_worker_dev_test",
-        title="Exercise PLC domain worker through call_mcp_tool",
+        title="Exercise PLC domain workers through direct tools",
         files={
             "README.md": """
 # MCP domain tool smoke
 
-This case is intended to exercise `call_mcp_tool` rather than local file edits.
-Use the PLC domain tools if available.
+This case is intended to exercise `plc_dev` and `plc_test` rather than local
+file edits. Use the PLC domain tools if available.
 """.lstrip(),
         },
         message=(
             "This is a backend smoke test for domain tools. "
-            "Call call_mcp_tool with tool_name=plc_dev.run to generate a simple "
-            "ST conveyor start/stop implementation, then call call_mcp_tool with "
-            "tool_name=plc_test.run to validate it. Finish the task with a summary "
-            "of the worker results."
+            "Call plc_dev to generate a simple ST conveyor start/stop "
+            "implementation, then call plc_test to validate it. Finish the task "
+            "with a summary of the worker results."
         ),
         expected_events=(
             "agent.started",

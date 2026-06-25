@@ -309,13 +309,11 @@ agent.tool_called        list_files
 agent.tool_result        list_files
 agent.turn_started
 agent.message
-agent.tool_called        call_mcp_tool
-agent.tool_called        call_plc_dev
+agent.tool_called        plc_dev
 worker.started
 artifact.created
 worker.completed
-agent.tool_result        call_plc_dev
-agent.tool_result        call_mcp_tool
+agent.tool_result        plc_dev
 ...
 gate.started
 gate.passed
@@ -351,11 +349,10 @@ exec_command
 git_status
 read_artifact
 write_artifact
-call_mcp_tool
-call_plc_dev
-call_plc_test
-call_plc_formal
-call_plc_repair
+plc_dev
+plc_test
+plc_formal
+plc_repair
 run_quality_gate
 write_final_report
 ```

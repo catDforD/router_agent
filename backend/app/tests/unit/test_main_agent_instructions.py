@@ -33,9 +33,12 @@ def test_orchestration_instructions_cover_artifact_boundaries() -> None:
 def test_orchestration_instructions_cover_mcp_domain_tools() -> None:
     instructions = build_orchestration_instructions()
 
-    assert "call_mcp_tool" in instructions
-    assert "PLC workers are" in instructions
-    assert "not the default execution path" in instructions
+    assert "call_mcp_tool" not in instructions
+    assert "plc_dev" in instructions
+    assert "plc_test" in instructions
+    assert "plc_formal" in instructions
+    assert "plc_repair" in instructions
+    assert "direct worker parameters" in instructions
 
 
 def test_state_view_prompt_wraps_compact_state() -> None:

@@ -56,6 +56,18 @@ DEEPSEEK_BASE_URL=...
 DEEPSEEK_MODEL=...
 ```
 
+如果要直接调用远端 HTTP subagent，把 `.env` 改为：
+
+```text
+MCP_MODE=subagent
+SUBAGENT_API_BASE_URL=http://60.188.37.6:28080
+SUBAGENT_API_TOKEN=
+SUBAGENT_TIMEOUT_SECONDS=300
+```
+
+也可以使用 `MCP_MODE=hybrid` 并通过 `PLC_DEV_MODE=subagent` 等 per-worker
+配置逐步切换。
+
 不要提交 `.env`、密钥或 `data/` 内容。
 
 ## 初始化数据库
