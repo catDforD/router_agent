@@ -11,7 +11,7 @@ import subprocess
 import time
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 try:  # Keep core service tests independent from the SDK import boundary.
@@ -932,63 +932,6 @@ class AgentToolService:
         self._record_tool_result(tool_name, result)
         return result
 
-    def call_mcp_tool(
-        self,
-        task_id: str,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any] | None = None,
-        rationale_summary: str | None = None,
-    ) -> AgentToolResult:
-        self._record_tool_call(
-            tool_name="call_mcp_tool",
-            task_id=task_id,
-            rationale_summary=rationale_summary or f"Call MCP tool {tool_name}.",
-            arguments={
-                "task_id": task_id,
-                "tool_name": tool_name,
-                "arguments": arguments or {},
-            },
-        )
-        objective = None
-        raw_arguments = arguments or {}
-        if isinstance(raw_arguments.get("objective"), str):
-            objective = raw_arguments["objective"]
-        if tool_name == "plc_dev.run":
-            self._prepare_domain_worker_task(
-                task_id=task_id,
-                worker_type=WorkerType.PLC_DEV.value,
-            )
-            result = self.call_plc_dev(task_id, objective=objective, rationale_summary=rationale_summary)
-        elif tool_name == "plc_test.run":
-            self._prepare_domain_worker_task(
-                task_id=task_id,
-                worker_type=WorkerType.PLC_TEST.value,
-            )
-            result = self.call_plc_test(task_id, objective=objective, rationale_summary=rationale_summary)
-        elif tool_name == "plc_formal.run":
-            self._prepare_domain_worker_task(
-                task_id=task_id,
-                worker_type=WorkerType.PLC_FORMAL.value,
-            )
-            result = self.call_plc_formal(task_id, objective=objective, rationale_summary=rationale_summary)
-        elif tool_name == "plc_repair.run":
-            self._prepare_domain_worker_task(
-                task_id=task_id,
-                worker_type=WorkerType.PLC_REPAIR.value,
-            )
-            result = self.call_plc_repair(task_id, objective=objective, rationale_summary=rationale_summary)
-        else:
-            result = self._rejected_result(
-                tool_name="call_mcp_tool",
-                task_id=task_id,
-                code="unsupported_mcp_tool",
-                message=f"MCP tool is not configured for generic dispatch: {tool_name}",
-                details={"tool_name": tool_name},
-            )
-        self._record_tool_result("call_mcp_tool", result)
-        return result
-
     def _prepare_domain_worker_task(
         self,
         *,
@@ -1315,6 +1258,116 @@ class AgentToolService:
         self._record_tool_result(tool_name, result)
         return result
 
+    def plc_dev(
+        self,
+        task_id: str,
+        *,
+        objective: str | None = None,
+        rationale_summary: str | None = None,
+        target_language: str | None = None,
+        template: str | None = None,
+        language_hint: str | None = None,
+        enable_socratic_spec: bool | None = None,
+        socratic_skip: bool | None = None,
+        compiler_type: str | None = None,
+        rpc_pipeline: list[str] | None = None,
+        llm: dict[str, Any] | None = None,
+    ) -> AgentToolResult:
+        return self._call_prepared_worker_tool(
+            tool_name="plc_dev",
+            task_id=task_id,
+            worker_type=WorkerType.PLC_DEV.value,
+            objective=objective,
+            rationale_summary=rationale_summary,
+            worker_config=_worker_config_from_fields(
+                target_language=target_language,
+                template=template,
+                language_hint=language_hint,
+                enable_socratic_spec=enable_socratic_spec,
+                socratic_skip=socratic_skip,
+                compiler_type=compiler_type,
+                rpc_pipeline=rpc_pipeline,
+                llm=llm,
+            ),
+        )
+
+    def plc_test(
+        self,
+        task_id: str,
+        *,
+        objective: str | None = None,
+        rationale_summary: str | None = None,
+        fuzz_method: str | None = None,
+        case_count: int | None = None,
+        enable_fuzz_test: bool | None = None,
+        llm: dict[str, Any] | None = None,
+    ) -> AgentToolResult:
+        return self._call_prepared_worker_tool(
+            tool_name="plc_test",
+            task_id=task_id,
+            worker_type=WorkerType.PLC_TEST.value,
+            objective=objective,
+            rationale_summary=rationale_summary,
+            worker_config=_worker_config_from_fields(
+                fuzz_method=fuzz_method,
+                case_count=case_count,
+                enable_fuzz_test=enable_fuzz_test,
+                llm=llm,
+            ),
+        )
+
+    def plc_formal(
+        self,
+        task_id: str,
+        *,
+        objective: str | None = None,
+        rationale_summary: str | None = None,
+        compiler_type: str | None = None,
+        properties: Any | None = None,
+        natural_language_requirements: str | None = None,
+        llm: dict[str, Any] | None = None,
+    ) -> AgentToolResult:
+        return self._call_prepared_worker_tool(
+            tool_name="plc_formal",
+            task_id=task_id,
+            worker_type=WorkerType.PLC_FORMAL.value,
+            objective=objective,
+            rationale_summary=rationale_summary,
+            worker_config=_worker_config_from_fields(
+                compiler_type=compiler_type,
+                properties=properties,
+                natural_language_requirements=natural_language_requirements,
+                llm=llm,
+            ),
+        )
+
+    def plc_repair(
+        self,
+        task_id: str,
+        *,
+        objective: str | None = None,
+        rationale_summary: str | None = None,
+        repair_source: str | None = None,
+        repair_targets: list[str] | None = None,
+        repair_failure_notes: str | None = None,
+        compiler_type: str | None = None,
+        llm: dict[str, Any] | None = None,
+    ) -> AgentToolResult:
+        return self._call_prepared_worker_tool(
+            tool_name="plc_repair",
+            task_id=task_id,
+            worker_type=WorkerType.PLC_REPAIR.value,
+            objective=objective,
+            rationale_summary=rationale_summary,
+            worker_config=_worker_config_from_fields(
+                repair_source=repair_source,
+                repair_targets=repair_targets,
+                repair_failure_notes=repair_failure_notes,
+                compiler_type=compiler_type,
+                llm=llm,
+            ),
+        )
+
     def call_plc_dev(
         self,
         task_id: str,
@@ -1378,6 +1431,26 @@ class AgentToolService:
             tool_name="call_plc_repair",
             task_id=task_id,
             worker_type=WorkerType.PLC_REPAIR.value,
+            objective=objective,
+            rationale_summary=rationale_summary,
+            worker_config=worker_config,
+        )
+
+    def _call_prepared_worker_tool(
+        self,
+        *,
+        tool_name: str,
+        task_id: str,
+        worker_type: str,
+        objective: str | None,
+        rationale_summary: str | None,
+        worker_config: dict[str, Any] | WorkerConfig | None,
+    ) -> AgentToolResult:
+        self._prepare_domain_worker_task(task_id=task_id, worker_type=worker_type)
+        return self._call_worker_tool(
+            tool_name=tool_name,
+            task_id=task_id,
+            worker_type=worker_type,
             objective=objective,
             rationale_summary=rationale_summary,
             worker_config=worker_config,
@@ -1452,7 +1525,7 @@ class AgentToolService:
                         metadata={"source": "main_agent_function_tools"},
                     )
                 )
-            except WorkerInputBuildError as exc:
+            except (WorkerInputBuildError, ValidationError) as exc:
                 result = self._rejected_result(
                     tool_name=tool_name,
                     task_id=task_id,
@@ -1687,7 +1760,7 @@ class AgentToolService:
                 worker_config=worker_config,
                 metadata={"source": "main_agent_function_tools"},
             )
-        except WorkerInputBuildError as exc:
+        except (WorkerInputBuildError, ValidationError) as exc:
             result = self._rejected_result(
                 tool_name=tool_name,
                 task_id=task_id,
@@ -2647,21 +2720,225 @@ def write_artifact(
 
 
 @function_tool(strict_mode=False)
-def call_mcp_tool(
+def plc_dev(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
-    tool_name: str,
-    arguments: dict[str, Any] | None = None,
+    objective: str | None = None,
     rationale_summary: str | None = None,
+    target_language: str | None = None,
+    template: str | None = None,
+    language_hint: str | None = None,
+    enable_socratic_spec: bool | None = None,
+    socratic_skip: bool | None = None,
+    compiler_type: str | None = None,
+    rpc_pipeline: list[str] | None = None,
+    llm: dict[str, Any] | None = None,
 ) -> AgentToolResult:
-    """Call a configured MCP/domain tool such as a PLC worker."""
+    """Generate or update PLC artifacts with direct worker controls."""
 
-    return AgentToolService(ctx.context).call_mcp_tool(
+    return AgentToolService(ctx.context).plc_dev(
         task_id=task_id,
-        tool_name=tool_name,
-        arguments=arguments,
+        objective=objective,
         rationale_summary=rationale_summary,
+        target_language=target_language,
+        template=template,
+        language_hint=language_hint,
+        enable_socratic_spec=enable_socratic_spec,
+        socratic_skip=socratic_skip,
+        compiler_type=compiler_type,
+        rpc_pipeline=rpc_pipeline,
+        llm=llm,
     )
+
+
+@function_tool(strict_mode=False)
+def plc_test(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    objective: str | None = None,
+    rationale_summary: str | None = None,
+    fuzz_method: str | None = None,
+    case_count: int | None = None,
+    enable_fuzz_test: bool | None = None,
+    llm: dict[str, Any] | None = None,
+) -> AgentToolResult:
+    """Run PLC tests with direct worker controls."""
+
+    return AgentToolService(ctx.context).plc_test(
+        task_id=task_id,
+        objective=objective,
+        rationale_summary=rationale_summary,
+        fuzz_method=fuzz_method,
+        case_count=case_count,
+        enable_fuzz_test=enable_fuzz_test,
+        llm=llm,
+    )
+
+
+@function_tool(strict_mode=False)
+def plc_formal(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    objective: str | None = None,
+    rationale_summary: str | None = None,
+    compiler_type: str | None = None,
+    properties: Any | None = None,
+    natural_language_requirements: str | None = None,
+    llm: dict[str, Any] | None = None,
+) -> AgentToolResult:
+    """Run PLC formal verification with direct worker controls."""
+
+    return AgentToolService(ctx.context).plc_formal(
+        task_id=task_id,
+        objective=objective,
+        rationale_summary=rationale_summary,
+        compiler_type=compiler_type,
+        properties=properties,
+        natural_language_requirements=natural_language_requirements,
+        llm=llm,
+    )
+
+
+@function_tool(strict_mode=False)
+def plc_repair(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    objective: str | None = None,
+    rationale_summary: str | None = None,
+    repair_source: str | None = None,
+    repair_targets: list[str] | None = None,
+    repair_failure_notes: str | None = None,
+    compiler_type: str | None = None,
+    llm: dict[str, Any] | None = None,
+) -> AgentToolResult:
+    """Run PLC repair with direct worker controls."""
+
+    return AgentToolService(ctx.context).plc_repair(
+        task_id=task_id,
+        objective=objective,
+        rationale_summary=rationale_summary,
+        repair_source=repair_source,
+        repair_targets=repair_targets,
+        repair_failure_notes=repair_failure_notes,
+        compiler_type=compiler_type,
+        llm=llm,
+    )
+
+
+def _worker_config_from_fields(**fields: Any) -> dict[str, Any] | None:
+    values = {
+        key: value
+        for key, value in fields.items()
+        if key != "llm" and value is not None
+    }
+    llm = fields.get("llm")
+    if llm is not None:
+        if isinstance(llm, BaseModel):
+            llm_payload: Any = llm.model_dump(mode="json", exclude_none=True)
+        elif isinstance(llm, dict):
+            llm_payload = {
+                key: value
+                for key, value in llm.items()
+                if value is not None
+            }
+        else:
+            llm_payload = llm
+        if not isinstance(llm_payload, dict) or llm_payload:
+            values["llm"] = llm_payload
+    return values or None
+
+
+def _llm_config_tool_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "model": {"type": "string"},
+            "base_url": {"type": "string"},
+            "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+            "timeout_seconds": {"type": "integer", "minimum": 1},
+            "max_retries": {"type": "integer", "minimum": 0},
+        },
+        "additionalProperties": False,
+    }
+
+
+def _direct_worker_tool_properties(worker: str) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "task_id": {"type": "string"},
+        "objective": {"type": "string"},
+        "rationale_summary": {"type": "string"},
+        "llm": _llm_config_tool_schema(),
+    }
+    if worker == WorkerType.PLC_DEV.value:
+        properties.update(
+            {
+                "target_language": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerTargetLanguage],
+                },
+                "template": {"type": "string"},
+                "language_hint": {"type": "string"},
+                "enable_socratic_spec": {"type": "boolean"},
+                "socratic_skip": {"type": "boolean"},
+                "compiler_type": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerCompilerType],
+                },
+                "rpc_pipeline": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [item.value for item in WorkerPipelineStage],
+                    },
+                },
+            }
+        )
+    elif worker == WorkerType.PLC_TEST.value:
+        properties.update(
+            {
+                "fuzz_method": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerFuzzMethod],
+                },
+                "case_count": {"type": "integer", "minimum": 1},
+                "enable_fuzz_test": {"type": "boolean"},
+            }
+        )
+    elif worker == WorkerType.PLC_FORMAL.value:
+        properties.update(
+            {
+                "compiler_type": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerCompilerType],
+                },
+                "properties": {
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
+                },
+                "natural_language_requirements": {"type": "string"},
+            }
+        )
+    elif worker == WorkerType.PLC_REPAIR.value:
+        properties.update(
+            {
+                "repair_source": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerRepairSource],
+                },
+                "repair_targets": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [item.value for item in WorkerRepairTarget],
+                    },
+                },
+                "repair_failure_notes": {"type": "string"},
+                "compiler_type": {
+                    "type": "string",
+                    "enum": [item.value for item in WorkerCompilerType],
+                },
+            }
+        )
+    return properties
 
 
 GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
@@ -2774,20 +3051,36 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         executor_method="write_artifact",
     ),
     MainAgentToolDefinition(
-        name="call_mcp_tool",
-        description=(
-            "Call a configured MCP/domain tool. PLC worker tools remain "
-            "available here."
-        ),
-        properties={
-            "task_id": {"type": "string"},
-            "tool_name": {"type": "string"},
-            "arguments": {"type": "object", "additionalProperties": True},
-            "rationale_summary": {"type": "string"},
-        },
-        required=("task_id", "tool_name"),
-        sdk_tool=call_mcp_tool,
-        executor_method="call_mcp_tool",
+        name="plc_dev",
+        description="Generate or update PLC artifacts with direct worker controls.",
+        properties=_direct_worker_tool_properties(WorkerType.PLC_DEV.value),
+        required=("task_id",),
+        sdk_tool=plc_dev,
+        executor_method="plc_dev",
+    ),
+    MainAgentToolDefinition(
+        name="plc_test",
+        description="Run PLC tests with direct worker controls.",
+        properties=_direct_worker_tool_properties(WorkerType.PLC_TEST.value),
+        required=("task_id",),
+        sdk_tool=plc_test,
+        executor_method="plc_test",
+    ),
+    MainAgentToolDefinition(
+        name="plc_formal",
+        description="Run PLC formal verification with direct worker controls.",
+        properties=_direct_worker_tool_properties(WorkerType.PLC_FORMAL.value),
+        required=("task_id",),
+        sdk_tool=plc_formal,
+        executor_method="plc_formal",
+    ),
+    MainAgentToolDefinition(
+        name="plc_repair",
+        description="Run PLC repair with direct worker controls.",
+        properties=_direct_worker_tool_properties(WorkerType.PLC_REPAIR.value),
+        required=("task_id",),
+        sdk_tool=plc_repair,
+        executor_method="plc_repair",
     ),
 )
 GENERIC_MAIN_AGENT_TOOL_BY_NAME = {

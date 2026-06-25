@@ -86,6 +86,19 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="PLC_WORKER_ARTIFACT_MAX_CHARS",
     )
+    subagent_api_base_url: str = Field(
+        default="http://60.188.37.6:28080",
+        validation_alias="SUBAGENT_API_BASE_URL",
+    )
+    subagent_api_token: str | None = Field(
+        default=None,
+        validation_alias="SUBAGENT_API_TOKEN",
+    )
+    subagent_timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        validation_alias="SUBAGENT_TIMEOUT_SECONDS",
+    )
     plc_dev_mode: str | None = Field(default=None, validation_alias="PLC_DEV_MODE")
     plc_test_mode: str | None = Field(default=None, validation_alias="PLC_TEST_MODE")
     plc_formal_mode: str | None = Field(default=None, validation_alias="PLC_FORMAL_MODE")
@@ -126,8 +139,10 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_mcp_mode(cls, value: str) -> str:
         normalized = value.lower()
-        if normalized not in {"mock", "real", "hybrid"}:
-            raise ValueError("mcp_mode must be 'mock', 'real', or 'hybrid'")
+        if normalized not in {"mock", "real", "hybrid", "subagent"}:
+            raise ValueError(
+                "mcp_mode must be 'mock', 'real', 'hybrid', or 'subagent'"
+            )
         return normalized
 
     @field_validator("main_agent_provider")
@@ -160,8 +175,8 @@ class Settings(BaseSettings):
         if value is None:
             return None
         normalized = value.lower()
-        if normalized not in {"mock", "real"}:
-            raise ValueError("PLC worker mode must be 'mock' or 'real'")
+        if normalized not in {"mock", "real", "subagent"}:
+            raise ValueError("PLC worker mode must be 'mock', 'real', or 'subagent'")
         return normalized
 
     @model_validator(mode="after")
@@ -179,6 +194,9 @@ class Settings(BaseSettings):
             "plc_worker_mcp_url": self.plc_worker_mcp_url,
             "plc_worker_timeout_seconds": self.plc_worker_timeout_seconds,
             "plc_worker_artifact_max_chars": self.plc_worker_artifact_max_chars,
+            "subagent_api_base_url": self.subagent_api_base_url,
+            "subagent_timeout_seconds": self.subagent_timeout_seconds,
+            "subagent_api_token": _redacted(self.subagent_api_token),
             "plc_dev_mode": self.plc_dev_mode,
             "plc_test_mode": self.plc_test_mode,
             "plc_formal_mode": self.plc_formal_mode,

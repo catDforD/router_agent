@@ -2,14 +2,34 @@
 
 ### 当前 agent loop 工具集
 
-Main Agent 当前暴露的是一组 Codex-like 通用工具：
+当前真正暴露给默认 Main Agent 的是 generic Codex-like 工具集，来自 `GENERIC_MAIN_AGENT_TOOL_REGISTRY`：
 
-- `list_files` / `read_file` / `write_file` / `apply_patch`
-- `exec_command` / `git_status`
-- `read_artifact` / `write_artifact`
-- `call_mcp_tool`
+1. `list_files`：列出 workspace 内文件或目录。
+   - 参数：`task_id`、`path`、`recursive`、`max_entries`
+2. `read_file`：读取 workspace 内文本文件，带最大字符数限制。
+   - 参数：`task_id`、`path`、`max_chars`
+3. `write_file`：向 workspace 内写入 UTF-8 文本。
+   - 参数：`task_id`、`path`、`content`、`create_dirs`
+4. `apply_patch`：在 workspace 内应用 unified patch。
+   - 参数：`task_id`、`patch`、`cwd`
+5. `exec_command`：在 workspace 内执行 shell 命令并返回截断后的输出。
+   - 参数：`task_id`、`command`、`cwd`、`timeout_seconds`
+6. `git_status`：读取当前 workspace 的 git 分支和 short status。
+   - 参数：`task_id`、`cwd`
+7. `read_artifact`：读取 Router artifact 的元数据或受限正文。
+   - 参数：`task_id`、`artifact_id`、`mode`、`max_chars`
+8. `write_artifact`：写入持久化 artifact，供后续 replay、审计或前端展示使用。
+   - 参数：`task_id`、`name`、`content`、`summary`、`artifact_type`、`mime_type`
+9. `plc_dev`：生成或更新 PLC 实现产物，并可直接控制开发 worker 参数。
+   - 参数：`task_id`、`objective`、`rationale_summary`、`target_language`、`template`、`language_hint`、`enable_socratic_spec`、`socratic_skip`、`compiler_type`、`rpc_pipeline`、`llm`
+10. `plc_test`：基于当前需求和代码运行测试 worker。
+   - 参数：`task_id`、`objective`、`rationale_summary`、`fuzz_method`、`case_count`、`enable_fuzz_test`、`llm`
+11. `plc_formal`：基于当前需求和代码运行形式化验证 worker。
+   - 参数：`task_id`、`objective`、`rationale_summary`、`compiler_type`、`properties`、`natural_language_requirements`、`llm`
+12. `plc_repair`：基于当前代码和失败证据运行修复 worker。
+   - 参数：`task_id`、`objective`、`rationale_summary`、`repair_source`、`repair_targets`、`repair_failure_notes`、`compiler_type`、`llm`
 
-`finish_task` 已删除，不再作为工具或兼容入口存在。任务终止由 runtime lifecycle 控制。
+`call_mcp_tool` 已不再作为 Main Agent service/function 或默认工具入口保留。底层 MCP server 工具名仍是 `plc_dev.run`、`plc_test.run`、`plc_formal.run`、`plc_repair.run`，但 Main Agent 通过上面的 4 个直接工具调度 worker。`finish_task` 不暴露给模型，最终完成由“无 tool call 的自然语言回复 + StopPolicy”驱动。
 
 ### 当前 agent loop 链路
 
@@ -57,3 +77,29 @@ Main Agent 当前暴露的是一组 Codex-like 通用工具：
 - 每次追问都会在同一 session 下创建新的 run/task，而不是复用已 terminal 的 task。
 - 下一轮模型输入会带上 bounded recent transcript：最近几轮 user message、final response、artifact 线索和 workspace 状态。
 - session 只有显式 archive/cancel 才结束；单次 run 成功只结束该 run。
+
+
+### 当前控制外部 agent 的 MCP 工具细粒度如何？4 个工具具体能控制哪些参数？
+
+当前 Main Agent 直接暴露 4 个 PLC worker 工具：
+
+- `plc_dev`：生成或更新 PLC 实现产物。
+- `plc_test`：基于当前需求和代码运行测试 worker。
+- `plc_formal`：基于当前需求和代码运行形式化验证 worker。
+- `plc_repair`：基于当前代码和失败证据运行修复 worker。
+
+每个工具都能传入通用参数：
+
+- `task_id`：目标任务。
+- `objective`：给对应 worker 的自然语言目标说明。
+- `rationale_summary`：记录本次调用原因，进入 tool-call 观测事件。
+- `llm`：可选 LLM 配置对象，字段包括 `model`、`base_url`、`temperature`、`timeout_seconds`、`max_retries`。
+
+各工具额外控制字段如下：
+
+- `plc-dev` 可用：`target_language`、`template`、`language_hint`、`enable_socratic_spec`、`socratic_skip`、`compiler_type`、`rpc_pipeline`、`llm`
+- `plc-test` 可用：`fuzz_method`、`case_count`、`enable_fuzz_test`、`llm`
+- `plc-formal` 可用：`compiler_type`、`properties`、`natural_language_requirements`、`llm`
+- `plc-repair` 可用：`repair_source`、`repair_targets`、`repair_failure_notes`、`compiler_type`、`llm`
+
+后端会把这些直接参数组装为 `WorkerInput.worker_config`。`worker_input_builder` 会为不同 worker 自动生成默认 `worker_config`，调用方显式传入的配置会覆盖默认值；`WorkerInput` 校验会拒绝该 worker 不支持的非空字段。

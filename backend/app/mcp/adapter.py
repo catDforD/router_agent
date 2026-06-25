@@ -23,6 +23,13 @@ from app.mcp.client import (
     PlcMcpToolError,
     PlcMcpToolNotFoundError,
 )
+from app.mcp.subagent_client import (
+    SubagentConnectionError,
+    SubagentExecutionError,
+    SubagentInvalidResponseError,
+    SubagentTimeoutError,
+    SubagentWorkerClient,
+)
 from app.mcp.draft import (
     LlmWorkerDraftOutput,
     McpDraftValidationError,
@@ -101,9 +108,13 @@ class McpAdapter:
         mock_scenario: str = DEFAULT_MOCK_SCENARIO,
         mock_runner: MockRunner | None = None,
         mcp_client: PlcMcpClient | None = None,
+        subagent_client: SubagentWorkerClient | None = None,
         plc_worker_mcp_url: str | None = None,
         plc_worker_timeout_seconds: int | None = None,
         plc_worker_artifact_max_chars: int | None = None,
+        subagent_api_base_url: str | None = None,
+        subagent_api_token: str | None = None,
+        subagent_timeout_seconds: int | None = None,
         plc_dev_mode: str | None = None,
         plc_test_mode: str | None = None,
         plc_formal_mode: str | None = None,
@@ -122,12 +133,24 @@ class McpAdapter:
         self.mock_scenario = mock_scenario
         self.mock_runner = mock_runner or run_mock_worker
         self.mcp_client = mcp_client
+        self.subagent_client = subagent_client
         self.plc_worker_mcp_url = plc_worker_mcp_url or settings.plc_worker_mcp_url
         self.plc_worker_timeout_seconds = (
             plc_worker_timeout_seconds or settings.plc_worker_timeout_seconds
         )
         self.plc_worker_artifact_max_chars = (
             plc_worker_artifact_max_chars or settings.plc_worker_artifact_max_chars
+        )
+        self.subagent_api_base_url = (
+            subagent_api_base_url or settings.subagent_api_base_url
+        )
+        self.subagent_api_token = (
+            subagent_api_token
+            if subagent_api_token is not None
+            else settings.subagent_api_token
+        )
+        self.subagent_timeout_seconds = (
+            subagent_timeout_seconds or settings.subagent_timeout_seconds
         )
         self.worker_modes = {
             WorkerType.PLC_DEV.value: plc_dev_mode if plc_dev_mode is not None else settings.plc_dev_mode,
@@ -149,14 +172,14 @@ class McpAdapter:
     ) -> WorkerResult:
         """Invoke a worker and persist the Router-side audit trail."""
 
-        if self.mcp_mode not in {"mock", "real", "hybrid"}:
+        if self.mcp_mode not in {"mock", "real", "hybrid", "subagent"}:
             raise McpAdapterUnsupportedModeError(
                 f"unsupported MCP_MODE for local adapter: {self.mcp_mode!r}"
             )
 
         active_scenario = scenario or self.mock_scenario
         route = self._route_for_worker(worker_input)
-        if route == "real":
+        if route in {"real", "subagent"}:
             worker_input = worker_input.model_copy(
                 deep=True,
                 update={
@@ -189,7 +212,7 @@ class McpAdapter:
                 worker_input=worker_input,
                 event_type=EventType.WORKER_STARTED,
                 title=f"{_value(worker_input.worker_type)} worker started",
-                message="Mock worker invocation started.",
+                message=f"{route} worker invocation started.",
                 created_at=started_at,
                 artifact_ids=_input_artifact_ids(worker_input),
                 payload={
@@ -209,9 +232,16 @@ class McpAdapter:
                 if not isinstance(mock_output, MockWorkerOutput):
                     raise MockWorkerSchemaInvalid("mock output is not a MockWorkerOutput")
                 draft_output = _draft_from_mock_output(mock_output)
-            else:
+            elif route == "real":
                 draft_output = self._call_real_worker(worker_input)
                 validate_worker_draft_output(draft_output, worker_input)
+            elif route == "subagent":
+                draft_output = self._call_subagent_worker(worker_input)
+                validate_worker_draft_output(draft_output, worker_input)
+            else:
+                raise McpAdapterUnsupportedModeError(
+                    f"unsupported worker route: {route!r}"
+                )
 
             produced_refs = self._persist_artifact_writes(
                 worker_input,
@@ -265,7 +295,7 @@ class McpAdapter:
             self._checkpoint()
             return result
 
-        except PlcMcpTimeoutError as exc:
+        except (PlcMcpTimeoutError, SubagentTimeoutError) as exc:
             completed_at = utc_now()
             result = timeout_worker_result(
                 worker_input,
@@ -288,7 +318,7 @@ class McpAdapter:
             self._checkpoint()
             return result
 
-        except PlcMcpConnectionError as exc:
+        except (PlcMcpConnectionError, SubagentConnectionError) as exc:
             completed_at = utc_now()
             result = connection_error_worker_result(
                 worker_input,
@@ -316,6 +346,7 @@ class McpAdapter:
             MockWorkerSchemaInvalid,
             WorkerResultNormalizationError,
             PlcMcpInvalidResponseError,
+            SubagentInvalidResponseError,
             McpDraftValidationError,
         ) as exc:
             completed_at = utc_now()
@@ -345,7 +376,7 @@ class McpAdapter:
         except MockWorkerExecutionError as exc:
             return self._complete_execution_error(worker_input, started_at, exc)
 
-        except (PlcMcpToolNotFoundError, PlcMcpToolError) as exc:
+        except (PlcMcpToolNotFoundError, PlcMcpToolError, SubagentExecutionError) as exc:
             return self._complete_execution_error(worker_input, started_at, exc)
 
         except Exception as exc:
@@ -374,6 +405,30 @@ class McpAdapter:
                 worker_input=worker_input,
                 input_artifacts=self._input_artifact_snapshots(worker_input),
             ),
+        )
+
+    def _call_subagent_worker(self, worker_input: WorkerInput) -> LlmWorkerDraftOutput:
+        client = self.subagent_client or SubagentWorkerClient(
+            base_url=self.subagent_api_base_url,
+            timeout_seconds=self.subagent_timeout_seconds,
+            api_token=self.subagent_api_token,
+            artifact_max_chars=self.plc_worker_artifact_max_chars,
+        )
+        log_with_context(
+            LOGGER,
+            logging.INFO,
+            "Subagent worker request sent",
+            task_id=worker_input.task_id,
+            openai_trace_id=worker_input.trace_context.openai_trace_id,
+            main_agent_run_id=worker_input.trace_context.main_agent_run_id,
+            worker_job_id=worker_input.worker_job_id,
+            worker_type=worker_input.worker_type,
+            mcp_tool=worker_input.mcp_tool,
+            mcp_request_id=worker_input.trace_context.mcp_request_id,
+        )
+        return client.call_worker(
+            worker_input,
+            self._input_artifact_snapshots(worker_input),
         )
 
     def _persist_artifact_writes(
@@ -616,8 +671,8 @@ class McpAdapter:
         override = self.worker_modes.get(worker_type)
         if override is not None:
             return override
-        if self.mcp_mode == "real":
-            return "real"
+        if self.mcp_mode in {"real", "subagent"}:
+            return self.mcp_mode
         return "mock"
 
 

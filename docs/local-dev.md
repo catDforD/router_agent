@@ -276,6 +276,34 @@ PLC_FORMAL_MODE=mock
 PLC_REPAIR_MODE=mock
 ```
 
+如果要直接调用远端 HTTP subagent，而不是本地 streamable HTTP MCP server，请使用：
+
+```text
+MCP_MODE=subagent
+SUBAGENT_API_BASE_URL=http://60.188.37.6:28080
+SUBAGENT_API_TOKEN=
+SUBAGENT_TIMEOUT_SECONDS=300
+```
+
+混合模式也支持 per-worker subagent 路由，例如：
+
+```text
+MCP_MODE=hybrid
+PLC_DEV_MODE=subagent
+PLC_TEST_MODE=mock
+PLC_FORMAL_MODE=subagent
+PLC_REPAIR_MODE=mock
+```
+
+远端 subagent live smoke 脚本：
+
+```bash
+uv run python scripts/dev_call_subagent_worker.py --worker plc-dev --base-url http://60.188.37.6:28080 --live
+uv run python scripts/dev_call_subagent_worker.py --worker plc-test --base-url http://60.188.37.6:28080 --live
+uv run python scripts/dev_call_subagent_worker.py --worker plc-formal --base-url http://60.188.37.6:28080 --live
+uv run python scripts/dev_call_subagent_worker.py --worker plc-repair --base-url http://60.188.37.6:28080 --live
+```
+
 需要显式传入 `--live` 才会执行 live worker smoke 调用：
 
 ```bash

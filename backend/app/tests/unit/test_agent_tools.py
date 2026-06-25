@@ -296,7 +296,10 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
         "git_status",
         "read_artifact",
         "write_artifact",
-        "call_mcp_tool",
+        "plc_dev",
+        "plc_test",
+        "plc_formal",
+        "plc_repair",
     ]
     assert [spec["function"]["name"] for spec in get_main_agent_tool_specs()] == [
         tool.name for tool in tools
@@ -507,7 +510,7 @@ def test_worker_input_builder_rejects_missing_repair_evidence(
         build_worker_input(current, WorkerType.PLC_REPAIR)
 
 
-def test_call_plc_dev_invokes_mock_worker_and_returns_compact_refs(
+def test_plc_dev_invokes_mock_worker_and_returns_compact_refs(
     db_session: Session,
     tmp_path: Path,
     service: AgentToolService,
@@ -515,7 +518,7 @@ def test_call_plc_dev_invokes_mock_worker_and_returns_compact_refs(
     task = classified_task(db_session)
     create_raw_artifact(db_session, tmp_path, task)
 
-    result = service.call_plc_dev(task.task_id)
+    result = service.plc_dev(task.task_id)
     updated = TaskRepository(db_session).get_task(task.task_id)
 
     assert result.status == "applied"
@@ -529,7 +532,7 @@ def test_call_plc_dev_invokes_mock_worker_and_returns_compact_refs(
     assert result.worker_job_id in updated.completed_worker_job_ids
 
 
-def test_call_plc_dev_propagates_worker_config_into_worker_job_input(
+def test_plc_dev_propagates_direct_worker_config_into_worker_job_input(
     db_session: Session,
     tmp_path: Path,
     service: AgentToolService,
@@ -537,18 +540,16 @@ def test_call_plc_dev_propagates_worker_config_into_worker_job_input(
     task = classified_task(db_session)
     create_raw_artifact(db_session, tmp_path, task)
 
-    result = service.call_plc_dev(
+    result = service.plc_dev(
         task.task_id,
-        worker_config={
-            "target_language": "FBD",
-            "compiler_type": "matiec",
-            "llm": {
-                "model": "deepseek-worker",
-                "base_url": "https://deepseek.example/v1",
-                "temperature": 0.2,
-                "timeout_seconds": 30,
-                "max_retries": 2,
-            },
+        target_language="FBD",
+        compiler_type="matiec",
+        llm={
+            "model": "deepseek-worker",
+            "base_url": "https://deepseek.example/v1",
+            "temperature": 0.2,
+            "timeout_seconds": 30,
+            "max_retries": 2,
         },
     )
     job = WorkerJobRepository(db_session).get_job(result.worker_job_id)
@@ -560,6 +561,99 @@ def test_call_plc_dev_propagates_worker_config_into_worker_job_input(
     assert job.input.worker_config.llm is not None
     assert job.input.worker_config.llm.model == "deepseek-worker"
     assert job.input.worker_config.llm.timeout_seconds == 30
+
+
+def test_plc_test_propagates_direct_worker_config_into_worker_job_input(
+    db_session: Session,
+    tmp_path: Path,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session)
+    create_requirements_and_code(db_session, tmp_path, task)
+
+    result = service.plc_test(
+        task.task_id,
+        fuzz_method="llm",
+        case_count=7,
+        enable_fuzz_test=False,
+        llm={"model": "test-worker"},
+    )
+    job = WorkerJobRepository(db_session).get_job(result.worker_job_id)
+
+    assert result.status == "applied"
+    assert job.input.worker_config is not None
+    assert job.input.worker_config.fuzz_method == "llm"
+    assert job.input.worker_config.case_count == 7
+    assert job.input.worker_config.enable_fuzz_test is False
+    assert job.input.worker_config.llm is not None
+    assert job.input.worker_config.llm.model == "test-worker"
+
+
+def test_plc_formal_propagates_direct_worker_config_into_worker_job_input(
+    db_session: Session,
+    tmp_path: Path,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session)
+    create_requirements_and_code(db_session, tmp_path, task)
+    properties = {"must_hold": ["emergency_stop_forces_motor_off"]}
+
+    result = service.plc_formal(
+        task.task_id,
+        compiler_type="rusty",
+        properties=properties,
+        natural_language_requirements="Emergency stop must force motor off.",
+        llm={"temperature": 0},
+    )
+    job = WorkerJobRepository(db_session).get_job(result.worker_job_id)
+
+    assert result.status == "applied"
+    assert job.input.worker_config is not None
+    assert job.input.worker_config.compiler_type == "rusty"
+    assert job.input.worker_config.properties == properties
+    assert (
+        job.input.worker_config.natural_language_requirements
+        == "Emergency stop must force motor off."
+    )
+    assert job.input.worker_config.llm is not None
+    assert job.input.worker_config.llm.temperature == 0
+
+
+def test_plc_repair_propagates_direct_worker_config_into_worker_job_input(
+    db_session: Session,
+    tmp_path: Path,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session)
+    _requirements, code = create_requirements_and_code(db_session, tmp_path, task)
+    failed_report = create_failed_test_report(db_session, tmp_path, task, code)
+    current = TaskRepository(db_session).get_task(task.task_id)
+    current = current.model_copy(
+        update={"failures": [blocking_failure(current, failed_report)]}
+    )
+    TaskRepository(db_session).update_task_state(current)
+
+    result = service.plc_repair(
+        task.task_id,
+        repair_source="test_failure",
+        repair_targets=["test_failure"],
+        repair_failure_notes="Repair the failed emergency stop case.",
+        compiler_type="rusty",
+        llm={"max_retries": 1},
+    )
+    job = WorkerJobRepository(db_session).get_job(result.worker_job_id)
+
+    assert result.status == "applied"
+    assert job.input.worker_config is not None
+    assert job.input.worker_config.repair_source == "test_failure"
+    assert job.input.worker_config.repair_targets == ["test_failure"]
+    assert (
+        job.input.worker_config.repair_failure_notes
+        == "Repair the failed emergency stop case."
+    )
+    assert job.input.worker_config.compiler_type == "rusty"
+    assert job.input.worker_config.llm is not None
+    assert job.input.worker_config.llm.max_retries == 1
 
 
 def test_worker_input_builder_uses_string_failure_sources_for_repair_defaults(
@@ -609,7 +703,7 @@ def test_mock_plc_dev_uses_fbd_artifact_details_when_target_language_is_fbd(
     assert code_write.summary == "Mock FBD implementation."
 
 
-def test_call_mcp_tool_prepares_intake_task_for_domain_worker(
+def test_plc_dev_prepares_intake_task_for_domain_worker(
     db_session: Session,
     tmp_path: Path,
 ) -> None:
@@ -630,10 +724,9 @@ def test_call_mcp_tool_prepares_intake_task_for_domain_worker(
         )
     )
 
-    result = service.call_mcp_tool(
+    result = service.plc_dev(
         created.task.task_id,
-        tool_name="plc_dev.run",
-        arguments={"objective": "Generate conveyor start stop ST code."},
+        objective="Generate conveyor start stop ST code.",
     )
     updated = TaskRepository(db_session).get_task(created.task.task_id)
     events = EventService(db_session).list_visible_events(created.task.task_id)
@@ -671,7 +764,7 @@ def test_worker_tool_rationale_is_observable_without_changing_worker_input(
         )
     )
 
-    result = service.call_plc_dev(
+    result = service.plc_dev(
         task.task_id,
         objective="Generate motor control code.",
         rationale_summary="No current code exists, so start with PLC development.",
@@ -683,6 +776,7 @@ def test_worker_tool_rationale_is_observable_without_changing_worker_input(
     assert "agent.tool_called" in [event.type for event in events]
     assert "agent.tool_result" in [event.type for event in events]
     tool_call = next(event for event in events if event.type == "agent.tool_called")
+    assert tool_call.payload["tool_name"] == "plc_dev"
     assert (
         tool_call.payload["rationale_summary"]
         == "No current code exists, so start with PLC development."
@@ -691,13 +785,13 @@ def test_worker_tool_rationale_is_observable_without_changing_worker_input(
     assert "rationale_summary" not in job.input_json["metadata"]
 
 
-def test_call_plc_test_without_current_code_is_rejected_without_side_effects(
+def test_plc_test_without_current_code_is_rejected_without_side_effects(
     db_session: Session,
     service: AgentToolService,
 ) -> None:
     task = classified_task(db_session)
 
-    result = service.call_plc_test(task.task_id)
+    result = service.plc_test(task.task_id)
     updated = TaskRepository(db_session).get_task(task.task_id)
 
     assert result.status == "rejected"
@@ -727,7 +821,7 @@ def test_guard_rejection_is_recorded_when_observability_is_enabled(
         )
     )
 
-    result = service.call_plc_test(
+    result = service.plc_test(
         task.task_id,
         rationale_summary="Testing is required before final delivery.",
     )
@@ -745,7 +839,7 @@ def test_guard_rejection_is_recorded_when_observability_is_enabled(
     assert worker_job_rows(db_session) == []
 
 
-def test_call_plc_repair_without_failure_is_rejected_without_side_effects(
+def test_plc_repair_without_failure_is_rejected_without_side_effects(
     db_session: Session,
     tmp_path: Path,
     service: AgentToolService,
@@ -753,7 +847,7 @@ def test_call_plc_repair_without_failure_is_rejected_without_side_effects(
     task = classified_task(db_session)
     create_requirements_and_code(db_session, tmp_path, task)
 
-    result = service.call_plc_repair(task.task_id)
+    result = service.plc_repair(task.task_id)
     updated = TaskRepository(db_session).get_task(task.task_id)
 
     assert result.status == "rejected"

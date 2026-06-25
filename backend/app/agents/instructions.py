@@ -25,8 +25,9 @@ Operating rules:
   command is available or inferable from the repository.
 - Use write_artifact for durable notes, long outputs, reports, or generated
   deliverables that should outlive the model context.
-- Use call_mcp_tool only for configured external/domain tools. PLC workers are
-  optional MCP tools, not the default execution path.
+- Use plc_dev, plc_test, plc_formal, and plc_repair for PLC domain work when
+  the task requires worker assistance. Fill their direct worker parameters when
+  target language, compiler, fuzzing, formal, repair, or LLM controls matter.
 - If a tool is rejected, treat the rejection as runtime policy and choose a
   different safe next step.
 - When more work is needed, call a tool or write a short public progress
