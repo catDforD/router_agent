@@ -16,6 +16,7 @@ from app.models.router_schema import (
     TaskPhase,
     TaskStatus,
 )
+from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
 from app.services.runtime_service import RuntimeService
@@ -175,13 +176,17 @@ def append_user_message(
     session_factory: sessionmaker[Session],
     task_id: str,
     message: str = "Use Codesys with StartCmd and StopCmd.",
-) -> None:
+) -> str:
     with session_factory() as session:
-        TaskService(session=session, artifact_root=settings.artifact_root).append_user_message(
+        result = TaskService(
+            session=session,
+            artifact_root=settings.artifact_root,
+        ).append_user_message(
             task_id=task_id,
             message=message,
         )
         session.commit()
+        return result.message_artifact_id
 
 
 def runtime_metadata(session_factory: sessionmaker[Session], task_id: str) -> dict[str, Any]:
@@ -374,6 +379,57 @@ def test_resume_noops_for_terminal_task(
     assert result.status == "skipped"
     assert result.reason == "terminal_task"
     assert runner.calls == []
+
+
+def test_terminal_followup_answers_in_same_task_without_rerunning_worker_chain(
+    runtime_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, session_factory = runtime_context
+    settings = settings.model_copy(
+        update={
+            "main_agent_api_key": None,
+            "main_agent_model": None,
+            "openai_api_key": None,
+        }
+    )
+    task_id = create_task(settings, session_factory)
+    update_task(session_factory, task_id, status=TaskStatus.SUCCEEDED.value)
+    message_artifact_id = append_user_message(
+        settings,
+        session_factory,
+        task_id,
+        message="再解释一遍。",
+    )
+    runner = RecordingRunner()
+
+    result = runtime_service(
+        settings,
+        session_factory,
+        runner,
+    ).answer_followup_message(task_id, message_artifact_id)
+
+    task = task_state(session_factory, task_id)
+    with session_factory() as session:
+        events = EventService(session).list_visible_events(task_id)
+        artifacts = ArtifactRepository(session).list_task_artifacts(task_id)
+
+    assert result.status == "answered"
+    assert task.status == "succeeded"
+    assert runner.calls == []
+    assert [event.type for event in events][-3:] == [
+        "task.updated",
+        "main_agent.started",
+        "main_agent.message",
+    ]
+    assert events[-1].payload["mode"] == "followup"
+    assert "再解释" in events[-1].payload["content"]
+    answer_artifact_id = events[-1].payload["answer_artifact_id"]
+    assert answer_artifact_id in task.current_artifacts.all_artifact_ids
+    assert any(
+        artifact.artifact_id == answer_artifact_id
+        and artifact.metadata.tags == ["followup_answer"]
+        for artifact in artifacts
+    )
 
 
 def test_resume_noops_for_non_waiting_task(

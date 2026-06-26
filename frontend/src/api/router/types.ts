@@ -31,12 +31,42 @@ import type {
   JsonValue,
   ProjectContext,
   TaskState,
+  WorkerType,
 } from "../../../../schema/ts/router_contract";
 
 export interface HealthResponse {
   status: string;
   app: string;
   env: string;
+}
+
+export interface SubagentStatusWorker {
+  worker_type: WorkerType;
+  agent_id: string;
+  route: "mock" | "real" | "subagent" | string;
+  status: string;
+  online?: boolean | null;
+  latency_ms?: number | null;
+  status_code?: number | null;
+  error?: string | null;
+}
+
+export interface SubagentStatusProbe {
+  method: string;
+  path: string;
+  status: string;
+  online?: boolean | null;
+  latency_ms?: number | null;
+  status_code?: number | null;
+  error?: string | null;
+  checked_at: string;
+}
+
+export interface SubagentStatusResponse {
+  mode: string;
+  base_url: string;
+  probe: SubagentStatusProbe;
+  workers: SubagentStatusWorker[];
 }
 
 export interface CreateTaskRequest {
@@ -48,6 +78,10 @@ export interface CreateTaskResponse {
   task_id: string;
   status: string;
   events_url: string;
+}
+
+export interface TaskListResponse {
+  tasks: TaskState[];
 }
 
 export interface CreateSessionResponse {

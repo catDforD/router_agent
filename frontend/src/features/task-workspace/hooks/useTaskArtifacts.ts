@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   listTaskArtifacts,
@@ -26,6 +26,13 @@ export function useTaskArtifacts(taskId: string | null) {
   const [contentById, setContentById] = useState<Record<string, ArtifactContentState>>(
     {},
   );
+
+  useEffect(() => {
+    setArtifacts([]);
+    setSelectedArtifactId(null);
+    setError(undefined);
+    setContentById({});
+  }, [taskId]);
 
   const refreshArtifacts = useCallback(async () => {
     if (!taskId) {

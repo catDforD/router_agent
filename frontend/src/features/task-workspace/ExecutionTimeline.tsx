@@ -16,7 +16,7 @@ export function ExecutionTimeline({
       <section className="empty-state timeline-empty">
         <div>
           <h3 className="empty-title">Timeline</h3>
-          <p className="small muted">No events yet.</p>
+          <p className="small muted">No events yet</p>
         </div>
       </section>
     );

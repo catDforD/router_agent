@@ -11,6 +11,7 @@ from app.api import sessions as sessions_api
 from app.api import tasks as tasks_api
 from app.core.config import Settings
 from app.core.database import get_engine_for_url, get_session_factory_for_url
+from app.core.errors import RepositoryNotFoundError
 from app.main import create_app
 from app.models.db_models import Base
 from app.models.router_schema import ArtifactType
@@ -95,9 +96,23 @@ def scheduled_runtime(
             ("resume", task_id, settings.database_url if settings is not None else None)
         )
 
+    def fake_followup(
+        task_id: str,
+        message_artifact_id: str,
+        settings: Settings | None = None,
+    ) -> None:
+        scheduled.append(
+            (
+                "followup",
+                task_id,
+                settings.database_url if settings is not None else None,
+            )
+        )
+
     monkeypatch.setattr(tasks_api, "run_runtime_start_task", fake_start)
     monkeypatch.setattr(tasks_api, "run_runtime_resume_task", fake_resume)
     monkeypatch.setattr(sessions_api, "run_runtime_start_task", fake_start)
+    monkeypatch.setattr(tasks_api, "run_runtime_followup_task", fake_followup)
     return scheduled
 
 
@@ -275,6 +290,45 @@ def test_get_task_endpoint_returns_current_task_state(
     assert payload["event_seq"] == 1
 
 
+def test_delete_task_endpoint_removes_task(
+    api_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, session_factory = api_context
+    task_id = create_task(settings, session_factory, message="Create pump logic.")
+
+    with session_factory() as session:
+        result = tasks_api.delete_task(
+            task_id,
+            session=session,
+            service=TaskService(session=session, artifact_root=settings.artifact_root),
+        )
+
+    assert result is None
+    with session_factory() as session:
+        with pytest.raises(RepositoryNotFoundError):
+            TaskRepository(session).get_task(task_id)
+
+
+def test_list_tasks_endpoint_returns_recent_tasks(
+    api_context: tuple[Settings, sessionmaker[Session]],
+) -> None:
+    settings, session_factory = api_context
+    older_task_id = create_task(settings, session_factory, message="Create pump logic.")
+    newer_task_id = create_task(settings, session_factory, message="Create fan logic.")
+
+    with session_factory() as session:
+        response = tasks_api.list_tasks(
+            limit=10,
+            service=TaskService(session=session, artifact_root=settings.artifact_root),
+        )
+
+    assert [task.task_id for task in response.tasks] == [
+        newer_task_id,
+        older_task_id,
+    ]
+    assert response.tasks[0].raw_user_request == "Create fan logic."
+
+
 def test_get_task_endpoint_missing_task_returns_not_found(
     api_context: tuple[Settings, sessionmaker[Session]],
 ) -> None:
@@ -407,8 +461,8 @@ def test_append_user_message_endpoint_errors(
 
     assert blank.status_code == 422
     assert missing.status_code == 404
-    assert terminal.status_code == 409
-    assert scheduled_runtime == []
+    assert terminal.status_code == 200
+    assert scheduled_runtime == [("followup", task_id, settings.database_url)]
 
 
 def test_cancel_task_endpoint_updates_state_and_is_idempotent(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import shutil
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -81,11 +82,31 @@ class TaskService:
 
     def __init__(self, session: Session, artifact_root: Path) -> None:
         self.task_repository = TaskRepository(session)
+        self.artifact_root = artifact_root
         self.artifact_store = ArtifactStore(session=session, artifact_root=artifact_root)
         self.event_service = EventService(session)
 
     def get_task(self, task_id: str) -> TaskState:
         return self.task_repository.get_task(task_id)
+
+    def list_recent_tasks(
+        self,
+        *,
+        limit: int = 20,
+        user_id: str | None = None,
+    ) -> list[TaskState]:
+        return self.task_repository.list_recent_tasks(limit=limit, user_id=user_id)
+
+    def delete_task(self, task_id: str) -> None:
+        self.task_repository.get_task(task_id)
+        self.task_repository.delete_task(task_id)
+        task_artifact_dir = (self.artifact_root / task_id).resolve()
+        artifact_root = self.artifact_root.resolve()
+        try:
+            task_artifact_dir.relative_to(artifact_root)
+        except ValueError:
+            return
+        shutil.rmtree(task_artifact_dir, ignore_errors=True)
 
     def create_task(
         self,
@@ -202,10 +223,6 @@ class TaskService:
         user_id: str | None = None,
     ) -> UserMessageResult:
         task = self.task_repository.get_task(task_id)
-        if enum_value(task.status) in TERMINAL_STATUSES:
-            raise TaskMutationConflictError(
-                f"cannot append message to terminal task: {task_id}"
-            )
 
         now = utc_now()
         message_artifact = self.artifact_store.write_artifact_content(
@@ -239,12 +256,29 @@ class TaskService:
                 payload={
                     "task_id": task_id,
                     "message_artifact_id": message_artifact.artifact_id,
+                    "message": message,
                 },
                 source_id=user_id,
             )
         )
+        persisted = self.task_repository.get_task(task_id)
+        all_artifact_ids = list(persisted.current_artifacts.all_artifact_ids)
+        if message_artifact.artifact_id not in all_artifact_ids:
+            all_artifact_ids.append(message_artifact.artifact_id)
+            persisted = self.task_repository.update_task_state(
+                persisted.model_copy(
+                    deep=True,
+                    update={
+                        "current_artifacts": persisted.current_artifacts.model_copy(
+                            update={"all_artifact_ids": all_artifact_ids}
+                        ),
+                        "updated_at": now,
+                    },
+                )
+            )
+
         return UserMessageResult(
-            task=self.task_repository.get_task(task_id),
+            task=persisted,
             message_artifact_id=message_artifact.artifact_id,
         )
 

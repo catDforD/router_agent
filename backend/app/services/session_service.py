@@ -101,6 +101,15 @@ class AgentSessionService:
     def list_sessions(self, *, limit: int = 50) -> list[AgentSession]:
         return self.session_repository.list_sessions(limit=limit)
 
+    def delete_session(self, session_id: str) -> None:
+        task_ids = [
+            task.task_id
+            for task in self.task_repository.list_tasks_by_session(session_id)
+        ]
+        self.session_repository.delete_session(session_id)
+        for task_id in task_ids:
+            self.task_service.delete_task(task_id)
+
     def get_latest_task(self, session_id: str) -> TaskState | None:
         agent_session = self.session_repository.get_session(session_id)
         if agent_session.latest_task_id is None:

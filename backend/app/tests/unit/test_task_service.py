@@ -7,9 +7,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.agents.main_agent import MainAgentService
+from app.core.errors import RepositoryNotFoundError
 from app.models.db_models import Base
 from app.repositories.artifact_repo import ArtifactRepository
+from app.repositories.event_repo import EventRepository
+from app.repositories.session_repo import AgentSessionRepository
 from app.repositories.task_repo import TaskRepository
+from app.services.session_service import AgentSessionService
 from app.services.event_service import EventService
 from app.services.task_service import TaskMutationConflictError, TaskService
 
@@ -153,6 +157,58 @@ def test_append_user_message_stores_artifact_and_task_updated_event(
     assert events[-1].correlation.artifact_ids == [appended.message_artifact_id]
 
 
+def test_delete_task_removes_task_events_artifacts_and_files(
+    db_session: Session,
+    service: TaskService,
+) -> None:
+    created = service.create_task(message="Create pump logic.")
+    task_id = created.task.task_id
+    artifact_id = created.raw_user_request_artifact_id
+
+    service.delete_task(task_id)
+
+    with pytest.raises(RepositoryNotFoundError):
+        TaskRepository(db_session).get_task(task_id)
+    with pytest.raises(RepositoryNotFoundError):
+        ArtifactRepository(db_session).get_artifact(artifact_id)
+    assert EventRepository(db_session).list_events(task_id) == []
+    assert not (service.artifact_root / task_id).exists()
+
+
+def test_delete_session_removes_runs_tasks_events_artifacts_and_files(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    session_service = AgentSessionService(
+        session=db_session,
+        artifact_root=artifact_root,
+    )
+    created = session_service.create_session(message="Create pump logic.")
+    appended = session_service.append_message(
+        session_id=created.session.session_id,
+        message="Explain it again.",
+    )
+    task_ids = [created.task.task_id, appended.task.task_id]
+    artifact_ids = [
+        created.raw_user_request_artifact_id,
+        appended.task.current_artifacts.raw_user_request.artifact_id,
+    ]
+
+    session_service.delete_session(created.session.session_id)
+
+    with pytest.raises(RepositoryNotFoundError):
+        AgentSessionRepository(db_session).get_session(created.session.session_id)
+    for task_id in task_ids:
+        with pytest.raises(RepositoryNotFoundError):
+            TaskRepository(db_session).get_task(task_id)
+        assert EventRepository(db_session).list_events(task_id) == []
+        assert not (artifact_root / task_id).exists()
+    for artifact_id in artifact_ids:
+        with pytest.raises(RepositoryNotFoundError):
+            ArtifactRepository(db_session).get_artifact(artifact_id)
+
+
 def test_cancel_task_updates_state_and_emits_event(
     db_session: Session,
     service: TaskService,
@@ -260,14 +316,16 @@ def test_cancel_task_rejects_terminal_status(
         service.cancel_task(task.task_id)
 
 
-def test_append_user_message_rejects_terminal_task(
+def test_append_user_message_accepts_terminal_task_as_followup(
     service: TaskService,
 ) -> None:
     task = service.create_task(message="Create pump logic.").task
     service.cancel_task(task.task_id)
 
-    with pytest.raises(TaskMutationConflictError):
-        service.append_user_message(
-            task_id=task.task_id,
-            message="One more note.",
-        )
+    appended = service.append_user_message(
+        task_id=task.task_id,
+        message="One more note.",
+    )
+
+    assert appended.task.status == "cancelled"
+    assert appended.message_artifact_id in appended.task.current_artifacts.all_artifact_ids

@@ -23,7 +23,7 @@ class MainAgentChatClient(Protocol):
         self,
         *,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         model: str,
         stream: bool = False,
     ) -> Any:
@@ -53,7 +53,7 @@ class OpenAICompatibleChatClient:
         self,
         *,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         model: str,
         stream: bool = False,
     ) -> Any:
@@ -65,10 +65,11 @@ class OpenAICompatibleChatClient:
         request = {
             "model": model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "stream": bool(stream),
         }
+        if tools:
+            request["tools"] = tools
+            request["tool_choice"] = "auto"
         if stream:
             request["stream_options"] = {"include_usage": True}
         self.captured_requests.append(request)

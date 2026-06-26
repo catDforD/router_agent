@@ -28,7 +28,14 @@ export function TraceView({
       </div>
       {loading ? <div className="notice">Loading trace.</div> : null}
       {error ? <div className="notice error-box">{error}</div> : null}
-      {!trace ? <div className="notice">No trace loaded.</div> : null}
+      {!trace ? (
+        <div className="empty-state">
+          <div>
+            <h3 className="empty-title">No trace yet</h3>
+            <p className="small muted">Runtime events and worker calls will appear here.</p>
+          </div>
+        </div>
+      ) : null}
       {trace ? (
         <div className="trace-grid">
           <div className="notice">
