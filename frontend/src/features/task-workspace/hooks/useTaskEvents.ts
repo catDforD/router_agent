@@ -11,6 +11,7 @@ export function useTaskEvents(
   streamId: string | null,
   enabled = true,
   scope: "task" | "session" = "task",
+  reconnectSignal = 0,
 ) {
   const [events, setEvents] = useState<RouterEvent[]>([]);
   const [streamState, setStreamState] = useState<StreamState>("idle");
@@ -101,7 +102,7 @@ export function useTaskEvents(
       }
       stream?.close();
     };
-  }, [streamId, enabled, scope]);
+  }, [streamId, enabled, scope, reconnectSignal]);
 
   return useMemo(
     () => ({

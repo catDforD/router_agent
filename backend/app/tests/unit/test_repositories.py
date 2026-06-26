@@ -92,6 +92,21 @@ def test_create_task_then_get_task_restores_complete_task_state(
     assert restored == task
 
 
+def test_list_recent_tasks_orders_by_updated_at_desc(db_session: Session) -> None:
+    first = create_task(db_session)
+    second = first.model_copy(
+        update={
+            "task_id": "task-recent-002",
+            "updated_at": first.updated_at.replace(year=first.updated_at.year + 1),
+        }
+    )
+    TaskRepository(db_session).create_task(second)
+
+    listed = TaskRepository(db_session).list_recent_tasks(limit=2)
+
+    assert [task.task_id for task in listed] == [second.task_id, first.task_id]
+
+
 def test_task_projection_columns_match_saved_task_state(db_session: Session) -> None:
     task = create_task(db_session)
 

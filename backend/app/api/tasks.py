@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterator
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from typing import Annotated
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -17,8 +19,13 @@ from app.core.errors import (
     RepositoryNotFoundError,
 )
 from app.core.logging import log_with_context
-from app.models.router_schema import ProjectContext, TaskState
-from app.services.runtime_service import run_runtime_resume_task, run_runtime_start_task
+from app.models.router_schema import ProjectContext, TaskState, TaskStatus
+from app.repositories._helpers import enum_value
+from app.services.runtime_service import (
+    run_runtime_followup_task,
+    run_runtime_resume_task,
+    run_runtime_start_task,
+)
 from app.services.task_service import (
     TaskMutationConflictError,
     TaskService,
@@ -29,6 +36,12 @@ from app.services.trace_summary import TaskTraceSummary, TraceSummaryService
 
 router = APIRouter(tags=["tasks"])
 LOGGER = logging.getLogger(__name__)
+TERMINAL_TASK_STATUSES = {
+    TaskStatus.SUCCEEDED.value,
+    TaskStatus.PARTIAL_FAILED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
 
 
 class CreateTaskRequest(BaseModel):
@@ -58,6 +71,10 @@ class CreateTaskResponse(BaseModel):
     task_id: str
     status: str
     events_url: str
+
+
+class TaskListResponse(BaseModel):
+    tasks: list[TaskState]
 
 
 class UserMessageResponse(BaseModel):
@@ -116,6 +133,14 @@ def create_task(
     )
 
 
+@router.get("/api/tasks", response_model=TaskListResponse)
+def list_tasks(
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    service: TaskService = Depends(get_task_service),
+) -> TaskListResponse:
+    return TaskListResponse(tasks=service.list_recent_tasks(limit=limit))
+
+
 @router.get("/api/tasks/{task_id}", response_model=TaskState)
 def get_task(
     task_id: str,
@@ -125,6 +150,23 @@ def get_task(
         return service.get_task(task_id)
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/api/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(
+    task_id: str,
+    session: Session = Depends(get_request_db_session),
+    service: TaskService = Depends(get_task_service),
+) -> None:
+    try:
+        service.delete_task(task_id)
+        session.commit()
+    except RepositoryNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.get("/api/tasks/{task_id}/trace", response_model=TaskTraceSummary)
@@ -172,11 +214,19 @@ def append_user_message(
         session.rollback()
         raise
 
-    _schedule_runtime_resume(
-        background_tasks,
-        task_id,
-        settings=request.app.state.settings,
-    )
+    if enum_value(result.task.status) in TERMINAL_TASK_STATUSES:
+        _schedule_runtime_followup(
+            background_tasks,
+            task_id,
+            result.message_artifact_id,
+            settings=request.app.state.settings,
+        )
+    else:
+        _schedule_runtime_resume(
+            background_tasks,
+            task_id,
+            settings=request.app.state.settings,
+        )
     return _user_message_response(result)
 
 
@@ -228,3 +278,18 @@ def _schedule_runtime_resume(
     settings: Settings,
 ) -> None:
     background_tasks.add_task(run_runtime_resume_task, task_id, settings)
+
+
+def _schedule_runtime_followup(
+    background_tasks: BackgroundTasks,
+    task_id: str,
+    message_artifact_id: str,
+    *,
+    settings: Settings,
+) -> None:
+    background_tasks.add_task(
+        run_runtime_followup_task,
+        task_id,
+        message_artifact_id,
+        settings,
+    )

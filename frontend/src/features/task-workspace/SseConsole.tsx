@@ -9,6 +9,7 @@ import {
   CircleDot,
   FileText,
   Loader2,
+  Plus,
   RefreshCw,
   Sparkles,
   SquareTerminal,
@@ -41,6 +42,11 @@ interface SseConsoleProps {
   onToggleTrace: () => void;
   onCancel: () => void;
   onArtifactClick: (artifactId: string) => void;
+  onNewTask: () => void;
+  draftMessage?: string;
+  focusSignal: number;
+  resetSignal: number;
+  onDraftConsumed: () => void;
 }
 
 type TranscriptItem =
@@ -146,11 +152,20 @@ export function SseConsole({
   onToggleTrace,
   onCancel,
   onArtifactClick,
+  onNewTask,
+  draftMessage,
+  focusSignal,
+  resetSignal,
+  onDraftConsumed,
 }: SseConsoleProps) {
   const [message, setMessage] = useState("");
+  const [followupPendingAfterSeq, setFollowupPendingAfterSeq] = useState<number | null>(
+    null,
+  );
   const [processOpenByRun, setProcessOpenByRun] = useState<Record<string, boolean>>({});
   const [processTouchedByRun, setProcessTouchedByRun] = useState<Record<string, boolean>>({});
   const endRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const transcriptView = useMemo(() => buildTranscriptView(task, events), [task, events]);
   const transcriptContentCount = transcriptView.runs.reduce(
     (count, run) =>
@@ -170,8 +185,40 @@ export function SseConsole({
     () => task?.unresolved_questions.filter((question) => question.status === "open") ?? [],
     [task?.unresolved_questions],
   );
+  const terminal = isTerminalTask(task);
+  const running = Boolean(
+    task &&
+      !terminal &&
+      (loading ||
+        task.status === "created" ||
+        task.status === "running" ||
+        task.status === "waiting_user" ||
+        streamState === "connecting" ||
+        streamState === "connected" ||
+        streamState === "reconnecting"),
+  );
   const canSubmit =
-    message.trim().length > 0 && !loading && (!task || canAppendMessage);
+    message.trim().length > 0 &&
+    !loading &&
+    followupPendingAfterSeq === null &&
+    (!task || canAppendMessage || terminal);
+
+  useEffect(() => {
+    if (followupPendingAfterSeq === null) {
+      return;
+    }
+    if (
+      events.some(
+        (event) =>
+          event.seq > followupPendingAfterSeq &&
+          (event.type === "agent.message" ||
+            event.type === "agent.final_response" ||
+            event.type === "agent.completed"),
+      )
+    ) {
+      setFollowupPendingAfterSeq(null);
+    }
+  }, [events, followupPendingAfterSeq]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -183,18 +230,46 @@ export function SseConsole({
     setProcessTouchedByRun((current) => pruneRunState(current, activeRunIds));
   }, [runKey, transcriptView.runs]);
 
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [focusSignal]);
+
+  useEffect(() => {
+    setMessage("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [resetSignal]);
+
+  useEffect(() => {
+    if (!draftMessage) {
+      return;
+    }
+    setMessage(draftMessage);
+    onDraftConsumed();
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [draftMessage, onDraftConsumed]);
+
   const submitMessage = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = message.trim();
-    if (!trimmed || loading) {
+    if (!trimmed || loading || followupPendingAfterSeq !== null) {
       return;
     }
 
     if (task) {
-      if (!canAppendMessage) {
+      if (!canAppendMessage && !terminal) {
         return;
       }
-      await onAppendMessage(trimmed);
+      if (terminal) {
+        setFollowupPendingAfterSeq(latestSeq);
+      }
+      try {
+        await onAppendMessage(trimmed);
+      } catch (error) {
+        if (terminal) {
+          setFollowupPendingAfterSeq(null);
+        }
+        throw error;
+      }
     } else {
       await onCreateTask(trimmed, {
         target_plc_language: "ST",
@@ -230,6 +305,15 @@ export function SseConsole({
           </h1>
         </div>
         <div className="stage-actions">
+          <button
+            className="ghost-button"
+            type="button"
+            title="新任务"
+            aria-label="新任务"
+            onClick={onNewTask}
+          >
+            <Plus size={15} />
+          </button>
           <button
             className="ghost-button"
             type="button"
@@ -350,25 +434,61 @@ export function SseConsole({
 
       <form className="prompt-card" onSubmit={submitMessage}>
         <textarea
+          ref={textareaRef}
           aria-label="Message"
           value={message}
           onChange={(event) => setMessage(event.target.value)}
-          placeholder={task ? "继续补充任务要求..." : "随心输入"}
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Enter" ||
+              event.shiftKey ||
+              event.nativeEvent.isComposing
+            ) {
+              return;
+            }
+            event.preventDefault();
+            if (canSubmit) {
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder={
+            task && terminal
+              ? "继续追问当前任务..."
+              : task
+                ? "继续补充任务要求..."
+                : "描述新的 PLC 任务目标..."
+          }
         />
         <div className="prompt-footer">
-          <div className="prompt-context">
-            <span>{task ? "append" : "new task"}</span>
-            <span>SSE {streamState}</span>
-            <span>{task?.phase ?? "idle"}</span>
-          </div>
           <button
             className="send-button"
+            data-running={running || followupPendingAfterSeq !== null}
             type="submit"
             disabled={!canSubmit}
-            aria-label={task ? "Send message" : "Create task"}
-            title={task ? "Send message" : "Create task"}
+            aria-label={
+              followupPendingAfterSeq !== null
+                ? "Answering follow-up"
+                : task && terminal
+                  ? "Send follow-up"
+                  : task
+                    ? "Send message"
+                    : "Create task"
+            }
+            title={
+              followupPendingAfterSeq !== null
+                ? "正在回答"
+                : task && terminal
+                  ? "继续追问当前任务"
+                  : task
+                    ? "Send message"
+                    : "Create task"
+            }
           >
-            <ArrowUp size={18} />
+            {running || followupPendingAfterSeq !== null ? (
+              <Loader2 size={18} />
+            ) : (
+              <ArrowUp size={18} />
+            )}
           </button>
         </div>
       </form>
@@ -1235,6 +1355,16 @@ function statusFromEvent(type: string): string {
     return "rejected";
   }
   return "observed";
+}
+
+function isTerminalTask(task: TaskState | null): boolean {
+  return Boolean(
+    task &&
+      (task.status === "succeeded" ||
+        task.status === "partial_failed" ||
+        task.status === "failed" ||
+        task.status === "cancelled"),
+  );
 }
 
 function formatTime(value?: string): string {

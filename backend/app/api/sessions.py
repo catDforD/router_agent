@@ -160,6 +160,23 @@ def get_session(
     return SessionResponse(session=agent_session, latest_task=latest_task)
 
 
+@router.delete("/api/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(
+    session_id: str,
+    session: Session = Depends(get_request_db_session),
+    service: AgentSessionService = Depends(get_agent_session_service),
+) -> None:
+    try:
+        service.delete_session(session_id)
+        session.commit()
+    except RepositoryNotFoundError as exc:
+        session.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception:
+        session.rollback()
+        raise
+
+
 @router.post(
     "/api/sessions/{session_id}/messages",
     response_model=AppendSessionMessageResponse,
