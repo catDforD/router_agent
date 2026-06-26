@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import difflib
 import json
 from pathlib import PurePath
+import re
 from time import sleep as default_sleep
 from typing import Any
 
@@ -15,7 +16,7 @@ import httpx
 from app.mcp.draft import (
     LlmArtifactWriteDraft,
     LlmWorkerDraftOutput,
-    McpInputArtifactSnapshot,
+    McpInputFileSnapshot,
 )
 from app.models.router_schema import (
     ArtifactType,
@@ -131,13 +132,13 @@ class SubagentWorkerClient:
     def call_worker(
         self,
         worker_input: WorkerInput,
-        input_artifacts: list[McpInputArtifactSnapshot],
+        input_files: list[McpInputFileSnapshot],
     ) -> LlmWorkerDraftOutput:
         """Call a remote subagent and convert its stream to a worker draft."""
 
         request = build_subagent_request(
             worker_input,
-            input_artifacts,
+            input_files,
             artifact_max_chars=self.artifact_max_chars,
         )
         events = self._stream_events(request)
@@ -147,7 +148,7 @@ class SubagentWorkerClient:
                 _error_message(error_event),
                 details={"event": _json_safe(error_event)},
             )
-        return draft_from_subagent_events(worker_input, input_artifacts, events)
+        return draft_from_subagent_events(worker_input, input_files, events)
 
     def _stream_events(self, request: dict[str, Any]) -> list[SubagentSseEvent]:
         url = _join_url(self.base_url, "/api/chat/stream")
@@ -245,7 +246,7 @@ class SubagentWorkerClient:
 
 def build_subagent_request(
     worker_input: WorkerInput,
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     *,
     artifact_max_chars: int = 12_000,
 ) -> dict[str, Any]:
@@ -261,7 +262,7 @@ def build_subagent_request(
     return {
         "message": build_subagent_message(
             worker_input,
-            input_artifacts,
+            input_files,
             artifact_max_chars=artifact_max_chars,
         ),
         "agent_id": agent_id,
@@ -294,7 +295,7 @@ def build_subagent_context(worker_input: WorkerInput) -> dict[str, Any]:
 
 def build_subagent_message(
     worker_input: WorkerInput,
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     *,
     artifact_max_chars: int = 12_000,
 ) -> str:
@@ -305,10 +306,10 @@ def build_subagent_message(
     if user_goal and user_goal not in parts[0]:
         parts.append(f"User goal:\n{user_goal}")
 
-    if input_artifacts:
-        parts.append("Input artifacts:")
-        for artifact in input_artifacts:
-            parts.append(_artifact_message_block(artifact, artifact_max_chars))
+    if input_files:
+        parts.append("Input files:")
+        for artifact in input_files:
+            parts.append(_file_message_block(artifact, artifact_max_chars))
 
     return "\n\n".join(part for part in parts if part)
 
@@ -356,20 +357,20 @@ def parse_sse_events(lines: Iterable[str]) -> list[SubagentSseEvent]:
 
 def draft_from_subagent_events(
     worker_input: WorkerInput,
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     events: list[SubagentSseEvent],
 ) -> LlmWorkerDraftOutput:
     """Convert remote subagent SSE events into Router worker draft output."""
 
     worker = _value(worker_input.worker_type)
     if worker == WorkerType.PLC_DEV.value:
-        return _dev_draft(worker_input, input_artifacts, events)
+        return _dev_draft(worker_input, input_files, events)
     if worker == WorkerType.PLC_TEST.value:
         return _test_draft(worker_input, events)
     if worker == WorkerType.PLC_FORMAL.value:
         return _formal_draft(worker_input, events)
     if worker == WorkerType.PLC_REPAIR.value:
-        return _repair_draft(worker_input, input_artifacts, events)
+        return _repair_draft(worker_input, input_files, events)
     raise SubagentInvalidResponseError(
         f"unsupported worker type for subagent output: {worker!r}",
         details={"worker_type": worker},
@@ -378,7 +379,7 @@ def draft_from_subagent_events(
 
 def _dev_draft(
     worker_input: WorkerInput,
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     events: list[SubagentSseEvent],
 ) -> LlmWorkerDraftOutput:
     code_event = _first_event(events, CODE_EVENT_TYPES)
@@ -410,8 +411,8 @@ def _dev_draft(
                 "source": "remote_subagent",
                 "objective": worker_input.objective,
                 "user_goal": worker_input.context.user_goal,
-                "input_artifact_ids": [
-                    artifact.artifact_id for artifact in input_artifacts
+                "input_paths": [
+                    artifact.path for artifact in input_files
                 ],
                 "requirements": [
                     {
@@ -542,14 +543,14 @@ def _formal_draft(
 
 def _repair_draft(
     worker_input: WorkerInput,
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     events: list[SubagentSseEvent],
 ) -> LlmWorkerDraftOutput:
     report_event = _first_event(events, {"compilation_report_json"})
     code_event = _first_event(events, CODE_EVENT_TYPES)
     report = _event_content(report_event) if report_event is not None else {}
     repaired_code = _extract_code(code_event) if code_event is not None else None
-    passed = _repair_passed(report) and bool(repaired_code)
+    passed = _repair_passed(report)
     if not passed and not report:
         return _fallback_draft(
             worker_input,
@@ -570,25 +571,27 @@ def _repair_draft(
             },
             "Repair summary from remote subagent.",
             mime_type="application/json",
-        ),
-        _artifact(
-            ArtifactType.PATCH,
-            "patch_v1.diff",
-            _patch_from_code(input_artifacts, repaired_code, events),
-            "Patch draft from remote repair subagent.",
-            mime_type="text/x-diff",
-        ),
+        )
     ]
     if repaired_code:
-        artifacts.append(
-            _artifact(
-                ArtifactType.PLC_CODE,
-                _code_file_name(code_event, default_name="plc_code_repaired_v1.st"),
-                repaired_code,
-                "Repaired PLC code from remote subagent.",
-                version=_next_code_version(input_artifacts),
-                mime_type="text/plain",
-            )
+        artifacts.extend(
+            [
+                _artifact(
+                    ArtifactType.PATCH,
+                    "patch_v1.diff",
+                    _patch_from_code(input_files, repaired_code, events),
+                    "Patch draft from remote repair subagent.",
+                    mime_type="text/x-diff",
+                ),
+                _artifact(
+                    ArtifactType.PLC_CODE,
+                    _code_file_name(code_event, default_name="plc_code_repaired_v1.st"),
+                    repaired_code,
+                    "Repaired PLC code from remote subagent.",
+                    version=_next_code_version(input_files),
+                    mime_type="text/plain",
+                ),
+            ]
         )
 
     status = WorkerOutcomeStatus.PASSED if passed else WorkerOutcomeStatus.FAILED
@@ -598,14 +601,16 @@ def _repair_draft(
             blocking=not passed,
             confidence=0.8 if passed else 0.55,
             reason=(
-                "Remote repair report indicated success and returned repaired code."
-                if passed
+                "Remote repair report indicated success."
+                if passed and repaired_code is None
+                else "Remote repair report indicated success and returned repaired code."
+                if passed and repaired_code is not None
                 else "Remote repair report did not provide enough evidence for a passed repair."
             ),
         ),
         summary=_summary_from_content(report, "Remote PLC repair subagent returned a repair report."),
         artifact_writes=artifacts,
-        metrics=_repair_metrics(input_artifacts, repaired_code),
+        metrics=_repair_metrics(input_files, repaired_code),
         next_recommended_action=(
             NextRecommendedAction.TEST if passed else NextRecommendedAction.RETRY
         ),
@@ -676,12 +681,12 @@ def _artifact(
     )
 
 
-def _artifact_message_block(
-    artifact: McpInputArtifactSnapshot,
+def _file_message_block(
+    artifact: McpInputFileSnapshot,
     artifact_max_chars: int,
 ) -> str:
     header = (
-        f"- artifact_id={artifact.artifact_id}, type={_value(artifact.type)}, "
+        f"- path={artifact.path}, type={_value(artifact.type)}, "
         f"version={artifact.version}"
     )
     if artifact.summary:
@@ -796,9 +801,18 @@ def _code_file_name(event: SubagentSseEvent | None, *, default_name: str) -> str
 
 
 def _io_contract_from_code(code: str) -> dict[str, list[dict[str, str]]]:
+    inputs = _variables_from_block(code, "VAR_INPUT")
+    outputs = _variables_from_block(code, "VAR_OUTPUT")
+    if inputs or outputs:
+        return {
+            "inputs": inputs,
+            "outputs": outputs,
+        }
+
+    inferred = _variables_from_generic_var_blocks(code)
     return {
-        "inputs": _variables_from_block(code, "VAR_INPUT"),
-        "outputs": _variables_from_block(code, "VAR_OUTPUT"),
+        "inputs": inferred["inputs"],
+        "outputs": inferred["outputs"],
     }
 
 
@@ -807,21 +821,156 @@ def _variables_from_block(code: str, block_name: str) -> list[dict[str, str]]:
     in_block = False
     variables: list[dict[str, str]] = []
     for raw_line in lines:
-        line = raw_line.strip()
+        line, _comment = _split_st_comment(raw_line.strip())
         upper = line.upper()
-        if upper == block_name:
+        if _is_var_block_start(upper, block_name):
             in_block = True
             continue
         if in_block and upper.startswith("END_VAR"):
             break
-        if not in_block or ":" not in line:
+        if not in_block:
             continue
-        name_part, _, type_part = line.partition(":")
-        name = name_part.strip()
-        variable_type = type_part.split(";", 1)[0].split(":=", 1)[0].strip()
-        if name and variable_type:
+        variables.extend(_variables_from_declaration_line(line))
+    return _dedupe_variables(variables)
+
+
+def _variables_from_generic_var_blocks(code: str) -> dict[str, list[dict[str, str]]]:
+    lines = code.splitlines()
+    in_block = False
+    current_direction: str | None = None
+    variables: dict[str, list[dict[str, str]]] = {"inputs": [], "outputs": []}
+
+    for raw_line in lines:
+        line, comment = _split_st_comment(raw_line.strip())
+        upper = line.upper()
+        if _is_var_block_start(upper, "VAR"):
+            in_block = True
+            current_direction = _direction_from_comment(comment)
+            continue
+        if in_block and upper.startswith("END_VAR"):
+            in_block = False
+            current_direction = None
+            continue
+        if not in_block:
+            continue
+
+        comment_direction = _direction_from_comment(comment)
+        if comment_direction is not None:
+            current_direction = comment_direction
+
+        for variable in _variables_from_declaration_line(line):
+            direction = (
+                comment_direction
+                or _direction_from_variable(variable["name"], "")
+                or current_direction
+            )
+            if direction == "input":
+                variables["inputs"].append(variable)
+            elif direction == "output":
+                variables["outputs"].append(variable)
+
+    return {
+        "inputs": _dedupe_variables(variables["inputs"]),
+        "outputs": _dedupe_variables(variables["outputs"]),
+    }
+
+
+def _split_st_comment(line: str) -> tuple[str, str]:
+    code_part, separator, comment = line.partition("//")
+    return code_part.strip(), comment.strip() if separator else ""
+
+
+def _is_var_block_start(upper_line: str, block_name: str) -> bool:
+    if block_name == "VAR":
+        return upper_line == "VAR" or upper_line.startswith("VAR ")
+    return upper_line == block_name or upper_line.startswith(f"{block_name} ")
+
+
+def _variables_from_declaration_line(line: str) -> list[dict[str, str]]:
+    if ":" not in line:
+        return []
+    name_part, _separator, type_part = line.partition(":")
+    variable_type = type_part.split(";", 1)[0].split(":=", 1)[0].strip()
+    if not variable_type:
+        return []
+    variables: list[dict[str, str]] = []
+    for raw_name in name_part.split(","):
+        name = raw_name.strip()
+        if name:
             variables.append({"name": name, "type": variable_type})
     return variables
+
+
+def _direction_from_comment(comment: str) -> str | None:
+    normalized = comment.strip().lower()
+    if not normalized:
+        return None
+    if any(token in normalized for token in ("output", "outputs")) or any(
+        token in comment for token in ("输出", "指示灯", "执行器")
+    ):
+        return "output"
+    if any(token in normalized for token in ("input", "inputs")) or any(
+        token in comment for token in ("输入", "按钮", "开关", "传感器")
+    ):
+        return "input"
+    return None
+
+
+def _direction_from_variable(name: str, comment: str) -> str | None:
+    comment_direction = _direction_from_comment(comment)
+    if comment_direction is not None:
+        return comment_direction
+
+    tokens = {
+        token
+        for token in re.split(r"[^A-Z0-9]+", name.upper())
+        if token
+    }
+    if tokens & {
+        "OUT",
+        "OUTPUT",
+        "MOTOR",
+        "IND",
+        "LAMP",
+        "LIGHT",
+        "VALVE",
+        "PUMP",
+        "ACTUATOR",
+    }:
+        return "output"
+    if tokens & {
+        "START",
+        "STOP",
+        "RESET",
+        "PB",
+        "BTN",
+        "BUTTON",
+        "CMD",
+        "SENSOR",
+        "SWITCH",
+        "INPUT",
+    }:
+        return "input"
+    upper_name = name.upper()
+    if upper_name.startswith(("I_", "IN_")):
+        return "input"
+    if upper_name.startswith(("Q_", "OUT_")):
+        return "output"
+    return None
+
+
+def _dedupe_variables(
+    variables: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for variable in variables:
+        name = variable.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(variable)
+    return deduped
 
 
 def _test_status(content: Any) -> WorkerOutcomeStatus:
@@ -876,7 +1025,14 @@ def _repair_passed(content: Any) -> bool:
         return False
     passed = _bool_signal(
         content,
-        {"compilation_success", "compile_success", "success", "passed", "fixed"},
+        {
+            "compilation_success",
+            "compile_success",
+            "workflow_success",
+            "success",
+            "passed",
+            "fixed",
+        },
     )
     if passed is not None:
         return passed
@@ -952,10 +1108,10 @@ def _formal_metrics(content: Any) -> WorkerMetrics:
 
 
 def _repair_metrics(
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     repaired_code: str | None,
 ) -> WorkerMetrics:
-    original = _latest_code_content(input_artifacts)
+    original = _latest_code_content(input_files)
     changed_lines = None
     if original and repaired_code:
         changed_lines = sum(
@@ -971,7 +1127,7 @@ def _repair_metrics(
         repair_metrics={
             "changed_files": 1 if repaired_code else 0,
             "changed_lines": changed_lines,
-            "patch_size_bytes": len(_patch_from_code(input_artifacts, repaired_code, [])),
+            "patch_size_bytes": len(_patch_from_code(input_files, repaired_code, [])),
         }
     )
 
@@ -982,11 +1138,11 @@ def _summary_from_content(content: Any, default: str) -> str:
 
 
 def _patch_from_code(
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
     repaired_code: str | None,
     events: list[SubagentSseEvent],
 ) -> str:
-    original = _latest_code_content(input_artifacts)
+    original = _latest_code_content(input_files)
     if original and repaired_code:
         return "\n".join(
             difflib.unified_diff(
@@ -1004,11 +1160,11 @@ def _patch_from_code(
 
 
 def _latest_code_content(
-    input_artifacts: list[McpInputArtifactSnapshot],
+    input_files: list[McpInputFileSnapshot],
 ) -> str | None:
     code_artifacts = [
         artifact
-        for artifact in input_artifacts
+        for artifact in input_files
         if _value(artifact.type) == ArtifactType.PLC_CODE.value and artifact.content
     ]
     if not code_artifacts:
@@ -1017,10 +1173,10 @@ def _latest_code_content(
     return latest.content
 
 
-def _next_code_version(input_artifacts: list[McpInputArtifactSnapshot]) -> int:
+def _next_code_version(input_files: list[McpInputFileSnapshot]) -> int:
     versions = [
         artifact.version
-        for artifact in input_artifacts
+        for artifact in input_files
         if _value(artifact.type) == ArtifactType.PLC_CODE.value
     ]
     return max(versions, default=0) + 1

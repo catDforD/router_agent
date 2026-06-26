@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.ids import new_artifact_id, new_event_id, prefixed_id
+from app.core.ids import new_event_id, prefixed_id
 from app.core.logging import log_with_context
 from app.core.time import utc_now
 from app.mcp.client import (
@@ -33,14 +33,11 @@ from app.mcp.subagent_client import (
 from app.mcp.draft import (
     LlmWorkerDraftOutput,
     McpDraftValidationError,
-    McpInputArtifactSnapshot,
+    McpInputFileSnapshot,
     McpWorkerRequest,
     validate_worker_draft_output,
 )
 from app.models.router_schema import (
-    ArtifactCreator,
-    ArtifactCreatorType,
-    ArtifactRef,
     ArtifactType,
     EventCorrelation,
     EventSeverity,
@@ -58,7 +55,6 @@ from app.models.router_schema import (
     WorkerType,
 )
 from app.repositories.worker_job_repo import WorkerJobRepository
-from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 from app.mcp.mock_worker import (
     DEFAULT_MOCK_SCENARIO,
@@ -83,14 +79,6 @@ MockRunner = Callable[..., MockWorkerOutput]
 CheckpointCallback = Callable[[], None]
 RealWorkerMode = str
 LOGGER = logging.getLogger(__name__)
-
-EVIDENCE_ARTIFACT_TYPES = {
-    ArtifactType.TEST_REPORT.value,
-    ArtifactType.FAILING_TRACE.value,
-    ArtifactType.FORMAL_REPORT.value,
-    ArtifactType.COUNTEREXAMPLE.value,
-}
-
 
 class McpAdapterUnsupportedModeError(Exception):
     """Raised when the configured MCP mode is not implemented by this adapter."""
@@ -125,10 +113,7 @@ class McpAdapter:
     ) -> None:
         settings = get_settings()
         self.session = session
-        self.artifact_store = ArtifactStore(
-            session=session,
-            artifact_root=artifact_root,
-        )
+        self.artifact_root = artifact_root
         self.event_service = EventService(session)
         self.worker_job_repository = WorkerJobRepository(session)
         self.mcp_mode = mcp_mode
@@ -226,12 +211,13 @@ class McpAdapter:
                 title=f"{_value(worker_input.worker_type)} worker started",
                 message=f"{route} worker invocation started.",
                 created_at=started_at,
-                artifact_ids=_input_artifact_ids(worker_input),
+                artifact_ids=None,
                 payload={
                     "worker_type": _value(worker_input.worker_type),
                     "mcp_tool": _value(worker_input.mcp_tool),
                     "worker_job_id": worker_input.worker_job_id,
                     "worker_route": route,
+                    "input_paths": list(worker_input.input_paths),
                     "mock_scenario": active_scenario if route == "mock" else None,
                 },
             )
@@ -255,7 +241,7 @@ class McpAdapter:
                     f"unsupported worker route: {route!r}"
                 )
 
-            produced_refs = self._persist_artifact_writes(
+            written_paths = self._persist_file_writes(
                 worker_input,
                 draft_output.artifact_writes,
             )
@@ -263,7 +249,7 @@ class McpAdapter:
             raw_result = self._build_success_result(
                 worker_input=worker_input,
                 draft_output=draft_output,
-                produced_artifacts=produced_refs,
+                written_paths=written_paths,
                 started_at=started_at,
                 completed_at=completed_at,
             )
@@ -415,7 +401,7 @@ class McpAdapter:
             _value(worker_input.mcp_tool),
             McpWorkerRequest(
                 worker_input=worker_input,
-                input_artifacts=self._input_artifact_snapshots(worker_input),
+                input_files=self._input_file_snapshots(worker_input),
             ),
         )
 
@@ -442,52 +428,53 @@ class McpAdapter:
         )
         return client.call_worker(
             worker_input,
-            self._input_artifact_snapshots(worker_input),
+            self._input_file_snapshots(worker_input),
         )
 
-    def _persist_artifact_writes(
+    def _persist_file_writes(
         self,
         worker_input: WorkerInput,
         artifact_writes: Any,
-    ) -> list[ArtifactRef]:
-        produced_refs: list[ArtifactRef] = []
+    ) -> list[str]:
+        written_paths: list[str] = []
         for intent in artifact_writes:
-            artifact = self.artifact_store.write_artifact_content(
-                _artifact_write_request(worker_input, intent)
-            ).artifact
-            artifact_ref = self.artifact_store.get_artifact_ref(artifact.artifact_id)
-            produced_refs.append(artifact_ref)
+            path = _file_path_for_write(worker_input, intent)
+            target = _workspace_path(worker_input, path, allow_missing=True)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_content_bytes(intent.content))
+            written_paths.append(path)
             self.event_service.append_event(
                 self._build_worker_event(
                     worker_input=worker_input,
-                    event_type=EventType.ARTIFACT_CREATED,
-                    title=f"{_value(artifact.type)} artifact created",
-                    message=artifact.summary,
-                    created_at=artifact.created_at,
-                    artifact_ids=[artifact.artifact_id],
+                    event_type=EventType.WORKER_PROGRESS,
+                    title=f"{_value(intent.artifact_type)} file written",
+                    message=intent.summary,
+                    created_at=utc_now(),
+                    artifact_ids=None,
                     payload={
                         "worker_type": _value(worker_input.worker_type),
                         "worker_job_id": worker_input.worker_job_id,
-                        "artifact_id": artifact.artifact_id,
-                        "artifact_type": _value(artifact.type),
-                        "version": artifact.version,
+                        "path": path,
+                        "file_type": _value(intent.artifact_type),
+                        "version": intent.version,
                     },
                 )
             )
             self._checkpoint()
-        return produced_refs
+        return written_paths
 
     def _build_success_result(
         self,
         *,
         worker_input: WorkerInput,
         draft_output: LlmWorkerDraftOutput,
-        produced_artifacts: list[ArtifactRef],
+        written_paths: list[str],
         started_at: datetime,
         completed_at: datetime,
     ) -> WorkerResult:
+        report_paths = _report_paths(written_paths)
         return WorkerResult(
-            schema_version="router.v1",
+            schema_version="router.v2",
             task_id=worker_input.task_id,
             worker_job_id=worker_input.worker_job_id,
             worker_type=worker_input.worker_type,
@@ -495,10 +482,12 @@ class McpAdapter:
             execution_status=WorkerExecutionStatus.COMPLETED,
             outcome=draft_output.outcome,
             summary=draft_output.summary,
-            produced_artifacts=produced_artifacts,
+            read_paths=list(worker_input.input_paths),
+            written_paths=written_paths,
+            report_paths=report_paths,
             diagnostics=list(draft_output.diagnostics),
             assumptions=list(draft_output.assumptions),
-            failures=_failures_with_evidence(draft_output.failures, produced_artifacts),
+            failures=_failures_with_evidence(draft_output.failures, report_paths),
             clarification_request=draft_output.clarification_request,
             metrics=draft_output.metrics,
             next_recommended_action=draft_output.next_recommended_action,
@@ -511,32 +500,30 @@ class McpAdapter:
             metadata=draft_output.metadata,
         )
 
-    def _input_artifact_snapshots(
+    def _input_file_snapshots(
         self,
         worker_input: WorkerInput,
-    ) -> list[McpInputArtifactSnapshot]:
-        snapshots: list[McpInputArtifactSnapshot] = []
-        for artifact_ref in worker_input.input_artifacts:
+    ) -> list[McpInputFileSnapshot]:
+        snapshots: list[McpInputFileSnapshot] = []
+        for path in worker_input.input_paths:
             content: str | None = None
             content_truncated = False
             content_chars: int | None = None
-            mime_type: str | None = None
+            mime_type: str | None = _mime_type_for_path(path)
             try:
-                stored = self.artifact_store.read_artifact_content(artifact_ref.artifact_id)
-                decoded = stored.content.decode("utf-8")
+                decoded = _workspace_path(worker_input, path).read_text(encoding="utf-8")
                 content_truncated = len(decoded) > self.plc_worker_artifact_max_chars
                 content = decoded[: self.plc_worker_artifact_max_chars]
                 content_chars = len(content)
-                mime_type = stored.artifact.storage.mime_type
             except Exception:
                 content = None
             snapshots.append(
-                McpInputArtifactSnapshot(
-                    artifact_id=artifact_ref.artifact_id,
-                    type=artifact_ref.type,
-                    version=artifact_ref.version,
-                    summary=artifact_ref.summary,
-                    uri=artifact_ref.uri,
+                McpInputFileSnapshot(
+                    path=path,
+                    type=_artifact_type_for_path(path),
+                    version=1,
+                    summary=f"Workspace file {path}",
+                    uri=f"workspace://{path}",
                     content=content,
                     content_truncated=content_truncated,
                     content_chars=content_chars,
@@ -598,7 +585,6 @@ class McpAdapter:
             }
             else EventSeverity.INFO
         )
-        artifact_ids = [artifact.artifact_id for artifact in result.produced_artifacts]
         failure_ids = [failure.failure_id for failure in result.failures]
         log_with_context(
             LOGGER,
@@ -621,7 +607,7 @@ class McpAdapter:
             title=f"{_value(worker_input.worker_type)} worker {execution_status}",
             message=result.summary,
             created_at=created_at,
-            artifact_ids=artifact_ids or None,
+            artifact_ids=None,
             failure_ids=failure_ids or None,
             severity=severity,
             payload={
@@ -630,7 +616,9 @@ class McpAdapter:
                 "worker_job_id": worker_input.worker_job_id,
                 "execution_status": execution_status,
                 "outcome_status": _value(result.outcome.status),
-                "produced_artifact_ids": artifact_ids,
+                "read_paths": list(result.read_paths),
+                "written_paths": list(result.written_paths),
+                "report_paths": list(result.report_paths),
                 "failure_ids": failure_ids,
                 "error_code": result.error.error_code if result.error else None,
             },
@@ -650,7 +638,7 @@ class McpAdapter:
         severity: EventSeverity = EventSeverity.INFO,
     ) -> RouterEvent:
         return RouterEvent(
-            schema_version="router.v1",
+            schema_version="router.v2",
             event_id=new_event_id(),
             task_id=worker_input.task_id,
             seq=0,
@@ -735,72 +723,31 @@ def _draft_from_mock_output(mock_output: MockWorkerOutput) -> LlmWorkerDraftOutp
     )
 
 
-def _artifact_write_request(
-    worker_input: WorkerInput,
-    intent: MockArtifactWriteIntent,
-) -> ArtifactContentWrite:
-    return ArtifactContentWrite(
-        task_id=worker_input.task_id,
-        artifact_type=intent.artifact_type,
-        version=intent.version,
-        name=intent.name,
-        content=intent.content,
-        summary=intent.summary,
-        visibility=intent.visibility,
-        created_by=ArtifactCreator(
-            type=ArtifactCreatorType.WORKER,
-            worker_type=worker_input.worker_type,
-            worker_job_id=worker_input.worker_job_id,
-        ),
-        metadata=intent.metadata,
-        parent_artifact_ids=intent.parent_artifact_ids,
-        derived_from_worker_job_id=worker_input.worker_job_id,
-        derived_from_artifact_ids=intent.parent_artifact_ids or None,
-        mime_type=intent.mime_type,
-        artifact_id=new_artifact_id(),
-        created_at=utc_now(),
-    )
-
-
 def _failures_with_evidence(
     failures: tuple[Failure, ...],
-    produced_artifacts: list[ArtifactRef],
+    report_paths: list[str],
 ) -> list[Failure]:
-    evidence_ids = [
-        artifact.artifact_id
-        for artifact in produced_artifacts
-        if _value(artifact.type) in EVIDENCE_ARTIFACT_TYPES
-    ]
-    counterexample_id = _first_artifact_id(
-        produced_artifacts,
-        ArtifactType.COUNTEREXAMPLE,
+    evidence_paths = [path for path in report_paths if _is_evidence_path(path)]
+    counterexample_path = next(
+        (path for path in report_paths if "counterexample" in path.lower()),
+        None,
     )
     updated_failures: list[Failure] = []
     for failure in failures:
         update: dict[str, Any] = {}
-        if not failure.evidence_artifact_ids and evidence_ids:
-            update["evidence_artifact_ids"] = evidence_ids
+        if not failure.evidence_paths and evidence_paths:
+            update["evidence_paths"] = evidence_paths
         if (
             _value(failure.source) == FailureSource.FORMAL.value
-            and counterexample_id is not None
+            and counterexample_path is not None
             and failure.reproduction is not None
-            and failure.reproduction.counterexample_artifact_id is None
+            and failure.reproduction.counterexample_path is None
         ):
             update["reproduction"] = failure.reproduction.model_copy(
-                update={"counterexample_artifact_id": counterexample_id}
+                update={"counterexample_path": counterexample_path}
             )
         updated_failures.append(failure.model_copy(update=update) if update else failure)
     return updated_failures
-
-
-def _first_artifact_id(
-    artifacts: list[ArtifactRef],
-    artifact_type: ArtifactType,
-) -> str | None:
-    for artifact in artifacts:
-        if _value(artifact.type) == artifact_type.value:
-            return artifact.artifact_id
-    return None
 
 
 def _job_status_for_result(result: WorkerResult) -> WorkerJobStatus:
@@ -813,9 +760,109 @@ def _job_status_for_result(result: WorkerResult) -> WorkerJobStatus:
         WorkerExecutionStatus.ERROR.value: WorkerJobStatus.ERROR,
     }[execution_status]
 
+def _file_path_for_write(worker_input: WorkerInput, intent: Any) -> str:
+    artifact_type = _value(intent.artifact_type)
+    for path in worker_input.output_paths:
+        if _path_matches_artifact_type(path, artifact_type):
+            return path
+    return f".router/reports/{worker_input.worker_job_id}/{Path(intent.name).name}"
 
-def _input_artifact_ids(worker_input: WorkerInput) -> list[str]:
-    return [artifact.artifact_id for artifact in worker_input.input_artifacts]
+
+def _workspace_path(
+    worker_input: WorkerInput,
+    path: str,
+    *,
+    allow_missing: bool = False,
+) -> Path:
+    root = Path(worker_input.workspace_root).resolve()
+    target = (root / path).resolve(strict=False)
+    target.relative_to(root)
+    if not allow_missing and not target.exists():
+        raise FileNotFoundError(path)
+    return target
+
+
+def _content_bytes(content: Any) -> bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, str):
+        return content.encode("utf-8")
+    import json
+
+    return json.dumps(content, ensure_ascii=True, indent=2).encode("utf-8")
+
+
+def _report_paths(paths: list[str]) -> list[str]:
+    return [path for path in paths if path.startswith(".router/") or _is_evidence_path(path)]
+
+
+def _is_evidence_path(path: str) -> bool:
+    lower = path.lower()
+    return any(
+        token in lower
+        for token in (
+            "test_report",
+            "failing_trace",
+            "formal_report",
+            "counterexample",
+            "repair_summary",
+            "patch",
+            "gate_report",
+        )
+    )
+
+
+def _path_matches_artifact_type(path: str, artifact_type: str) -> bool:
+    lower = path.lower()
+    if artifact_type == ArtifactType.PLC_CODE.value:
+        return lower.endswith((".st", ".scl", ".fbd", ".xml")) and "io_contract" not in lower
+    if artifact_type == ArtifactType.REQUIREMENTS_IR.value:
+        return "requirements" in lower
+    if artifact_type == ArtifactType.IO_CONTRACT.value:
+        return "io_contract" in lower
+    if artifact_type == ArtifactType.TEST_REPORT.value:
+        return "test_report" in lower
+    if artifact_type == ArtifactType.FAILING_TRACE.value:
+        return "failing_trace" in lower
+    if artifact_type == ArtifactType.FORMAL_REPORT.value:
+        return "formal_report" in lower
+    if artifact_type == ArtifactType.COUNTEREXAMPLE.value:
+        return "counterexample" in lower
+    if artifact_type == ArtifactType.PATCH.value:
+        return lower.endswith((".diff", ".patch")) or "patch" in lower
+    if artifact_type == ArtifactType.REPAIR_SUMMARY.value:
+        return "repair_summary" in lower
+    return False
+
+
+def _artifact_type_for_path(path: str) -> ArtifactType:
+    lower = path.lower()
+    if lower.endswith((".st", ".scl", ".fbd", ".xml")) and "io_contract" not in lower:
+        return ArtifactType.PLC_CODE
+    if "requirements" in lower:
+        return ArtifactType.REQUIREMENTS_IR
+    if "test_report" in lower:
+        return ArtifactType.TEST_REPORT
+    if "failing_trace" in lower:
+        return ArtifactType.FAILING_TRACE
+    if "formal_report" in lower:
+        return ArtifactType.FORMAL_REPORT
+    if "counterexample" in lower:
+        return ArtifactType.COUNTEREXAMPLE
+    if lower.endswith((".diff", ".patch")) or "patch" in lower:
+        return ArtifactType.PATCH
+    return ArtifactType.MISC
+
+
+def _mime_type_for_path(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(".json"):
+        return "application/json"
+    if lower.endswith((".diff", ".patch")):
+        return "text/x-diff"
+    if lower.endswith(".md"):
+        return "text/markdown"
+    return "text/plain"
 
 
 def _json_payload(payload: dict[str, Any]) -> dict[str, Any]:

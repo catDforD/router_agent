@@ -11,12 +11,9 @@ from sqlalchemy.orm import Session
 from app.core.errors import RepositoryNotFoundError
 from app.core.ids import prefixed_id
 from app.models.router_schema import (
-    Artifact,
-    ArtifactRef,
-    ArtifactType,
     Assumption,
     ClarificationQuestion,
-    CurrentArtifacts,
+    CurrentFiles,
     Failure,
     FailureSource,
     FailureStatus,
@@ -32,35 +29,9 @@ from app.models.router_schema import (
     WorkerResult,
     WorkerType,
 )
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.repositories.worker_job_repo import WorkerJobRecord, WorkerJobRepository
 
-
-ARTIFACT_POINTER_FIELD_BY_TYPE: dict[str, str] = {
-    ArtifactType.RAW_USER_REQUEST.value: "raw_user_request",
-    ArtifactType.REQUIREMENTS_IR.value: "requirements_ir",
-    ArtifactType.PLC_CODE.value: "current_code",
-    ArtifactType.IO_CONTRACT.value: "current_io_contract",
-    ArtifactType.TEST_CASES.value: "latest_test_cases",
-    ArtifactType.TEST_REPORT.value: "latest_test_report",
-    ArtifactType.FAILING_TRACE.value: "latest_failing_trace",
-    ArtifactType.FORMAL_PROPERTIES.value: "latest_formal_properties",
-    ArtifactType.FORMAL_REPORT.value: "latest_formal_report",
-    ArtifactType.COUNTEREXAMPLE.value: "latest_counterexample",
-    ArtifactType.PATCH.value: "latest_patch",
-    ArtifactType.REPAIR_SUMMARY.value: "latest_repair_summary",
-    ArtifactType.GATE_REPORT.value: "latest_gate_report",
-    ArtifactType.FINAL_REPORT.value: "final_report",
-}
-
-
-EVIDENCE_ARTIFACT_TYPES = {
-    ArtifactType.TEST_REPORT.value,
-    ArtifactType.FAILING_TRACE.value,
-    ArtifactType.FORMAL_REPORT.value,
-    ArtifactType.COUNTEREXAMPLE.value,
-}
 
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -86,10 +57,6 @@ class WorkerResultHandlerIdentityError(WorkerResultHandlerError):
     """Raised when a worker result does not match persisted job identity."""
 
 
-class WorkerResultHandlerInvalidArtifactError(WorkerResultHandlerError):
-    """Raised when a worker result references invalid produced artifacts."""
-
-
 @dataclass(frozen=True)
 class WorkerResultHandleResult:
     """Result of applying or replaying a worker result."""
@@ -105,7 +72,6 @@ class WorkerResultHandler:
     def __init__(self, session: Session) -> None:
         self.task_repository = TaskRepository(session)
         self.worker_job_repository = WorkerJobRepository(session)
-        self.artifact_repository = ArtifactRepository(session)
 
     def handle_worker_result(self, result: WorkerResult) -> WorkerResultHandleResult:
         """Validate and apply one worker result to its persisted task."""
@@ -131,8 +97,7 @@ class WorkerResultHandler:
                 summary=f"Worker result already applied: {result.worker_job_id}",
             )
 
-        artifacts = self._validate_produced_artifacts(result)
-        updated = self._apply_result(task, result, artifacts)
+        updated = self._apply_result(task, job, result)
         persisted = self.task_repository.update_task_state(updated)
         return WorkerResultHandleResult(
             task=persisted,
@@ -219,51 +184,18 @@ class WorkerResultHandler:
                 f"worker result identity mismatch: {mismatches}"
             )
 
-    def _validate_produced_artifacts(
-        self,
-        result: WorkerResult,
-    ) -> dict[str, Artifact]:
-        artifacts: dict[str, Artifact] = {}
-        for artifact_ref in result.produced_artifacts:
-            try:
-                artifact = self.artifact_repository.get_artifact(
-                    artifact_ref.artifact_id
-                )
-            except RepositoryNotFoundError as exc:
-                raise WorkerResultHandlerInvalidArtifactError(
-                    f"produced artifact not found: {artifact_ref.artifact_id}"
-                ) from exc
-
-            if artifact.task_id != result.task_id:
-                raise WorkerResultHandlerInvalidArtifactError(
-                    "produced artifact belongs to another task: "
-                    f"{artifact.artifact_id}"
-                )
-            if _value(artifact.type) != _value(artifact_ref.type):
-                raise WorkerResultHandlerInvalidArtifactError(
-                    "produced artifact type mismatch: "
-                    f"{artifact.artifact_id}"
-                )
-            if artifact.version != artifact_ref.version:
-                raise WorkerResultHandlerInvalidArtifactError(
-                    "produced artifact version mismatch: "
-                    f"{artifact.artifact_id}"
-                )
-            artifacts[artifact.artifact_id] = artifact
-        return artifacts
-
     def _apply_result(
         self,
         task: TaskState,
+        job: WorkerJobRecord,
         result: WorkerResult,
-        artifacts: dict[str, Artifact],
     ) -> TaskState:
         execution_status = _value(result.execution_status)
         worker_type = _value(result.worker_type)
         outcome_status = _value(result.outcome.status)
         completed_at = result.completed_at
 
-        current_artifacts = task.current_artifacts
+        current_files = task.current_files
         failures = _merge_failures(task.failures, result.failures, result)
         assumptions = _merge_assumptions(task.assumptions, result.assumptions)
         questions = task.unresolved_questions
@@ -273,10 +205,7 @@ class WorkerResultHandler:
         phase = task.phase
 
         if execution_status == WorkerExecutionStatus.COMPLETED.value:
-            current_artifacts = _project_artifacts(
-                current_artifacts,
-                result.produced_artifacts,
-            )
+            current_files = _project_files(current_files, result.written_paths)
             if outcome_status == WorkerOutcomeStatus.NEED_CLARIFICATION.value:
                 questions = _merge_questions(
                     questions,
@@ -297,14 +226,12 @@ class WorkerResultHandler:
                     task,
                     gates,
                     outcome_status,
-                    current_artifacts,
                 )
             elif worker_type == WorkerType.PLC_TEST.value:
                 failures, gates = _apply_test_result(
                     failures,
                     gates,
                     result,
-                    current_artifacts,
                     outcome_status,
                 )
             elif worker_type == WorkerType.PLC_FORMAL.value:
@@ -312,16 +239,16 @@ class WorkerResultHandler:
                     failures,
                     gates,
                     result,
-                    current_artifacts,
                     outcome_status,
                 )
             elif worker_type == WorkerType.PLC_REPAIR.value:
-                gates, runtime_limits, phase = _apply_repair_result(
+                failures, gates, runtime_limits, phase = _apply_repair_result(
                     task,
+                    failures,
+                    job.input,
                     gates,
                     runtime_limits,
                     result,
-                    current_artifacts,
                     outcome_status,
                 )
         elif result.failures:
@@ -357,7 +284,7 @@ class WorkerResultHandler:
                 "updated_at": completed_at,
                 "runtime_limits": runtime_limits,
                 "gates": gates,
-                "current_artifacts": current_artifacts,
+                "current_files": current_files,
                 "active_worker_jobs": active_worker_jobs,
                 "completed_worker_job_ids": completed_worker_job_ids,
                 "assumptions": assumptions,
@@ -382,7 +309,6 @@ def _apply_dev_result(
     task: TaskState,
     gates: GateState,
     outcome_status: str,
-    current_artifacts: CurrentArtifacts,
 ) -> tuple[GateState, str]:
     if outcome_status != WorkerOutcomeStatus.PASSED.value:
         return gates, task.phase
@@ -391,7 +317,7 @@ def _apply_dev_result(
     if (
         gates.test_required
         or task.difficulty.requires_test
-        or task.current_artifacts.latest_test_report is not None
+        or task.current_files.latest_test_report is not None
     ):
         phase = TaskPhase.TESTING.value
     elif gates.formal_required or task.difficulty.requires_formal:
@@ -411,7 +337,6 @@ def _apply_test_result(
     failures: list[Failure],
     gates: GateState,
     result: WorkerResult,
-    current_artifacts: CurrentArtifacts,
     outcome_status: str,
 ) -> tuple[list[Failure], GateState]:
     if outcome_status == WorkerOutcomeStatus.PASSED.value:
@@ -419,13 +344,12 @@ def _apply_test_result(
             failures,
             source=FailureSource.TEST.value,
             worker_job_id=result.worker_job_id,
-            resolved_by_artifact_id=_artifact_id(
-                current_artifacts.latest_test_report
-            ),
+            resolved_by_path=_first_report_path(result, "test_report"),
             resolved_at=result.completed_at,
         )
         gates = gates.model_copy(
             update={
+                "test_required": True,
                 "latest_test_passed": True,
                 "regression_required": False,
             }
@@ -442,12 +366,12 @@ def _apply_test_result(
                         "PLC test worker reported a failed outcome without "
                         "structured failure details."
                     ),
-                    evidence_artifact_id=_artifact_id(
-                        current_artifacts.latest_test_report
-                    ),
+                    evidence_path=_first_report_path(result, "test_report"),
                 ),
             ]
-        gates = gates.model_copy(update={"latest_test_passed": False})
+        gates = gates.model_copy(
+            update={"test_required": True, "latest_test_passed": False}
+        )
     return failures, gates
 
 
@@ -455,7 +379,6 @@ def _apply_formal_result(
     failures: list[Failure],
     gates: GateState,
     result: WorkerResult,
-    current_artifacts: CurrentArtifacts,
     outcome_status: str,
 ) -> tuple[list[Failure], GateState]:
     if outcome_status == WorkerOutcomeStatus.PASSED.value:
@@ -463,13 +386,12 @@ def _apply_formal_result(
             failures,
             source=FailureSource.FORMAL.value,
             worker_job_id=result.worker_job_id,
-            resolved_by_artifact_id=_artifact_id(
-                current_artifacts.latest_formal_report
-            ),
+            resolved_by_path=_first_report_path(result, "formal_report"),
             resolved_at=result.completed_at,
         )
         gates = gates.model_copy(
             update={
+                "formal_required": True,
                 "latest_formal_passed": True,
                 "formal_regression_required": False,
             }
@@ -486,25 +408,26 @@ def _apply_formal_result(
                         "PLC formal verification worker reported a failed "
                         "outcome without structured failure details."
                     ),
-                    evidence_artifact_id=_artifact_id(
-                        current_artifacts.latest_formal_report
-                    ),
+                    evidence_path=_first_report_path(result, "formal_report"),
                 ),
             ]
-        gates = gates.model_copy(update={"latest_formal_passed": False})
+        gates = gates.model_copy(
+            update={"formal_required": True, "latest_formal_passed": False}
+        )
     return failures, gates
 
 
 def _apply_repair_result(
     task: TaskState,
+    failures: list[Failure],
+    worker_input: Any,
     gates: GateState,
     runtime_limits: RuntimeLimits,
     result: WorkerResult,
-    current_artifacts: CurrentArtifacts,
     outcome_status: str,
-) -> tuple[GateState, RuntimeLimits, str]:
+) -> tuple[list[Failure], GateState, RuntimeLimits, str]:
     if outcome_status != WorkerOutcomeStatus.PASSED.value:
-        return gates, runtime_limits, task.phase
+        return failures, gates, runtime_limits, task.phase
 
     has_formal_failure = any(
         _value(failure.status) == FailureStatus.OPEN.value
@@ -512,36 +435,49 @@ def _apply_repair_result(
         and _value(failure.source) == FailureSource.FORMAL.value
         for failure in task.failures
     )
+    repair_summary_path = _first_report_path(result, "repair_summary")
+    failures = _resolve_repaired_failures(
+        failures,
+        result=result,
+        worker_input=worker_input,
+        resolved_by_path=repair_summary_path,
+    )
     runtime_limits = runtime_limits.model_copy(
         update={"repair_rounds": runtime_limits.repair_rounds + 1}
     )
-    gates = gates.model_copy(
-        update={
-            "latest_test_passed": None,
-            "latest_formal_passed": None,
-            "regression_required": True,
-            "formal_regression_required": (
-                True if has_formal_failure else gates.formal_regression_required
-            ),
-        }
-    )
-    return gates, runtime_limits, TaskPhase.REGRESSION.value
-
-
-def _project_artifacts(
-    current_artifacts: CurrentArtifacts,
-    produced_artifacts: list[ArtifactRef],
-) -> CurrentArtifacts:
-    updates: dict[str, Any] = {
-        "all_artifact_ids": list(current_artifacts.all_artifact_ids)
+    requires_regression = _repair_changed_code(result)
+    gate_updates: dict[str, Any] = {
+        "regression_required": requires_regression,
     }
-    for artifact_ref in produced_artifacts:
-        if artifact_ref.artifact_id not in updates["all_artifact_ids"]:
-            updates["all_artifact_ids"].append(artifact_ref.artifact_id)
-        pointer_field = ARTIFACT_POINTER_FIELD_BY_TYPE.get(_value(artifact_ref.type))
+    if requires_regression:
+        gate_updates.update(
+            {
+                "latest_test_passed": None,
+                "latest_formal_passed": None,
+                "formal_regression_required": (
+                    True if has_formal_failure else gates.formal_regression_required
+                ),
+            }
+        )
+    else:
+        gate_updates["formal_regression_required"] = False
+    gates = gates.model_copy(update=gate_updates)
+    phase = TaskPhase.REGRESSION.value if requires_regression else TaskPhase.QUALITY_GATE.value
+    return failures, gates, runtime_limits, phase
+
+
+def _project_files(
+    current_files: CurrentFiles,
+    written_paths: list[str],
+) -> CurrentFiles:
+    updates: dict[str, Any] = {"all_paths": list(current_files.all_paths)}
+    for path in written_paths:
+        if path not in updates["all_paths"]:
+            updates["all_paths"].append(path)
+        pointer_field = _current_file_field_for_path(path)
         if pointer_field is not None:
-            updates[pointer_field] = artifact_ref
-    return current_artifacts.model_copy(update=updates)
+            updates[pointer_field] = path
+    return current_files.model_copy(update=updates)
 
 
 def _merge_failures(
@@ -569,7 +505,7 @@ def _blocking_worker_failure(
     source: FailureSource,
     title: str,
     description: str,
-    evidence_artifact_id: str | None,
+    evidence_path: str | None,
 ) -> Failure:
     return Failure(
         failure_id=prefixed_id("failure"),
@@ -577,9 +513,7 @@ def _blocking_worker_failure(
         severity=Severity.BLOCKING,
         title=title,
         description=description,
-        evidence_artifact_ids=(
-            [evidence_artifact_id] if evidence_artifact_id is not None else []
-        ),
+        evidence_paths=[evidence_path] if evidence_path is not None else [],
         status=FailureStatus.OPEN,
         created_by_worker_job_id=result.worker_job_id,
         created_at=result.completed_at,
@@ -617,7 +551,7 @@ def _resolve_failures(
     *,
     source: str,
     worker_job_id: str,
-    resolved_by_artifact_id: str | None,
+    resolved_by_path: str | None,
     resolved_at: Any,
 ) -> list[Failure]:
     resolved: list[Failure] = []
@@ -632,7 +566,7 @@ def _resolve_failures(
                     update={
                         "status": FailureStatus.RESOLVED.value,
                         "resolved_by_worker_job_id": worker_job_id,
-                        "resolved_by_artifact_id": resolved_by_artifact_id,
+                        "resolved_by_path": resolved_by_path,
                         "resolved_at": resolved_at,
                     }
                 )
@@ -640,6 +574,67 @@ def _resolve_failures(
         else:
             resolved.append(failure)
     return resolved
+
+
+def _resolve_repaired_failures(
+    failures: list[Failure],
+    *,
+    result: WorkerResult,
+    worker_input: Any,
+    resolved_by_path: str | None,
+) -> list[Failure]:
+    selected_ids = set(worker_input.context.selected_failure_ids)
+    repair_targets = set()
+    if worker_input.worker_config is not None:
+        repair_targets.update(
+            _string_list(worker_input.worker_config.repair_targets)
+        )
+
+    resolved: list[Failure] = []
+    for failure in failures:
+        if _should_resolve_repaired_failure(failure, selected_ids, repair_targets):
+            resolved.append(
+                failure.model_copy(
+                    update={
+                        "status": FailureStatus.RESOLVED.value,
+                        "resolved_by_worker_job_id": result.worker_job_id,
+                        "resolved_by_path": resolved_by_path,
+                        "resolved_at": result.completed_at,
+                    }
+                )
+            )
+        else:
+            resolved.append(failure)
+    return resolved
+
+
+def _should_resolve_repaired_failure(
+    failure: Failure,
+    selected_ids: set[str],
+    repair_targets: set[str],
+) -> bool:
+    if (
+        _value(failure.status) != FailureStatus.OPEN.value
+        or _value(failure.severity) != Severity.BLOCKING.value
+    ):
+        return False
+    if selected_ids:
+        return failure.failure_id in selected_ids
+    if not repair_targets:
+        return True
+    source = _value(failure.source)
+    target_aliases = {
+        "compile": {"compile", "compile_failure"},
+        "test": {"test", "test_failure"},
+        "formal": {"formal", "formal_validation_failure"},
+    }
+    return any(target in target_aliases.get(source, {source}) for target in repair_targets)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_value(item) for item in value if item is not None]
 
 
 def _remove_active_job(
@@ -665,8 +660,48 @@ def _append_unique(values: list[str], value: str) -> list[str]:
     return values if value in values else [*values, value]
 
 
-def _artifact_id(artifact_ref: ArtifactRef | None) -> str | None:
-    return artifact_ref.artifact_id if artifact_ref is not None else None
+def _first_report_path(result: WorkerResult, token: str) -> str | None:
+    return next((path for path in result.report_paths if token in path.lower()), None)
+
+
+def _repair_changed_code(result: WorkerResult) -> bool:
+    return any(
+        path.lower().endswith((".st", ".scl", ".fbd", ".diff", ".patch"))
+        for path in result.written_paths
+    )
+
+
+def _current_file_field_for_path(path: str) -> str | None:
+    lower = path.lower()
+    if lower.endswith((".st", ".scl", ".fbd")) or (
+        lower.endswith(".xml") and "io_contract" not in lower
+    ):
+        return "current_code"
+    if "requirements" in lower:
+        return "requirements"
+    if "io_contract" in lower:
+        return "current_io_contract"
+    if "test_cases" in lower:
+        return "latest_test_cases"
+    if "test_report" in lower:
+        return "latest_test_report"
+    if "failing_trace" in lower:
+        return "latest_failing_trace"
+    if "formal_properties" in lower:
+        return "latest_formal_properties"
+    if "formal_report" in lower:
+        return "latest_formal_report"
+    if "counterexample" in lower:
+        return "latest_counterexample"
+    if lower.endswith((".diff", ".patch")) or "patch" in lower:
+        return "latest_patch"
+    if "repair_summary" in lower:
+        return "latest_repair_summary"
+    if "gate_report" in lower:
+        return "latest_gate_report"
+    if "final_report" in lower:
+        return "final_report"
+    return None
 
 
 def _record_mismatch(

@@ -28,7 +28,6 @@ except ImportError:  # pragma: no cover - exercised only when SDK is absent loca
 from app.core.errors import RepositoryNotFoundError
 from app.agents.observability import MainAgentObservabilityRecorder
 from app.agents.output_schema import (
-    MainAgentArtifactReference,
     MainAgentDecision,
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
@@ -55,7 +54,10 @@ from app.models.router_schema import (
     EventType,
     EventVisibility,
     Failure,
+    FailureSource,
+    FailureStatus,
     RouterEvent,
+    Severity,
     TaskPhase,
     TaskState,
     TaskStatus,
@@ -170,7 +172,7 @@ class FailureSummary(ToolBaseModel):
     severity: str
     status: str
     title: str
-    evidence_artifact_ids: list[str]
+    evidence_paths: list[str] = Field(default_factory=list)
 
 
 class GateStateSummary(ToolBaseModel):
@@ -228,6 +230,9 @@ class AgentToolResult(ToolBaseModel):
     worker_type: str | None = None
     execution_status: str | None = None
     outcome_status: str | None = None
+    read_paths: list[str] = Field(default_factory=list)
+    written_paths: list[str] = Field(default_factory=list)
+    report_paths: list[str] = Field(default_factory=list)
     violation: ToolViolation | None = None
     error: ToolError | None = None
     artifact: ArtifactReadSummary | None = None
@@ -441,14 +446,15 @@ class AgentToolService:
             )
         else:
             truncated = len(content) > limit
-            result = AgentToolResult(
-                tool=tool_name,
-                task_id=task_id,
-                status=ToolStatus.APPLIED,
-                summary=f"Read {self._workspace_relative_path(target)}.",
-                details={
-                    "path": self._workspace_relative_path(target),
-                    "content": content[:limit],
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=f"Read {self._workspace_relative_path(target)}.",
+            read_paths=[self._workspace_relative_path(target)],
+            details={
+                "path": self._workspace_relative_path(target),
+                "content": content[:limit],
                     "content_truncated": truncated,
                     "content_chars": min(len(content), limit),
                     "size_chars": len(content),
@@ -690,24 +696,17 @@ class AgentToolService:
             self._record_tool_result(tool_name, result)
             return result
 
-        audit = self._write_tool_artifact(
-            task_id=task_id,
-            name="write_file_audit.json",
-            content={
-                "tool": tool_name,
-                "path": self._workspace_relative_path(target),
-                "size_bytes": target.stat().st_size,
-            },
-            summary=f"Audit record for write_file on {self._workspace_relative_path(target)}.",
-        )
+        rel_path = self._workspace_relative_path(target)
+        self._record_workspace_file_path(task_id=task_id, path=rel_path)
         result = AgentToolResult(
             tool=tool_name,
             task_id=task_id,
             status=ToolStatus.APPLIED,
-            summary=f"Wrote {self._workspace_relative_path(target)}.",
-            artifact_refs=[_artifact_ref_summary(audit)],
+            summary=f"Wrote {rel_path}.",
+            written_paths=[rel_path],
+            report_paths=[rel_path] if _is_report_path(rel_path) else [],
             details={
-                "path": self._workspace_relative_path(target),
+                "path": rel_path,
                 "size_bytes": target.stat().st_size,
             },
         )
@@ -797,12 +796,10 @@ class AgentToolService:
             self._record_tool_result(tool_name, result)
             return result
         duration_ms = int((time.monotonic() - started) * 1000)
-        patch_artifact = self._write_tool_artifact(
+        patch_path = self._write_run_output_file(
             task_id=task_id,
             name="applied_patch.diff",
             content=patch,
-            summary="Patch submitted through apply_patch.",
-            mime_type="text/x-diff",
         )
         status = ToolStatus.APPLIED if completed.returncode == 0 else ToolStatus.FAILED
         result = AgentToolResult(
@@ -814,7 +811,8 @@ class AgentToolService:
                 if completed.returncode == 0
                 else "Patch failed to apply."
             ),
-            artifact_refs=[_artifact_ref_summary(patch_artifact)],
+            written_paths=[patch_path],
+            report_paths=[patch_path],
             error=(
                 None
                 if completed.returncode == 0
@@ -830,6 +828,7 @@ class AgentToolService:
                 "stdout": _bounded_output(completed.stdout),
                 "stderr": _bounded_output(completed.stderr),
                 "duration_ms": duration_ms,
+                "patch_path": patch_path,
             },
         )
         self._record_tool_result(tool_name, result)
@@ -926,7 +925,6 @@ class AgentToolService:
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         combined = stdout + stderr
-        refs: list[ArtifactRefSummary] = []
         output_path: str | None = None
         if len(combined) > self.context.tool_output_max_chars:
             output_path = self._write_run_output_file(
@@ -934,16 +932,6 @@ class AgentToolService:
                 name="command_output.txt",
                 content=f"$ {command}\n\n# stdout\n{stdout}\n\n# stderr\n{stderr}",
             )
-            output_artifact = self._write_tool_artifact(
-                task_id=task_id,
-                name="command_output.txt",
-                content=(
-                    f"$ {command}\n\n# stdout\n{stdout}\n\n# stderr\n{stderr}"
-                ),
-                summary=f"Full output for command: {command[:120]}",
-                mime_type="text/plain",
-            )
-            refs.append(_artifact_ref_summary(output_artifact))
 
         result = AgentToolResult(
             tool=tool_name,
@@ -956,7 +944,8 @@ class AgentToolService:
             summary=(
                 f"Command exited with code {completed.returncode}."
             ),
-            artifact_refs=refs,
+            written_paths=[output_path] if output_path else [],
+            report_paths=[output_path] if output_path else [],
             error=(
                 None
                 if completed.returncode == 0
@@ -1241,16 +1230,35 @@ class AgentToolService:
         worker_type: str,
     ) -> TaskState:
         task = self._get_task(task_id)
+        gate_updates = _gate_updates_for_worker(worker_type)
         if not _is_intake_or_unknown_task(task):
+            if not gate_updates:
+                return task
+            changed_updates = {
+                key: value
+                for key, value in gate_updates.items()
+                if getattr(task.gates, key) != value
+            }
+            if not changed_updates:
+                return task
+            updated = task.model_copy(
+                deep=True,
+                update={
+                    "gates": task.gates.model_copy(update=changed_updates),
+                    "updated_at": utc_now(),
+                },
+            )
+            self.task_repository.update_task_state(updated)
+            self._checkpoint()
+            return self._get_task(task_id)
+
+        if not gate_updates and worker_type == WorkerType.PLC_DEV.value:
+            gate_updates = {}
+        elif not gate_updates:
             return task
 
         now = utc_now()
         task_type = _domain_task_type_for_worker(worker_type)
-        gate_updates: dict[str, Any] = {}
-        if worker_type == WorkerType.PLC_TEST.value:
-            gate_updates["test_required"] = True
-        elif worker_type == WorkerType.PLC_FORMAL.value:
-            gate_updates["formal_required"] = True
         updated = task.model_copy(
             deep=True,
             update={
@@ -1518,7 +1526,7 @@ class AgentToolService:
             phase=_value(task.phase),
             decisions=_main_agent_decisions_from_tool(decisions),
             plan=_main_agent_plan_from_tool(plan),
-            artifact_refs=_main_agent_artifact_refs(task),
+            artifact_refs=[],
             gate_summary=MainAgentGateSummary.model_validate(
                 task.gates.model_dump(mode="json")
             ),
@@ -1551,16 +1559,14 @@ class AgentToolService:
             task_id=task_id,
             status=ToolStatus.APPLIED,
             summary="Final report written.",
-            artifact_refs=[
-                _artifact_ref_summary(final_report),
-                _artifact_ref_summary(replay_log),
-            ],
+            written_paths=[final_report, replay_log],
+            report_paths=[final_report, replay_log],
             failures=_failure_summaries(task.failures),
             gate_state=_gate_state_summary(task),
             details={
                 "final_status": final_status,
-                "final_report_artifact_id": final_report.artifact_id,
-                "main_agent_log_artifact_id": replay_log.artifact_id,
+                "final_report_path": final_report,
+                "main_agent_log_path": replay_log,
             },
         )
         self._record_tool_result(tool_name, result)
@@ -1784,14 +1790,14 @@ class AgentToolService:
 
         task = self._get_task(task_id)
         proposed_jobs: list[ProposedWorkerJob] = []
-        proposed_artifacts: list[list[ArtifactRef]] = []
+        proposed_paths: list[list[str]] = []
         for request in requests:
-            artifacts = _proposed_worker_input_artifacts(task, request.worker_type)
-            proposed_artifacts.append(artifacts)
+            paths = _proposed_worker_input_paths(task, request.worker_type)
+            proposed_paths.append(paths)
             proposed_jobs.append(
                 ProposedWorkerJob(
                     worker_type=request.worker_type,
-                    input_artifacts=artifacts,
+                    input_paths=paths,
                 )
             )
         worker_configs = [request.worker_config for request in requests]
@@ -1805,11 +1811,7 @@ class AgentToolService:
                 "objectives": [request.objective for request in requests],
                 "worker_configs": worker_configs,
             },
-            input_artifacts=[
-                artifact
-                for artifacts in proposed_artifacts
-                for artifact in artifacts
-            ],
+            input_paths=[path for paths in proposed_paths for path in paths],
         )
 
         try:
@@ -1820,14 +1822,14 @@ class AgentToolService:
             return result
 
         worker_inputs: list[WorkerInput] = []
-        for request, artifacts in zip(requests, proposed_artifacts, strict=True):
+        for request, paths in zip(requests, proposed_paths, strict=True):
             try:
                 worker_inputs.append(
                     build_worker_input(
                         task,
                         request.worker_type,
                         objective=request.objective,
-                        input_artifacts=artifacts,
+                        input_paths=paths,
                         trace_context=_trace_context_for_task(task),
                         worker_config=request.worker_config,
                         metadata={"source": "main_agent_function_tools"},
@@ -2014,22 +2016,144 @@ class AgentToolService:
             for outcome in result.assessment.outcomes
             if outcome.blocking
         ]
+        failure_ids = (
+            _blocking_failure_ids(result.task.failures)
+            if result.assessment.blocking
+            else []
+        )
         tool_result = AgentToolResult(
             tool="run_quality_gate",
             task_id=task_id,
             status=ToolStatus.APPLIED,
             summary=result.assessment.message,
-            artifact_refs=[_artifact_ref_summary(result.gate_report)],
+            report_paths=[result.gate_report_path],
             failures=_failure_summaries(result.task.failures),
             gate_state=_gate_state_summary(result.task),
             details={
                 "assessment_status": result.assessment.status,
                 "blocking": result.assessment.blocking,
+                "gate_report_path": result.gate_report_path,
+                "evidence_paths": list(result.assessment.evidence_paths),
                 "failed_gates": failed_gates,
+                "failure_ids": failure_ids,
             },
         )
         self._record_tool_result("run_quality_gate", tool_result)
         return tool_result
+
+    def record_validation_report(
+        self,
+        task_id: str,
+        validation_type: str,
+        status: str,
+        summary: str,
+        *,
+        read_paths: list[str] | None = None,
+        failure_ids: list[str] | None = None,
+        details: dict[str, Any] | None = None,
+        command: str | None = None,
+        rationale_summary: str | None = None,
+    ) -> AgentToolResult:
+        tool_name = "record_validation_report"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=rationale_summary,
+            arguments={
+                "task_id": task_id,
+                "validation_type": validation_type,
+                "status": status,
+                "summary": summary,
+                "read_paths": read_paths,
+                "failure_ids": failure_ids,
+                "details": details,
+                "command": command,
+            },
+            input_paths=read_paths or [],
+        )
+        normalized_type = validation_type.strip().lower()
+        normalized_status = status.strip().lower()
+        if normalized_type not in {"test", "compile", "formal"}:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_validation_type",
+                message="validation_type must be one of: test, compile, formal",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        if normalized_status not in {"passed", "failed"}:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_validation_status",
+                message="status must be one of: passed, failed",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+
+        task = self._get_task(task_id)
+        now = utc_now()
+        report_path = (
+            f".router/reports/main-agent-validation/{task_id}/"
+            f"validation_report_{now.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        )
+        updated = _task_with_validation_report(
+            task,
+            validation_type=normalized_type,
+            status=normalized_status,
+            report_path=report_path,
+            failure_ids=list(failure_ids or []),
+            now=now,
+        )
+        resolved_failure_ids = _resolved_failure_ids(task, updated)
+        report_payload = {
+            "schema_version": DEFAULT_SCHEMA_VERSION,
+            "kind": "main_agent_validation_report",
+            "task_id": task_id,
+            "validation_type": normalized_type,
+            "status": normalized_status,
+            "summary": summary,
+            "read_paths": list(read_paths or []),
+            "failure_ids": list(failure_ids or []),
+            "resolved_failure_ids": resolved_failure_ids,
+            "command": command,
+            "details": _json_object(details or {}),
+            "created_at": now.isoformat(),
+            "created_by": {
+                "type": EventSourceType.MAIN_AGENT.value,
+                "main_agent_run_id": task.trace.latest_main_agent_run_id,
+            },
+        }
+        target = self._resolve_workspace_path(report_path, allow_missing=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(report_payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        persisted = self.task_repository.update_task_state(updated)
+        self._checkpoint()
+
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=f"Recorded {normalized_type} validation report: {normalized_status}.",
+            failures=_failure_summaries(persisted.failures),
+            gate_state=_gate_state_summary(persisted),
+            read_paths=list(read_paths or []),
+            written_paths=[report_path],
+            report_paths=[report_path],
+            details={
+                "validation_type": normalized_type,
+                "validation_status": normalized_status,
+                "failure_ids": list(failure_ids or []),
+                "report_path": report_path,
+                "resolved_failure_ids": resolved_failure_ids,
+            },
+        )
+        self._record_tool_result(tool_name, result)
+        return result
 
     def _has_final_report_artifact(self, task_id: str) -> bool:
         return any(
@@ -2048,7 +2172,7 @@ class AgentToolService:
         worker_config: dict[str, Any] | WorkerConfig | None,
     ) -> AgentToolResult:
         task = self._get_task(task_id)
-        proposed_artifacts = _proposed_worker_input_artifacts(task, worker_type)
+        proposed_paths = _proposed_worker_input_paths(task, worker_type)
         self._record_tool_call(
             tool_name=tool_name,
             task_id=task_id,
@@ -2059,10 +2183,10 @@ class AgentToolService:
                 "objective": objective,
                 "worker_config": worker_config,
             },
-            input_artifacts=proposed_artifacts,
+            input_paths=proposed_paths,
         )
         try:
-            validate_worker_call(task, worker_type, proposed_artifacts)
+            validate_worker_call(task, worker_type, proposed_paths)
         except SchedulerGuardViolation as exc:
             result = self._guard_rejected_result(tool_name, task, exc)
             self._record_tool_result(tool_name, result)
@@ -2073,7 +2197,7 @@ class AgentToolService:
                 task,
                 worker_type,
                 objective=objective,
-                input_artifacts=proposed_artifacts,
+                input_paths=proposed_paths,
                 trace_context=_trace_context_for_task(task),
                 worker_config=worker_config,
                 metadata={"source": "main_agent_function_tools"},
@@ -2141,7 +2265,7 @@ class AgentToolService:
             code="worker_retry_debounce",
             message=(
                 "worker retry debounce rejected dispatch after repeated failures "
-                "for the same worker and input artifacts"
+                "for the same worker and input paths"
             ),
             details={
                 "worker_type": _value(worker_input.worker_type),
@@ -2336,6 +2460,32 @@ class AgentToolService:
         output_file.write_text(content, encoding="utf-8")
         return self._workspace_relative_path(output_file)
 
+    def _record_workspace_file_path(
+        self,
+        *,
+        task_id: str,
+        path: str,
+        role: str | None = None,
+    ) -> None:
+        try:
+            task = self.task_repository.get_task(task_id)
+        except RepositoryNotFoundError:
+            return
+        field_name = role or _current_file_field_for_path(path)
+        all_paths = _append_unique_path(task.current_files.all_paths, path)
+        updates: dict[str, Any] = {"all_paths": all_paths}
+        if field_name is not None:
+            updates[field_name] = path
+        self.task_repository.update_task_state(
+            task.model_copy(
+                deep=True,
+                update={
+                    "current_files": task.current_files.model_copy(update=updates),
+                    "updated_at": utc_now(),
+                },
+            )
+        )
+
     def _write_tool_artifact(
         self,
         *,
@@ -2384,7 +2534,7 @@ class AgentToolService:
         task_id: str,
         rationale_summary: str | None,
         arguments: dict[str, Any],
-        input_artifacts: list[ArtifactRef] | None = None,
+        input_paths: list[str] | None = None,
     ) -> None:
         self._append_agent_tool_call_record(
             tool_name=tool_name,
@@ -2399,9 +2549,7 @@ class AgentToolService:
             tool_name=tool_name,
             rationale_summary=rationale_summary,
             arguments=arguments,
-            input_artifact_ids=[
-                artifact.artifact_id for artifact in input_artifacts or []
-            ],
+            input_paths=input_paths or [],
         )
 
     def _record_tool_result(self, tool_name: str, result: AgentToolResult) -> None:
@@ -2779,6 +2927,34 @@ def run_quality_gate(
     )
 
 
+@function_tool(strict_mode=False)
+def record_validation_report(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    validation_type: str,
+    status: str,
+    summary: str,
+    read_paths: list[str] | None = None,
+    failure_ids: list[str] | None = None,
+    details: dict[str, Any] | None = None,
+    command: str | None = None,
+    rationale_summary: str | None = None,
+) -> AgentToolResult:
+    """Record a Main Agent validation report and update task validation state."""
+
+    return AgentToolService(ctx.context).record_validation_report(
+        task_id=task_id,
+        validation_type=validation_type,
+        status=status,
+        summary=summary,
+        read_paths=read_paths,
+        failure_ids=failure_ids,
+        details=details,
+        command=command,
+        rationale_summary=rationale_summary,
+    )
+
+
 def get_main_agent_tools() -> list[Any]:
     """Return SDK function tools for Main Agent registration."""
 
@@ -2790,7 +2966,6 @@ def get_main_agent_tools() -> list[Any]:
         call_plc_formal,
         call_plc_repair,
         run_parallel_workers,
-        read_artifact,
         run_quality_gate,
         write_final_report,
     ]
@@ -2858,7 +3033,7 @@ def get_main_agent_tool_specs() -> list[dict[str, Any]]:
             },
             ["task_id", "questions"],
         ),
-        _worker_tool_spec("call_plc_dev", "Generate or update PLC artifacts."),
+        _worker_tool_spec("call_plc_dev", "Generate or update PLC workspace files."),
         _worker_tool_spec("call_plc_test", "Run PLC tests for current code."),
         _worker_tool_spec("call_plc_formal", "Run formal verification for current code."),
         _worker_tool_spec("call_plc_repair", "Repair current code using failure evidence."),
@@ -2884,17 +3059,6 @@ def get_main_agent_tool_specs() -> list[dict[str, Any]]:
             ["task_id", "workers"],
         ),
         _tool_spec(
-            "read_artifact",
-            "Read artifact metadata or bounded UTF-8 content.",
-            {
-                "task_id": {"type": "string"},
-                "artifact_id": {"type": "string"},
-                "mode": {"type": "string", "enum": ["summary", "full"]},
-                "max_chars": {"type": "integer", "minimum": 1},
-            },
-            ["task_id", "artifact_id"],
-        ),
-        _tool_spec(
             "run_quality_gate",
             "Run and persist Quality Gate assessment.",
             {
@@ -2905,7 +3069,7 @@ def get_main_agent_tool_specs() -> list[dict[str, Any]]:
         ),
         _tool_spec(
             "write_final_report",
-            "Write final report and Main Agent replay artifacts.",
+            "Write final report and Main Agent replay files.",
             {
                 "task_id": {"type": "string"},
                 "final_status": {"type": "string", "enum": list(TERMINAL_STATUS_VALUES)},
@@ -2976,8 +3140,6 @@ def call_main_agent_tool(
             ],
             **tool_arguments,
         )
-    if tool_name == "read_artifact":
-        return service.read_artifact(**tool_arguments)
     if tool_name == "run_quality_gate":
         return service.run_quality_gate(**tool_arguments)
     if tool_name == "write_final_report":
@@ -3187,7 +3349,7 @@ def plc_dev(
     rpc_pipeline: list[str] | None = None,
     llm: dict[str, Any] | None = None,
 ) -> AgentToolResult:
-    """Generate or update PLC artifacts with direct worker controls."""
+    """Generate or update PLC workspace files with direct worker controls."""
 
     return AgentToolService(ctx.context).plc_dev(
         task_id=task_id,
@@ -3500,60 +3662,8 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         executor_method="git_status",
     ),
     MainAgentToolDefinition(
-        name="read_artifact",
-        description="Read Router artifact metadata or bounded UTF-8 content.",
-        properties={
-            "task_id": {"type": "string"},
-            "artifact_id": {"type": "string"},
-            "mode": {"type": "string", "enum": ["summary", "full"]},
-            "max_chars": {"type": "integer", "minimum": 1},
-        },
-        required=("task_id", "artifact_id"),
-        sdk_tool=read_artifact,
-        executor_method="read_artifact",
-    ),
-    MainAgentToolDefinition(
-        name="write_artifact",
-        description=(
-            "Write a durable Router artifact for generated notes, logs, or "
-            "deliverables."
-        ),
-        properties={
-            "task_id": {"type": "string"},
-            "name": {"type": "string"},
-            "content": {},
-            "summary": {"type": "string"},
-            "artifact_type": {"type": "string"},
-            "mime_type": {"type": "string"},
-        },
-        required=("task_id", "name", "content", "summary"),
-        sdk_tool=write_artifact,
-        executor_method="write_artifact",
-    ),
-    MainAgentToolDefinition(
-        name="register_workspace_file",
-        description=(
-            "Register an existing workspace file as a Router artifact and update "
-            "current artifact pointers such as current PLC code."
-        ),
-        properties={
-            "task_id": {"type": "string"},
-            "path": {"type": "string"},
-            "artifact_type": {
-                "type": "string",
-                "description": "Use plc_code for PLC source files; code is accepted as an alias.",
-            },
-            "summary": {"type": "string"},
-            "file_role": {"type": "string"},
-            "mime_type": {"type": "string"},
-        },
-        required=("task_id", "path", "artifact_type", "summary"),
-        sdk_tool=register_workspace_file,
-        executor_method="register_workspace_file",
-    ),
-    MainAgentToolDefinition(
         name="plc_dev",
-        description="Generate or update PLC artifacts with direct worker controls.",
+        description="Generate or update PLC workspace files with direct worker controls.",
         properties=_direct_worker_tool_properties(WorkerType.PLC_DEV.value),
         required=("task_id",),
         sdk_tool=plc_dev,
@@ -3593,6 +3703,36 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         required=("task_id",),
         sdk_tool=run_quality_gate,
         executor_method="run_quality_gate",
+    ),
+    MainAgentToolDefinition(
+        name="record_validation_report",
+        description=(
+            "Record Main Agent fallback validation evidence and update task "
+            "validation state."
+        ),
+        properties={
+            "task_id": {"type": "string"},
+            "validation_type": {
+                "type": "string",
+                "enum": ["test", "compile", "formal"],
+            },
+            "status": {"type": "string", "enum": ["passed", "failed"]},
+            "summary": {"type": "string"},
+            "read_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "failure_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "details": {"type": "object"},
+            "command": {"type": "string"},
+            "rationale_summary": {"type": "string"},
+        },
+        required=("task_id", "validation_type", "status", "summary"),
+        sdk_tool=record_validation_report,
+        executor_method="record_validation_report",
     ),
 )
 GENERIC_MAIN_AGENT_TOOL_BY_NAME = {
@@ -3656,35 +3796,35 @@ def call_main_agent_tool(  # type: ignore[no-redef]
     )
 
 
-def _proposed_worker_input_artifacts(
+def _proposed_worker_input_paths(
     task: TaskState,
     worker_type: WorkerType | str,
-) -> list[ArtifactRef]:
+) -> list[str]:
     worker = _value(worker_type)
-    artifacts = task.current_artifacts
+    files = task.current_files
     if worker == WorkerType.PLC_DEV.value:
         return [
-            artifact
-            for artifact in (artifacts.raw_user_request, artifacts.requirements_ir)
-            if artifact is not None
+            path
+            for path in (files.raw_user_request, files.requirements)
+            if path is not None
         ][:1]
     if worker in {WorkerType.PLC_TEST.value, WorkerType.PLC_FORMAL.value}:
         return [
-            artifact
-            for artifact in (artifacts.requirements_ir, artifacts.current_code)
-            if artifact is not None
+            path
+            for path in (files.requirements, files.current_code)
+            if path is not None
         ]
     if worker == WorkerType.PLC_REPAIR.value:
         return [
-            artifact
-            for artifact in (
-                artifacts.current_code,
-                artifacts.latest_test_report,
-                artifacts.latest_failing_trace,
-                artifacts.latest_formal_report,
-                artifacts.latest_counterexample,
+            path
+            for path in (
+                files.current_code,
+                files.latest_test_report,
+                files.latest_failing_trace,
+                files.latest_formal_report,
+                files.latest_counterexample,
             )
-            if artifact is not None
+            if path is not None
         ]
     return []
 
@@ -3806,13 +3946,22 @@ def _artifact_type_from_tool(value: str | ArtifactType) -> ArtifactType:
 
 
 def _worker_input_signature(worker_input: WorkerInput) -> tuple[str, ...]:
+    signature = (worker_input.metadata or {}).get("input_signature")
+    if isinstance(signature, dict):
+        return (
+            json.dumps(
+                signature,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
     return tuple(
         sorted(
-            (
-                f"{_value(artifact.type)}:"
-                f"{artifact.content_hash or artifact.artifact_id}"
-            )
-            for artifact in worker_input.input_artifacts
+            [
+                _value(worker_input.worker_type),
+                *worker_input.input_paths,
+            ]
         )
     )
 
@@ -3843,6 +3992,62 @@ def _bounded_output(value: Any, limit: int = DEFAULT_AGENT_TOOL_OUTPUT_MAX_CHARS
     return f"{text[: max(limit - 3, 0)]}..."
 
 
+def _current_file_field_for_path(path: str) -> str | None:
+    lower = path.lower()
+    name = Path(path).name.lower()
+    if lower.startswith(".router/requests/"):
+        return "raw_user_request"
+    if lower.endswith((".st", ".scl", ".fbd")) or (
+        lower.endswith(".xml") and "io_contract" not in lower
+    ):
+        return "current_code"
+    if "requirements" in lower:
+        return "requirements"
+    if "io_contract" in lower:
+        return "current_io_contract"
+    if "test_cases" in lower:
+        return "latest_test_cases"
+    if "test_report" in lower:
+        return "latest_test_report"
+    if "failing_trace" in lower:
+        return "latest_failing_trace"
+    if "formal_properties" in lower:
+        return "latest_formal_properties"
+    if "formal_report" in lower:
+        return "latest_formal_report"
+    if "counterexample" in lower:
+        return "latest_counterexample"
+    if name.endswith((".diff", ".patch")) or "patch" in lower:
+        return "latest_patch"
+    if "repair_summary" in lower:
+        return "latest_repair_summary"
+    if "gate_report" in lower:
+        return "latest_gate_report"
+    if "final_report" in lower:
+        return "final_report"
+    if "replay_log" in lower or "main_agent_log" in lower:
+        return "main_agent_log"
+    return None
+
+
+def _append_unique_path(paths: list[str], path: str) -> list[str]:
+    return paths if path in paths else [*paths, path]
+
+
+def _is_report_path(path: str) -> bool:
+    return _current_file_field_for_path(path) in {
+        "latest_test_report",
+        "latest_failing_trace",
+        "latest_formal_report",
+        "latest_counterexample",
+        "latest_patch",
+        "latest_repair_summary",
+        "latest_gate_report",
+        "final_report",
+        "main_agent_log",
+    }
+
+
 def _json_safe_mapping(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value, default=str))
 
@@ -3853,6 +4058,14 @@ def _is_intake_or_unknown_task(task: TaskState) -> bool:
         or _value(task.phase) == TaskPhase.INTAKE.value
         or _value(task.task_type) == TaskType.UNKNOWN.value
     )
+
+
+def _gate_updates_for_worker(worker_type: str) -> dict[str, Any]:
+    if worker_type == WorkerType.PLC_TEST.value:
+        return {"test_required": True}
+    if worker_type == WorkerType.PLC_FORMAL.value:
+        return {"formal_required": True}
+    return {}
 
 
 def _domain_task_type_for_worker(worker_type: str) -> str:
@@ -3940,45 +4153,6 @@ def _normalized_task_type_from_tool(
     return TaskType.NEW_PLC_DEVELOPMENT.value
 
 
-def _main_agent_artifact_refs(task: TaskState) -> list[MainAgentArtifactReference]:
-    refs = [
-        artifact
-        for artifact in (
-            task.current_artifacts.raw_user_request,
-            task.current_artifacts.requirements_ir,
-            task.current_artifacts.current_code,
-            task.current_artifacts.current_io_contract,
-            task.current_artifacts.latest_test_cases,
-            task.current_artifacts.latest_test_report,
-            task.current_artifacts.latest_failing_trace,
-            task.current_artifacts.latest_formal_properties,
-            task.current_artifacts.latest_formal_report,
-            task.current_artifacts.latest_counterexample,
-            task.current_artifacts.latest_patch,
-            task.current_artifacts.latest_repair_summary,
-            task.current_artifacts.latest_gate_report,
-        )
-        if artifact is not None
-    ]
-    seen: set[str] = set()
-    output: list[MainAgentArtifactReference] = []
-    for ref in refs:
-        if ref.artifact_id in seen:
-            continue
-        seen.add(ref.artifact_id)
-        output.append(
-            MainAgentArtifactReference(
-                artifact_id=ref.artifact_id,
-                type=_value(ref.type),
-                version=ref.version,
-                uri=ref.uri,
-                summary=ref.summary,
-                content_hash=ref.content_hash,
-            )
-        )
-    return output
-
-
 def _main_agent_decisions_from_tool(
     decisions: list[dict[str, Any]] | None,
 ) -> list[MainAgentDecision]:
@@ -4035,6 +4209,151 @@ def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"value": _json_value(value)}
     return {str(key): _json_value(item) for key, item in value.items()}
+
+
+def _task_with_validation_report(
+    task: TaskState,
+    *,
+    validation_type: str,
+    status: str,
+    report_path: str,
+    failure_ids: list[str],
+    now: Any,
+) -> TaskState:
+    current_files = task.current_files
+    file_updates: dict[str, Any] = {
+        "all_paths": _append_unique_path(current_files.all_paths, report_path)
+    }
+    gate_updates: dict[str, Any] = {}
+    failures = task.failures
+
+    if validation_type == "test":
+        gate_updates["test_required"] = True
+    elif validation_type == "formal":
+        gate_updates["formal_required"] = True
+
+    if status == "passed":
+        if validation_type == "test":
+            file_updates["latest_test_report"] = report_path
+            gate_updates.update(
+                {
+                    "latest_test_passed": True,
+                    "regression_required": False,
+                }
+            )
+        elif validation_type == "formal":
+            file_updates["latest_formal_report"] = report_path
+            gate_updates.update(
+                {
+                    "latest_formal_passed": True,
+                    "formal_regression_required": False,
+                }
+            )
+        failures = _resolve_validation_failures(
+            failures,
+            validation_type=validation_type,
+            failure_ids=set(failure_ids),
+            resolved_by_path=report_path,
+            resolved_at=now,
+        )
+
+    has_blocking_failure = _has_open_blocking_failure(failures)
+    gate_updates["has_blocking_failure"] = has_blocking_failure
+    gate_updates["can_finish_as_success"] = False
+    phase = task.phase
+    if (
+        not has_blocking_failure
+        and _value(task.phase)
+        in {
+            TaskPhase.TESTING.value,
+            TaskPhase.FORMAL_VERIFYING.value,
+            TaskPhase.REPAIRING.value,
+            TaskPhase.REGRESSION.value,
+        }
+    ):
+        phase = TaskPhase.QUALITY_GATE.value
+
+    return task.model_copy(
+        deep=True,
+        update={
+            "phase": phase,
+            "updated_at": now,
+            "current_files": current_files.model_copy(update=file_updates),
+            "gates": task.gates.model_copy(update=gate_updates),
+            "failures": failures,
+        },
+    )
+
+
+def _resolve_validation_failures(
+    failures: list[Failure],
+    *,
+    validation_type: str,
+    failure_ids: set[str],
+    resolved_by_path: str,
+    resolved_at: Any,
+) -> list[Failure]:
+    source = _validation_failure_source(validation_type)
+    resolved: list[Failure] = []
+    for failure in failures:
+        if _should_resolve_validation_failure(failure, source, failure_ids):
+            resolved.append(
+                failure.model_copy(
+                    update={
+                        "status": FailureStatus.RESOLVED.value,
+                        "resolved_by_path": resolved_by_path,
+                        "resolved_at": resolved_at,
+                    }
+                )
+            )
+        else:
+            resolved.append(failure)
+    return resolved
+
+
+def _should_resolve_validation_failure(
+    failure: Failure,
+    source: str,
+    failure_ids: set[str],
+) -> bool:
+    if (
+        _value(failure.status) != FailureStatus.OPEN.value
+        or _value(failure.severity) != "blocking"
+    ):
+        return False
+    if failure_ids:
+        return failure.failure_id in failure_ids
+    return _value(failure.source) == source
+
+
+def _validation_failure_source(validation_type: str) -> str:
+    if validation_type == "compile":
+        return FailureSource.COMPILE.value
+    if validation_type == "formal":
+        return FailureSource.FORMAL.value
+    return FailureSource.TEST.value
+
+
+def _has_open_blocking_failure(failures: list[Failure]) -> bool:
+    return any(
+        _value(failure.status) == FailureStatus.OPEN.value
+        and _value(failure.severity) == "blocking"
+        for failure in failures
+    )
+
+
+def _resolved_failure_ids(before: TaskState, after: TaskState) -> list[str]:
+    before_by_id = {failure.failure_id: failure for failure in before.failures}
+    resolved: list[str] = []
+    for failure in after.failures:
+        previous = before_by_id.get(failure.failure_id)
+        if (
+            previous is not None
+            and _value(previous.status) == FailureStatus.OPEN.value
+            and _value(failure.status) == FailureStatus.RESOLVED.value
+        ):
+            resolved.append(failure.failure_id)
+    return resolved
 
 
 def _build_main_agent_event(
@@ -4111,7 +4430,6 @@ def _worker_result_to_tool_result(
         task_id=result.task_id,
         status=status,
         summary=result.summary,
-        artifact_refs=_artifact_ref_summaries(result.produced_artifacts),
         failures=_failure_summaries(task.failures),
         gate_state=_gate_state_summary(task),
         next_recommended_action=_value(result.next_recommended_action),
@@ -4119,6 +4437,9 @@ def _worker_result_to_tool_result(
         worker_type=_value(result.worker_type),
         execution_status=_value(result.execution_status),
         outcome_status=_value(result.outcome.status),
+        read_paths=list(result.read_paths),
+        written_paths=list(result.written_paths),
+        report_paths=list(result.report_paths),
         error=(
             ToolError(
                 error_code=result.error.error_code,
@@ -4183,9 +4504,18 @@ def _failure_summaries(failures: list[Failure]) -> list[FailureSummary]:
             severity=_value(failure.severity),
             status=_value(failure.status),
             title=failure.title,
-            evidence_artifact_ids=list(failure.evidence_artifact_ids),
+            evidence_paths=list(failure.evidence_paths),
         )
         for failure in failures
+    ]
+
+
+def _blocking_failure_ids(failures: list[Failure]) -> list[str]:
+    return [
+        failure.failure_id
+        for failure in failures
+        if _value(failure.status) == FailureStatus.OPEN.value
+        and _value(failure.severity) == Severity.BLOCKING.value
     ]
 
 

@@ -21,13 +21,16 @@ def test_orchestration_instructions_cover_guarded_finalization() -> None:
     assert "authoritative" in instructions
 
 
-def test_orchestration_instructions_cover_artifact_boundaries() -> None:
+def test_orchestration_instructions_cover_workspace_file_boundaries() -> None:
     instructions = build_orchestration_instructions()
 
-    assert "write_artifact" in instructions
+    assert "workspace files" in instructions
+    assert ".router/runs" in instructions
+    assert ".router/reports" in instructions
     assert "large code" in instructions
     assert "command output" in instructions
-    assert "read_artifact" in instructions
+    assert "read_artifact" not in instructions
+    assert "write_artifact" not in instructions
 
 
 def test_orchestration_instructions_cover_mcp_domain_tools() -> None:
@@ -45,5 +48,5 @@ def test_state_view_prompt_wraps_compact_state() -> None:
     prompt = build_state_view_prompt({"task_id": "task-001"})
 
     assert "compact Router task state view" in prompt
-    assert "artifact references and summaries only" in prompt
+    assert "workspace file paths and summaries only" in prompt
     assert "task-001" in prompt

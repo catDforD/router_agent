@@ -47,9 +47,6 @@ from app.core.time import utc_now
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     AgentRunState,
-    ArtifactRef,
-    ArtifactType,
-    CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
     ExecutionPolicy,
@@ -69,7 +66,6 @@ from app.models.router_schema import (
     TokenUsage,
     WorkspaceContext,
 )
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
 from app.services.scheduler_guard import SchedulerGuardViolation
@@ -100,12 +96,12 @@ EVIDENCE_TOOL_NAMES = {
     "apply_patch",
     "exec_command",
     "git_status",
-    "register_workspace_file",
     "plc_dev",
     "plc_test",
     "plc_formal",
     "plc_repair",
     "run_quality_gate",
+    "record_validation_report",
 }
 EXECUTION_REQUEST_KEYWORDS = (
     "plc",
@@ -981,7 +977,7 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
             "need_clarification": task.difficulty.need_clarification,
         },
         "gates": task.gates.model_dump(mode="json"),
-        "current_artifacts": _current_artifact_view(task.current_artifacts),
+        "current_files": _current_file_view(task),
         "workspace": (
             task.workspace.model_dump(mode="json")
             if task.workspace is not None
@@ -1029,7 +1025,6 @@ def build_session_context_view(
         return None
 
     event_service = EventService(session)
-    artifact_repository = ArtifactRepository(session)
     runs: list[dict[str, Any]] = []
     for task in previous_tasks:
         events = event_service.list_visible_events(task.task_id)
@@ -1056,15 +1051,12 @@ def build_session_context_view(
                 "status": _value(task.status),
                 "user_message": task.raw_user_request,
                 "final_response": _bounded_session_text(final_response),
-                "final_report_artifact_id": (
-                    completed.payload.get("final_report_artifact_id")
+                "final_report_path": (
+                    completed.payload.get("final_report_path")
                     if completed is not None
                     else None
                 ),
-                "workspace_files": _workspace_file_refs_for_task(
-                    artifact_repository,
-                    task,
-                ),
+                "workspace_files": _workspace_file_refs_for_task(task),
                 "updated_at": task.updated_at.isoformat(),
             }
         )
@@ -1085,48 +1077,19 @@ def _bounded_session_text(value: str | None, *, limit: int = 2000) -> str | None
     return f"{compact[: limit - 3]}..."
 
 
-KEY_WORKSPACE_ARTIFACT_TYPES = {
-    ArtifactType.PLC_CODE.value,
-    ArtifactType.TEST_CASES.value,
-    ArtifactType.TEST_REPORT.value,
-    ArtifactType.FORMAL_PROPERTIES.value,
-    ArtifactType.FORMAL_REPORT.value,
-    ArtifactType.COUNTEREXAMPLE.value,
-    ArtifactType.PATCH.value,
-    ArtifactType.REPAIR_SUMMARY.value,
-    ArtifactType.FINAL_REPORT.value,
-}
-
-
 def _workspace_file_refs_for_task(
-    artifact_repository: ArtifactRepository,
     task: TaskState,
     *,
     max_files: int = 8,
 ) -> list[dict[str, Any]]:
-    seen_paths: set[str] = set()
-    refs: list[dict[str, Any]] = []
-    for artifact in reversed(artifact_repository.list_task_artifacts(task.task_id)):
-        workspace_path = artifact.metadata.workspace_path
-        if not workspace_path or workspace_path in seen_paths:
-            continue
-        if _value(artifact.type) not in KEY_WORKSPACE_ARTIFACT_TYPES:
-            continue
-        refs.append(
-            {
-                "artifact_id": artifact.artifact_id,
-                "artifact_type": _value(artifact.type),
-                "workspace_path": workspace_path,
-                "file_role": artifact.metadata.file_role,
-                "source_task_id": artifact.metadata.source_task_id,
-                "summary": _bounded_session_text(artifact.summary, limit=320),
-                "content_hash": artifact.storage.content_hash,
-            }
-        )
-        seen_paths.add(workspace_path)
-        if len(refs) >= max_files:
-            break
-    return list(reversed(refs))
+    paths = list(dict.fromkeys(task.current_files.all_paths))[-max_files:]
+    return [
+        {
+            "path": path,
+            "role": _current_file_role(task, path),
+        }
+        for path in paths
+    ]
 
 
 def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
@@ -1182,7 +1145,7 @@ def episode_output_from_task(
         ),
         phase=_value(task.phase),
         decisions=decisions or [],
-        artifact_refs=artifact_refs or _all_artifact_refs(task.current_artifacts),
+        artifact_refs=artifact_refs or [],
         gate_summary=MainAgentGateSummary.model_validate(
             task.gates.model_dump(mode="json")
         ),
@@ -1206,28 +1169,7 @@ def _evaluate_stop_request(
     task = TaskRepository(context.session).get_task(task_id)
     if _is_terminal(task):
         return _StopDecision(allowed=True, reason="Task is already terminal.")
-    if not _task_requires_tool_evidence(task):
-        return _StopDecision(allowed=True, reason="Task can be answered directly.")
-    if _has_tool_evidence(context, task):
-        if _task_requires_quality_gate(task) and not _has_quality_gate_result(
-            context,
-            task,
-        ):
-            return _StopDecision(
-                allowed=False,
-                reason=(
-                    "This task requires run_quality_gate before a final answer "
-                    "can be accepted."
-                ),
-            )
-        return _StopDecision(allowed=True, reason="Required execution evidence exists.")
-    return _StopDecision(
-        allowed=False,
-        reason=(
-            "This task appears to require workspace, code, command, artifact, or "
-            "domain-tool evidence before a final answer."
-        ),
-    )
+    return _StopDecision(allowed=True, reason="Assistant provided a final response.")
 
 
 def _task_requires_tool_evidence(task: TaskState) -> bool:
@@ -1253,10 +1195,8 @@ def _task_requires_tool_evidence(task: TaskState) -> bool:
 
 
 def _task_requires_quality_gate(task: TaskState) -> bool:
-    return (
-        _value(task.task_type) != TaskType.QA.value
-        and _task_requires_tool_evidence(task)
-    )
+    _ = task
+    return False
 
 
 def _has_tool_evidence(context: AgentToolContext, task: TaskState) -> bool:
@@ -1295,7 +1235,7 @@ def _events_have_tool_evidence(context: AgentToolContext, task_id: str) -> bool:
 
 
 def _has_quality_gate_result(context: AgentToolContext, task: TaskState) -> bool:
-    if task.current_artifacts.latest_gate_report is not None:
+    if task.current_files.latest_gate_report is not None:
         return True
     latest_run_id = task.trace.latest_main_agent_run_id
     latest_run = next(
@@ -1330,15 +1270,6 @@ def _has_open_blocking_failure(task: TaskState) -> bool:
 def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
     if _has_open_blocking_failure(task):
         return TaskStatus.FAILED.value
-    if _task_requires_quality_gate(task):
-        if task.gates.can_finish_as_success is True:
-            return TaskStatus.SUCCEEDED.value
-        return (
-            TaskStatus.PARTIAL_FAILED.value
-            if _has_quality_gate_result(context, task)
-            else TaskStatus.FAILED.value
-        )
-
     latest_run_id = task.trace.latest_main_agent_run_id
     latest_run = next(
         (
@@ -1854,39 +1785,23 @@ def new_main_agent_run_id() -> str:
     return prefixed_id("main-agent-run")
 
 
-def _current_artifact_view(current_artifacts: CurrentArtifacts) -> dict[str, Any]:
-    view: dict[str, Any] = {
-        "all_artifact_ids": list(current_artifacts.all_artifact_ids)
-    }
-    for field_name, value in current_artifacts:
-        if field_name == "all_artifact_ids" or value is None:
+def _current_file_view(task: TaskState) -> dict[str, Any]:
+    current_files = task.current_files
+    view: dict[str, Any] = {"all_paths": list(current_files.all_paths)}
+    for field_name, value in current_files:
+        if field_name == "all_paths" or value is None:
             continue
-        view[field_name] = _artifact_ref_view(value)
+        view[field_name] = value
     return view
 
 
-def _all_artifact_refs(current_artifacts: CurrentArtifacts) -> list[MainAgentArtifactReference]:
-    refs: list[MainAgentArtifactReference] = []
-    seen: set[str] = set()
-    for field_name, value in current_artifacts:
-        if field_name == "all_artifact_ids" or value is None:
+def _current_file_role(task: TaskState, path: str) -> str | None:
+    for field_name, value in task.current_files:
+        if field_name == "all_paths":
             continue
-        if value.artifact_id in seen:
-            continue
-        refs.append(MainAgentArtifactReference(**_artifact_ref_view(value)))
-        seen.add(value.artifact_id)
-    return refs
-
-
-def _artifact_ref_view(artifact: ArtifactRef) -> dict[str, Any]:
-    return {
-        "artifact_id": artifact.artifact_id,
-        "type": _value(artifact.type),
-        "version": artifact.version,
-        "uri": artifact.uri,
-        "summary": artifact.summary,
-        "content_hash": artifact.content_hash,
-    }
+        if value == path:
+            return field_name
+    return None
 
 
 def _failure_summaries(failures: list[Failure]) -> list[dict[str, Any]]:
@@ -1897,7 +1812,7 @@ def _failure_summaries(failures: list[Failure]) -> list[dict[str, Any]]:
             "severity": _value(failure.severity),
             "status": _value(failure.status),
             "title": failure.title,
-            "evidence_artifact_ids": list(failure.evidence_artifact_ids),
+            "evidence_paths": list(failure.evidence_paths),
         }
         for failure in failures
         if _value(failure.status) == "open"
@@ -1916,7 +1831,6 @@ def _available_tools(task: TaskState) -> list[str]:
     )
     read_tools = {"list_files", "glob", "grep", "read_file", "git_status"}
     write_tools = {"write_file", "apply_patch", "exec_command"}
-    register_tools = {"register_workspace_file"}
     if mode == "local_full_access":
         return list(MAIN_AGENT_TOOL_NAMES)
     if mode == "local_read_only":
@@ -1928,7 +1842,7 @@ def _available_tools(task: TaskState) -> list[str]:
     return [
         name
         for name in MAIN_AGENT_TOOL_NAMES
-        if name not in read_tools | write_tools | register_tools
+        if name not in read_tools | write_tools
     ]
 
 

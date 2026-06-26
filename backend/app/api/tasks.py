@@ -79,7 +79,7 @@ class TaskListResponse(BaseModel):
 
 class UserMessageResponse(BaseModel):
     task: TaskState
-    message_artifact_id: str
+    message_path: str
 
 
 def get_request_db_session(request: Request) -> Iterator[Session]:
@@ -219,7 +219,7 @@ def append_user_message(
         _schedule_runtime_followup(
             background_tasks,
             task_id,
-            result.message_artifact_id,
+            result.message_path,
             settings=request.app.state.settings,
         )
     else:
@@ -259,7 +259,7 @@ def cancel_task(
 def _user_message_response(result: UserMessageResult) -> UserMessageResponse:
     return UserMessageResponse(
         task=result.task,
-        message_artifact_id=result.message_artifact_id,
+        message_path=result.message_path,
     )
 
 
@@ -284,13 +284,13 @@ def _schedule_runtime_resume(
 def _schedule_runtime_followup(
     background_tasks: BackgroundTasks,
     task_id: str,
-    message_artifact_id: str,
+    message_path: str,
     *,
     settings: Settings,
 ) -> None:
     background_tasks.add_task(
         run_runtime_followup_task,
         task_id,
-        message_artifact_id,
+        message_path,
         settings,
     )

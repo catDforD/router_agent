@@ -54,18 +54,6 @@
     "has_blocking_failure": false,
     "can_finish_as_success": false
   },
-  "current_artifacts": {
-    "raw_user_request": {
-      "artifact_id": "artifact-raw-request-001",
-      "type": "raw_user_request",
-      "version": 1,
-      "uri": "local://artifacts/task-001/raw-request.json",
-      "summary": "Original user request"
-    },
-    "all_artifact_ids": [
-      "artifact-raw-request-001"
-    ]
-  },
   "active_worker_jobs": [],
   "completed_worker_job_ids": [],
   "assumptions": [

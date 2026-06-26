@@ -135,7 +135,10 @@ function WorkerCard({
       <div className="worker-foot">
         <span className="mini-pill">
           <FileCheck2 size={13} />
-          {worker.artifactIds.length} artifacts
+          {worker.writtenPaths.length} written
+        </span>
+        <span className="mini-pill">
+          {worker.reportPaths.length} reports
         </span>
         {worker.failureIds.length ? (
           <span data-tone="bad" className="status-pill">

@@ -12,10 +12,9 @@ from app.agents.output_schema import (
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
 )
-from app.models.db_models import ArtifactRow, Base, EventRow
+from app.models.db_models import Base, EventRow
 from app.models.router_schema import TaskState, TokenUsage
 from app.repositories.task_repo import TaskRepository
-from app.services.artifact_store import ArtifactStore
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
@@ -82,7 +81,7 @@ def test_recorder_appends_turn_and_tool_events(
             "objective": "Generate code",
         },
         rationale_summary="Use plc-dev because no current PLC code exists.",
-        input_artifact_ids=["artifact-raw-request-001"],
+        input_paths=["raw_user_request.json"],
     )
 
     rows = list(db_session.execute(select(EventRow).order_by(EventRow.seq)).scalars())
@@ -94,6 +93,7 @@ def test_recorder_appends_turn_and_tool_events(
     ]
     assert event.payload["turn_index"] == 1
     assert event.payload["arguments"]["api_key"] == "[redacted]"
+    assert event.payload["input_paths"] == ["raw_user_request.json"]
     assert event.correlation.openai_trace_id == "trace-001"
     assert event.correlation.main_agent_run_id == "main-agent-run-001"
     assert checkpoints == ["checkpoint", "checkpoint"]
@@ -135,10 +135,40 @@ def test_recorder_truncates_rationale_and_records_tool_result(
     assert call_row.event_json["payload"]["rationale_summary"].endswith(
         "... [truncated]"
     )
-    assert result_event.payload["artifact_ids"] == ["artifact-test-report-001"]
-    assert result_event.payload["failure_ids"] == ["failure-001"]
-    assert result_event.correlation.artifact_ids == ["artifact-test-report-001"]
-    assert result_event.correlation.failure_ids == ["failure-001"]
+    assert result_event.payload["failure_ids"] == []
+    assert result_event.correlation.failure_ids is None
+
+
+def test_recorder_correlates_failed_or_explicit_failure_ids(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    observed = recorder(db_session, tmp_path, task)
+    observed.start_turn()
+
+    failed_event = observed.record_tool_result(
+        tool_name="call_plc_test",
+        result={
+            "status": "failed",
+            "summary": "PLC tests failed.",
+            "failures": [{"failure_id": "failure-from-result"}],
+        },
+    )
+    explicit_event = observed.record_tool_result(
+        tool_name="record_validation_report",
+        result={
+            "status": "applied",
+            "summary": "Recorded validation report.",
+            "failures": [{"failure_id": "failure-history"}],
+            "details": {"failure_ids": ["failure-explicit"]},
+        },
+    )
+
+    assert failed_event.payload["failure_ids"] == ["failure-from-result"]
+    assert failed_event.correlation.failure_ids == ["failure-from-result"]
+    assert explicit_event.payload["failure_ids"] == ["failure-explicit"]
+    assert explicit_event.correlation.failure_ids == ["failure-explicit"]
 
 
 def test_recorder_writes_report_log_and_completed_event(
@@ -178,17 +208,16 @@ def test_recorder_writes_report_log_and_completed_event(
         final_report=final_report,
         replay_log=replay_log,
     )
-    stored_report = ArtifactStore(
-        session=db_session,
-        artifact_root=tmp_path / "artifacts",
-    ).read_artifact_content(final_report.artifact_id)
-    artifact_rows = list(
-        db_session.execute(select(ArtifactRow).order_by(ArtifactRow.created_at)).scalars()
-    )
     restored = TaskRepository(db_session).get_task(task.task_id)
-    report_content = json.loads(stored_report.content)
+    workspace_root = (
+        Path(restored.workspace.root)
+        if restored.workspace
+        else tmp_path / "workspaces" / task.task_id
+    )
+    report_content = json.loads(
+        (workspace_root / final_report).read_text(encoding="utf-8")
+    )
 
-    assert [row.type for row in artifact_rows] == ["final_report", "main_agent_log"]
     assert report_content["report_version"] == 1
     assert report_content["summary"] == "Task completed."
     assert report_content["main_agent_output_summary"]["final_task_status"] == (
@@ -201,9 +230,7 @@ def test_recorder_writes_report_log_and_completed_event(
         "total_tokens": 38,
     }
     assert completed.payload["token_usage_scope"] == "main_agent"
-    assert completed.correlation.artifact_ids == [
-        final_report.artifact_id,
-        replay_log.artifact_id,
-    ]
-    assert restored.current_artifacts.final_report is not None
-    assert restored.current_artifacts.final_report.artifact_id == final_report.artifact_id
+    assert completed.payload["final_report_path"] == final_report
+    assert completed.payload["main_agent_log_path"] == replay_log
+    assert completed.correlation.artifact_ids is None
+    assert restored.current_files.final_report == final_report

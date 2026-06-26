@@ -1,19 +1,20 @@
 {
-  "schema_version": "router.v1",
+  "schema_version": "router.v2",
   "task_id": "task-001",
   "worker_job_id": "worker-job-dev-001",
   "worker_type": "plc-dev",
   "mcp_tool": "plc_dev.run",
   "mode": "create",
   "objective": "Generate initial Structured Text for the pump interlock.",
-  "input_artifacts": [
-    {
-      "artifact_id": "artifact-raw-request-001",
-      "type": "raw_user_request",
-      "version": 1,
-      "uri": "local://artifacts/task-001/raw-request.json",
-      "summary": "Original user request"
-    }
+  "workspace_root": "/tmp/router-workspaces/session-001",
+  "current_directory": "/tmp/router-workspaces/session-001",
+  "input_paths": [
+    ".router/requests/task-001_raw_user_request.json"
+  ],
+  "output_paths": [
+    "src/plc_code.st",
+    ".router/reports/worker-job-dev-001/requirements.json",
+    ".router/reports/worker-job-dev-001/io_contract.json"
   ],
   "context": {
     "user_goal": "Create a PLC program for a pump interlock.",
@@ -52,9 +53,10 @@
   ],
   "expected_outputs": [
     {
-      "artifact_type": "plc_code",
+      "path": "src/plc_code.st",
       "required": true,
-      "description": "Generated PLC Structured Text source."
+      "description": "Generated PLC Structured Text source.",
+      "mime_type": "text/plain"
     }
   ],
   "budget": {
@@ -64,6 +66,6 @@
   "trace_context": {
     "worker_job_id": "worker-job-dev-001"
   },
-  "idempotency_key": "task-001:worker-job-dev-001",
+  "idempotency_key": "task-001:plc-dev:.router/requests/task-001_raw_user_request.json",
   "created_at": "2026-06-15T10:01:00Z"
 }

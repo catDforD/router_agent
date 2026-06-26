@@ -1,16 +1,12 @@
-import { AlertTriangle, Box, GitCommitVertical, Info } from "lucide-react";
+import { AlertTriangle, FileText, GitCommitVertical, Info } from "lucide-react";
 
 import type { RouterEvent } from "../../api/router/types";
 
 interface ExecutionTimelineProps {
   events: RouterEvent[];
-  onArtifactClick: (artifactId: string) => void;
 }
 
-export function ExecutionTimeline({
-  events,
-  onArtifactClick,
-}: ExecutionTimelineProps) {
+export function ExecutionTimeline({ events }: ExecutionTimelineProps) {
   if (!events.length) {
     return (
       <section className="empty-state timeline-empty">
@@ -51,22 +47,24 @@ export function ExecutionTimeline({
               <h3 className="timeline-title">{event.title}</h3>
               {event.message ? <p className="small">{event.message}</p> : null}
               <div className="inline-list">
-                {(event.correlation.artifact_ids ?? []).map((artifactId) => (
-                  <button
-                    className="mini-pill"
-                    key={artifactId}
-                    type="button"
-                    onClick={() => onArtifactClick(artifactId)}
-                  >
-                    <Box size={13} />
-                    {artifactId}
-                  </button>
-                ))}
-                {(event.correlation.failure_ids ?? []).map((failureId) => (
-                  <span className="mini-pill" key={failureId}>
-                    {failureId}
+                {eventPaths(event).map((path) => (
+                  <span className="mini-pill" key={path}>
+                    <FileText size={13} />
+                    {path}
                   </span>
                 ))}
+                {(event.correlation.failure_ids ?? []).map((failureId) => {
+                  const tone = failureTone(event);
+                  return (
+                    <span
+                      className={tone ? "status-pill" : "mini-pill"}
+                      data-tone={tone}
+                      key={failureId}
+                    >
+                      related {failureId}
+                    </span>
+                  );
+                })}
                 <span className="mini-pill">{formatTime(event.created_at)}</span>
               </div>
             </div>
@@ -77,6 +75,30 @@ export function ExecutionTimeline({
   );
 }
 
+function eventPaths(event: RouterEvent): string[] {
+  return [
+    ...payloadStringArray(event.payload.input_paths),
+    ...payloadStringArray(event.payload.read_paths),
+    ...payloadStringArray(event.payload.written_paths),
+    ...payloadStringArray(event.payload.report_paths),
+    ...payloadStringArray(event.payload.evidence_paths),
+    payloadString(event.payload.final_report_path),
+    payloadString(event.payload.main_agent_log_path),
+    payloadString(event.payload.gate_report_path),
+  ].filter((value): value is string => Boolean(value));
+}
+
+function payloadString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function payloadStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
 function severityTone(severity: string): "ok" | "warn" | "bad" {
   if (severity === "error") {
     return "bad";
@@ -85,6 +107,25 @@ function severityTone(severity: string): "ok" | "warn" | "bad" {
     return "warn";
   }
   return "ok";
+}
+
+function failureTone(event: RouterEvent): "bad" | undefined {
+  if (event.severity === "error") {
+    return "bad";
+  }
+  if (payloadString(event.payload.status) === "failed") {
+    return "bad";
+  }
+  const details = event.payload.details;
+  if (
+    details &&
+    typeof details === "object" &&
+    "blocking" in details &&
+    (details as { blocking?: unknown }).blocking === true
+  ) {
+    return "bad";
+  }
+  return undefined;
 }
 
 function formatTime(value: string): string {

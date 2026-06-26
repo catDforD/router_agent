@@ -4,23 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from pathlib import Path
 import shutil
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.ids import new_artifact_id, new_event_id, new_session_id, new_task_id
+from app.core.ids import new_event_id, new_session_id, new_task_id
 from app.core.time import utc_now
 from app.core.errors import RepositoryNotFoundError
 from app.models.router_schema import (
-    ArtifactCreator,
-    ArtifactCreatorType,
-    ArtifactType,
-    ArtifactVisibility,
     AgentSession,
     AgentSessionStatus,
-    CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     DifficultyProfile,
     DifficultySignals,
@@ -42,9 +38,9 @@ from app.models.router_schema import (
     WorkspaceContext,
 )
 from app.repositories._helpers import enum_value
+from app.repositories._helpers import sanitize_legacy_agent_session_payload
 from app.repositories.session_repo import AgentSessionRepository
 from app.repositories.task_repo import TaskRepository
-from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 
 
@@ -68,17 +64,17 @@ class TaskMutationConflictError(Exception):
 @dataclass(frozen=True)
 class TaskCreateResult:
     task: TaskState
-    raw_user_request_artifact_id: str
+    raw_user_request_path: str
 
 
 @dataclass(frozen=True)
 class UserMessageResult:
     task: TaskState
-    message_artifact_id: str
+    message_path: str
 
 
 class TaskService:
-    """Coordinates task state, artifact, and event writes for Task API flows."""
+    """Coordinates task state, workspace files, and event writes for Task API flows."""
 
     def __init__(
         self,
@@ -91,7 +87,6 @@ class TaskService:
         self.session_workspace_root = session_workspace_root or (
             artifact_root.parent / "workspaces"
         )
-        self.artifact_store = ArtifactStore(session=session, artifact_root=artifact_root)
         self.event_service = EventService(session)
 
     def get_task(self, task_id: str) -> TaskState:
@@ -106,15 +101,24 @@ class TaskService:
         return self.task_repository.list_recent_tasks(limit=limit, user_id=user_id)
 
     def delete_task(self, task_id: str) -> None:
-        self.task_repository.get_task(task_id)
+        task = self.task_repository.get_task(task_id)
         self.task_repository.delete_task(task_id)
         task_artifact_dir = (self.artifact_root / task_id).resolve()
         artifact_root = self.artifact_root.resolve()
         try:
             task_artifact_dir.relative_to(artifact_root)
         except ValueError:
-            return
-        shutil.rmtree(task_artifact_dir, ignore_errors=True)
+            pass
+        else:
+            shutil.rmtree(task_artifact_dir, ignore_errors=True)
+        if task.workspace is not None and task.workspace.writable:
+            workspace_root = Path(task.workspace.root).expanduser().resolve()
+            session_root = self.session_workspace_root.expanduser().resolve()
+            try:
+                workspace_root.relative_to(session_root)
+            except ValueError:
+                return
+            shutil.rmtree(workspace_root, ignore_errors=True)
 
     def create_task(
         self,
@@ -174,30 +178,20 @@ class TaskService:
             created_at=now,
         )
 
-        raw_artifact = self.artifact_store.write_artifact_content(
-            ArtifactContentWrite(
-                task_id=task.task_id,
-                artifact_type=ArtifactType.RAW_USER_REQUEST,
-                version=1,
-                name="raw_user_request.json",
-                content={
-                    "message": message,
-                    "project_context": context.model_dump(mode="json"),
-                    "created_at": now.isoformat(),
-                },
-                summary="Original user request.",
-                visibility=ArtifactVisibility.USER,
-                created_by=ArtifactCreator(type=ArtifactCreatorType.USER, id=user_id),
-                metadata={
-                    "target_plc_language": _optional_str(context.target_plc_language),
-                    "target_platform": context.target_platform,
-                    "tags": ["raw_user_request"],
-                },
-                artifact_id=new_artifact_id(),
-                created_at=now,
-                mime_type="application/json",
-            )
-        ).artifact
+        raw_request_path = self._write_workspace_json(
+            task,
+            path=f".router/requests/{task.task_id}_raw_user_request.json",
+            payload={
+                "message": message,
+                "project_context": context.model_dump(mode="json"),
+                "created_at": now.isoformat(),
+            },
+        )
+        task = self._record_workspace_file(
+            task.task_id,
+            raw_request_path,
+            role="raw_user_request",
+        )
 
         self.event_service.append_event(
             self._build_event(
@@ -206,21 +200,21 @@ class TaskService:
                 title="Task created",
                 message="The task was created from the user request.",
                 created_at=now,
-                artifact_ids=[raw_artifact.artifact_id],
+                artifact_ids=None,
                 payload={
                     "task_id": task.task_id,
                     "session_id": task_session_id,
                     "run_id": task.task_id,
                     "status": TaskStatus.CREATED.value,
                     "message": message,
-                    "raw_user_request_artifact_id": raw_artifact.artifact_id,
+                    "raw_user_request_path": raw_request_path,
                 },
                 source_id=user_id,
             )
         )
         return TaskCreateResult(
             task=self.task_repository.get_task(task.task_id),
-            raw_user_request_artifact_id=raw_artifact.artifact_id,
+            raw_user_request_path=raw_request_path,
         )
 
     def append_user_message(
@@ -233,25 +227,15 @@ class TaskService:
         task = self.task_repository.get_task(task_id)
 
         now = utc_now()
-        message_artifact = self.artifact_store.write_artifact_content(
-            ArtifactContentWrite(
-                task_id=task_id,
-                artifact_type=ArtifactType.MISC,
-                version=1,
-                name="user_message.json",
-                content={
-                    "message": message,
-                    "created_at": now.isoformat(),
-                },
-                summary="User follow-up message.",
-                visibility=ArtifactVisibility.USER,
-                created_by=ArtifactCreator(type=ArtifactCreatorType.USER, id=user_id),
-                metadata={"tags": ["user_message"]},
-                artifact_id=new_artifact_id(),
-                created_at=now,
-                mime_type="application/json",
-            )
-        ).artifact
+        message_path = self._write_workspace_json(
+            task,
+            path=f".router/requests/{task_id}_{int(now.timestamp() * 1000)}_user_message.json",
+            payload={
+                "message": message,
+                "created_at": now.isoformat(),
+            },
+        )
+        persisted = self._record_workspace_file(task_id, message_path)
 
         self.event_service.append_event(
             self._build_event(
@@ -260,34 +244,18 @@ class TaskService:
                 title="User message added",
                 message="A user follow-up message was added to the task.",
                 created_at=now,
-                artifact_ids=[message_artifact.artifact_id],
+                artifact_ids=None,
                 payload={
                     "task_id": task_id,
-                    "message_artifact_id": message_artifact.artifact_id,
+                    "message_path": message_path,
                     "message": message,
                 },
                 source_id=user_id,
             )
         )
-        persisted = self.task_repository.get_task(task_id)
-        all_artifact_ids = list(persisted.current_artifacts.all_artifact_ids)
-        if message_artifact.artifact_id not in all_artifact_ids:
-            all_artifact_ids.append(message_artifact.artifact_id)
-            persisted = self.task_repository.update_task_state(
-                persisted.model_copy(
-                    deep=True,
-                    update={
-                        "current_artifacts": persisted.current_artifacts.model_copy(
-                            update={"all_artifact_ids": all_artifact_ids}
-                        ),
-                        "updated_at": now,
-                    },
-                )
-            )
-
         return UserMessageResult(
             task=persisted,
-            message_artifact_id=message_artifact.artifact_id,
+            message_path=message_path,
         )
 
     def cancel_task(self, task_id: str, *, user_id: str | None = None) -> TaskState:
@@ -410,7 +378,6 @@ class TaskService:
                 has_blocking_failure=False,
                 can_finish_as_success=False,
             ),
-            current_artifacts=CurrentArtifacts(all_artifact_ids=[]),
             active_worker_jobs=[],
             completed_worker_job_ids=[],
             assumptions=[],
@@ -419,6 +386,48 @@ class TaskService:
             trace=TaskTrace(main_agent_run_ids=[]),
             event_seq=0,
             metadata=None,
+        )
+
+    def _write_workspace_json(
+        self,
+        task: TaskState,
+        *,
+        path: str,
+        payload: dict[str, Any],
+    ) -> str:
+        if task.workspace is None:
+            raise RuntimeError("task workspace is required for workspace file writes")
+        workspace_root = Path(task.workspace.root)
+        target = workspace_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        return target.relative_to(workspace_root).as_posix()
+
+    def _record_workspace_file(
+        self,
+        task_id: str,
+        path: str,
+        *,
+        role: str | None = None,
+    ) -> TaskState:
+        task = self.task_repository.get_task(task_id)
+        all_paths = list(task.current_files.all_paths)
+        if path not in all_paths:
+            all_paths.append(path)
+        updates: dict[str, Any] = {"all_paths": all_paths}
+        if role is not None:
+            updates[role] = path
+        return self.task_repository.update_task_state(
+            task.model_copy(
+                deep=True,
+                update={
+                    "current_files": task.current_files.model_copy(update=updates),
+                    "updated_at": utc_now(),
+                },
+            )
         )
 
     def _build_event(
@@ -471,7 +480,8 @@ def _project_context(value: ProjectContext | dict[str, Any] | None) -> ProjectCo
         return ProjectContext()
     if isinstance(value, ProjectContext):
         return value
-    return ProjectContext.model_validate(value)
+    payload = sanitize_legacy_agent_session_payload({"project_context": dict(value)})
+    return ProjectContext.model_validate(payload["project_context"])
 
 
 def _workspace_root(

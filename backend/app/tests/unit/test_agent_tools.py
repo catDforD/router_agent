@@ -281,6 +281,26 @@ def blocking_failure(task: TaskState, evidence: ArtifactRef) -> Failure:
     )
 
 
+def state_failure(
+    task: TaskState,
+    *,
+    failure_id: str = "failure-test-001",
+    status: str = "open",
+) -> Failure:
+    return Failure(
+        failure_id=failure_id,
+        source="test",
+        severity="blocking",
+        title="Blocking test failure",
+        description="The current PLC code failed a blocking test.",
+        reproduction=FailureReproduction(input_trace_path="reports/failure.json"),
+        evidence_paths=["reports/failure.json"],
+        status=status,
+        created_by_worker_job_id="worker-job-test-failed",
+        created_at=task.created_at,
+    )
+
+
 def worker_job_rows(db_session: Session) -> list[WorkerJobRow]:
     return list(db_session.execute(select(WorkerJobRow)).scalars())
 
@@ -1090,6 +1110,82 @@ def test_run_quality_gate_returns_assessment_and_gate_report(
     assert result.artifact_refs[0].type == "gate_report"
     assert result.gate_state is not None
     assert result.gate_state.can_finish_as_success is True
+
+
+def test_quality_gate_passed_does_not_correlate_historical_failures(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, task_id="task-gate-passed", qa=True)
+    historical_failure = state_failure(task, status="resolved")
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(deep=True, update={"failures": [historical_failure]})
+    )
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-gate-passed",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.run_quality_gate(task.task_id)
+    event = [
+        event
+        for event in EventService(db_session).list_visible_events(task.task_id)
+        if event.type == "agent.tool_result"
+    ][-1]
+
+    assert result.details["assessment_status"] == "passed"
+    assert event.payload["failure_ids"] == []
+    assert event.correlation.failure_ids is None
+
+
+def test_quality_gate_failed_correlates_open_blocking_failures(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, task_id="task-gate-failed", qa=True)
+    failure = state_failure(task)
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(
+            deep=True,
+            update={
+                "failures": [failure],
+                "gates": task.gates.model_copy(update={"has_blocking_failure": True}),
+            },
+        )
+    )
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-gate-failed",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.run_quality_gate(task.task_id)
+    event = [
+        event
+        for event in EventService(db_session).list_visible_events(task.task_id)
+        if event.type == "agent.tool_result"
+    ][-1]
+
+    assert result.details["assessment_status"] == "failed"
+    assert event.payload["failure_ids"] == ["failure-test-001"]
+    assert event.correlation.failure_ids == ["failure-test-001"]
 
 
 def test_tool_checkpoint_callback_runs_after_gate_and_report(

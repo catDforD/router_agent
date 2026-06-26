@@ -499,9 +499,11 @@ select:focus {
 .pill,
 .status-pill,
 .mini-pill,
+.file-chip,
 .artifact-chip,
 .usage-chip,
 .event-type,
+.file-type,
 .artifact-type,
 .gate-pill,
 .tiny-link {
@@ -1124,6 +1126,7 @@ select:focus {
   text-decoration: none;
 }
 
+.file-chip,
 .artifact-chip {
   border-color: #d8e1ea;
   background: #f7fafc;
@@ -1142,6 +1145,7 @@ button.tiny-link {
   cursor: pointer;
 }
 
+button.file-chip,
 button.artifact-chip {
   cursor: pointer;
 }
@@ -1293,6 +1297,7 @@ button.artifact-chip {
 
 .worker-grid,
 .gate-list,
+.file-list,
 .artifact-list,
 .trace-grid,
 .report-grid,
@@ -1305,6 +1310,7 @@ button.artifact-chip {
 
 .worker-card,
 .gate-row,
+.file-row,
 .artifact-row,
 .trace-row,
 .report-section,
@@ -1338,6 +1344,32 @@ button.artifact-chip {
   white-space: nowrap;
 }
 
+.report-section > summary {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  list-style: none;
+}
+
+.report-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.report-section > summary::before {
+  width: 14px;
+  color: #7a8793;
+  content: ">";
+  font-size: 0.75rem;
+}
+
+.report-section[open] > summary {
+  margin-bottom: 8px;
+}
+
+.report-section[open] > summary::before {
+  content: "v";
+}
+
 .worker-objective {
   display: -webkit-box;
   margin: 0;
@@ -1351,6 +1383,27 @@ button.artifact-chip {
 
 .inline-list,
 .status-row {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inline-details {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.inline-details > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.inline-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.inline-details[open] {
+  display: flex;
+  width: 100%;
   gap: 6px;
   flex-wrap: wrap;
 }
@@ -1395,6 +1448,7 @@ button.artifact-chip {
   font-size: 0.78rem;
 }
 
+.file-row,
 .artifact-row {
   display: grid;
   width: 100%;
@@ -1403,11 +1457,13 @@ button.artifact-chip {
   text-align: left;
 }
 
+.file-row[aria-selected="true"],
 .artifact-row[aria-selected="true"] {
   border-color: rgb(38 144 255 / 44%);
   background: rgb(38 144 255 / 7%);
 }
 
+.file-row strong,
 .artifact-row strong,
 .trace-row strong {
   min-width: 0;
@@ -1416,6 +1472,7 @@ button.artifact-chip {
   white-space: nowrap;
 }
 
+.file-row p,
 .artifact-row p {
   margin: 0;
   color: var(--muted);

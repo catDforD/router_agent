@@ -1,17 +1,17 @@
-"""Build Router v1 WorkerInput payloads from persisted task state."""
+"""Build file-centric WorkerInput payloads from persisted task state."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+import hashlib
+import json
 from typing import Any
 from uuid import uuid4
 
 from app.core.time import utc_now
 from app.models.router_schema import (
-    ArtifactRef,
-    ArtifactType,
-    ExpectedOutputSpec,
+    ExpectedFileSpec,
     FailureStatus,
     TraceContext,
     WORKER_TOOL_BY_TYPE,
@@ -41,27 +41,7 @@ WORKER_MODE_BY_TYPE: dict[str, WorkerMode] = {
     WorkerType.PLC_REPAIR.value: WorkerMode.REPAIR,
 }
 
-EXPECTED_OUTPUT_TYPES_BY_WORKER: dict[str, tuple[ArtifactType, ...]] = {
-    WorkerType.PLC_DEV.value: (
-        ArtifactType.REQUIREMENTS_IR,
-        ArtifactType.PLC_CODE,
-        ArtifactType.IO_CONTRACT,
-    ),
-    WorkerType.PLC_TEST.value: (ArtifactType.TEST_REPORT,),
-    WorkerType.PLC_FORMAL.value: (ArtifactType.FORMAL_REPORT,),
-    WorkerType.PLC_REPAIR.value: (
-        ArtifactType.PATCH,
-        ArtifactType.PLC_CODE,
-        ArtifactType.REPAIR_SUMMARY,
-    ),
-}
-
-REPAIR_EVIDENCE_FIELDS = (
-    "latest_test_report",
-    "latest_failing_trace",
-    "latest_formal_report",
-    "latest_counterexample",
-)
+REPORT_DIR_TEMPLATE = ".router/reports/{worker_job_id}"
 
 
 class WorkerInputBuildError(ValueError):
@@ -73,7 +53,8 @@ def build_worker_input(
     worker_type: WorkerType | str,
     *,
     objective: str | None = None,
-    input_artifacts: list[ArtifactRef] | None = None,
+    input_paths: list[str] | None = None,
+    output_paths: list[str] | None = None,
     worker_job_id: str | None = None,
     trace_context: TraceContext | None = None,
     timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
@@ -82,7 +63,7 @@ def build_worker_input(
     worker_config: WorkerConfig | dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> WorkerInput:
-    """Build and validate a Router v1 WorkerInput for one worker dispatch."""
+    """Build and validate one file-centric WorkerInput for worker dispatch."""
 
     worker = _worker_type_value(worker_type)
     if worker not in WORKER_MODE_BY_TYPE:
@@ -90,74 +71,109 @@ def build_worker_input(
 
     now = created_at or utc_now()
     job_id = worker_job_id or _new_worker_job_id(worker)
-    selected_artifacts = input_artifacts or select_worker_input_artifacts(task, worker)
+    selected_paths = _dedupe(input_paths or select_worker_input_paths(task, worker))
+    expected_paths = output_paths or default_worker_output_paths(worker, job_id, task)
     normalized_worker_config = _build_worker_config(task, worker, worker_config)
+    input_signature = _input_signature(worker, selected_paths, normalized_worker_config)
+    merged_metadata: dict[str, Any] = dict(metadata or {})
+    merged_metadata["input_signature"] = input_signature
+    workspace_root = _workspace_root(task)
+    if workspace_root is None:
+        raise WorkerInputBuildError("worker dispatch requires a workspace root")
+
     return WorkerInput(
-        schema_version="router.v1",
+        schema_version="router.v2",
         task_id=task.task_id,
         worker_job_id=job_id,
         worker_type=worker,
         mcp_tool=WORKER_TOOL_BY_TYPE[worker],
         mode=worker_mode_for(worker),
         objective=objective or _default_objective(task, worker),
-        input_artifacts=selected_artifacts,
+        workspace_root=workspace_root,
+        current_directory=_current_directory(task, workspace_root),
+        input_paths=selected_paths,
+        output_paths=_dedupe(expected_paths),
         context=_worker_context(task),
         constraints=[],
-        expected_outputs=expected_outputs_for(worker),
+        expected_outputs=expected_outputs_for(worker, expected_paths),
         budget=WorkerBudget(
             timeout_seconds=timeout_seconds,
             max_iterations=max_iterations,
         ),
         trace_context=_trace_context(task, job_id, trace_context),
-        idempotency_key=f"{task.task_id}:{job_id}",
+        idempotency_key=f"{task.task_id}:{worker}:{job_id}",
         created_at=now,
         worker_config=normalized_worker_config,
-        metadata=metadata,
+        metadata=merged_metadata,
     )
 
 
-def select_worker_input_artifacts(
+def select_worker_input_paths(
     task: TaskState,
     worker_type: WorkerType | str,
-) -> list[ArtifactRef]:
-    """Select the current task artifacts required for the requested worker."""
+) -> list[str]:
+    """Select current workspace paths required for the requested worker."""
 
     worker = _worker_type_value(worker_type)
-    artifacts = task.current_artifacts
+    files = task.current_files
 
     if worker == WorkerType.PLC_DEV.value:
-        if artifacts.raw_user_request is not None:
-            return [artifacts.raw_user_request]
-        if artifacts.requirements_ir is not None:
-            return [artifacts.requirements_ir]
-        raise WorkerInputBuildError(
-            "plc-dev requires raw_user_request or requirements_ir artifact"
+        return _dedupe(
+            [
+                files.raw_user_request,
+                files.requirements,
+            ]
         )
 
     if worker in {WorkerType.PLC_TEST.value, WorkerType.PLC_FORMAL.value}:
-        if artifacts.requirements_ir is None:
-            raise WorkerInputBuildError(f"{worker} requires current requirements_ir")
-        if artifacts.current_code is None:
-            raise WorkerInputBuildError(f"{worker} requires current plc_code")
-        return [artifacts.requirements_ir, artifacts.current_code]
+        if files.current_code is None:
+            raise WorkerInputBuildError(f"{worker} requires current PLC code path")
+        return _dedupe([files.requirements, files.current_code])
 
     if worker == WorkerType.PLC_REPAIR.value:
-        if artifacts.current_code is None:
-            raise WorkerInputBuildError("plc-repair requires current plc_code")
-        evidence = [
-            artifact
-            for artifact in (
-                getattr(artifacts, field_name)
-                for field_name in REPAIR_EVIDENCE_FIELDS
-            )
-            if artifact is not None
-        ]
+        if files.current_code is None:
+            raise WorkerInputBuildError("plc-repair requires current PLC code path")
+        evidence = _dedupe(
+            [
+                files.latest_test_report,
+                files.latest_failing_trace,
+                files.latest_formal_report,
+                files.latest_counterexample,
+            ]
+        )
         if not evidence:
             raise WorkerInputBuildError(
-                "plc-repair requires latest test or formal failure evidence"
+                "plc-repair requires latest test or formal failure evidence path"
             )
-        return [artifacts.current_code, *evidence]
+        return _dedupe([files.current_code, *evidence])
 
+    raise WorkerInputBuildError(f"unsupported worker_type: {worker!r}")
+
+
+def default_worker_output_paths(
+    worker_type: WorkerType | str,
+    worker_job_id: str,
+    task: TaskState,
+) -> list[str]:
+    worker = _worker_type_value(worker_type)
+    report_dir = REPORT_DIR_TEMPLATE.format(worker_job_id=worker_job_id)
+    code_path = task.current_files.current_code or "src/plc_code.st"
+    if worker == WorkerType.PLC_DEV.value:
+        return [
+            "src/plc_code.st",
+            f"{report_dir}/requirements.json",
+            f"{report_dir}/io_contract.json",
+        ]
+    if worker == WorkerType.PLC_TEST.value:
+        return [f"{report_dir}/test_report.json"]
+    if worker == WorkerType.PLC_FORMAL.value:
+        return [f"{report_dir}/formal_report.json"]
+    if worker == WorkerType.PLC_REPAIR.value:
+        return [
+            code_path,
+            f"{report_dir}/patch.diff",
+            f"{report_dir}/repair_summary.json",
+        ]
     raise WorkerInputBuildError(f"unsupported worker_type: {worker!r}")
 
 
@@ -171,21 +187,23 @@ def worker_mode_for(worker_type: WorkerType | str) -> WorkerMode:
         raise WorkerInputBuildError(f"unsupported worker_type: {worker!r}") from exc
 
 
-def expected_outputs_for(worker_type: WorkerType | str) -> list[ExpectedOutputSpec]:
-    """Return the expected output artifact specs for a Router worker type."""
+def expected_outputs_for(
+    worker_type: WorkerType | str,
+    output_paths: list[str],
+) -> list[ExpectedFileSpec]:
+    """Return expected output file specs for a Router worker type."""
 
     worker = _worker_type_value(worker_type)
-    try:
-        output_types = EXPECTED_OUTPUT_TYPES_BY_WORKER[worker]
-    except KeyError as exc:
-        raise WorkerInputBuildError(f"unsupported worker_type: {worker!r}") from exc
+    if worker not in WORKER_MODE_BY_TYPE:
+        raise WorkerInputBuildError(f"unsupported worker_type: {worker!r}")
     return [
-        ExpectedOutputSpec(
-            artifact_type=artifact_type,
+        ExpectedFileSpec(
+            path=path,
             required=True,
-            description=f"Expected {artifact_type.value} output from {worker}.",
+            description=f"Expected {path} output from {worker}.",
+            mime_type=_mime_type_for_path(path),
         )
-        for artifact_type in output_types
+        for path in output_paths
     ]
 
 
@@ -227,6 +245,29 @@ def _new_worker_job_id(worker_type: str) -> str:
     return f"worker-job-{worker_type.replace('-', '-')}-{uuid4().hex[:12]}"
 
 
+def _input_signature(
+    worker_type: str,
+    input_paths: list[str],
+    worker_config: WorkerConfig | None,
+) -> dict[str, Any]:
+    config_payload = (
+        worker_config.model_dump(mode="json", exclude_none=True)
+        if worker_config is not None
+        else {}
+    )
+    encoded_config = json.dumps(
+        config_payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "worker_type": worker_type,
+        "input_paths": sorted(input_paths),
+        "worker_config_hash": f"sha256:{hashlib.sha256(encoded_config.encode('utf-8')).hexdigest()}",
+    }
+
+
 def _worker_type_value(worker_type: WorkerType | str) -> str:
     return _value(worker_type)
 
@@ -257,14 +298,13 @@ def _default_worker_config(task: TaskState, worker_type: str) -> WorkerConfig | 
     worker = _worker_type_value(worker_type)
     project_language = _optional_value(task.project_context.target_plc_language)
     if worker == WorkerType.PLC_DEV.value:
-        config = WorkerConfig(
+        return WorkerConfig(
             target_language=_default_target_language(project_language),
             compiler_type=WorkerCompilerType.MATIEC,
             enable_socratic_spec=None,
             socratic_skip=None,
             rpc_pipeline=_default_pipeline(task),
         )
-        return config
     if worker == WorkerType.PLC_TEST.value:
         return WorkerConfig(
             fuzz_method=WorkerFuzzMethod.BOUNDARY,
@@ -342,6 +382,40 @@ def _repair_failure_notes(task: TaskState) -> str | None:
         f"{failure.failure_id}: {failure.title}"
         for failure in open_failures
     )
+
+
+def _workspace_root(task: TaskState) -> str | None:
+    if task.workspace is not None:
+        return task.workspace.root
+    return task.project_context.workspace_root
+
+
+def _current_directory(task: TaskState, workspace_root: str) -> str:
+    if task.workspace is not None and task.workspace.current_directory:
+        return task.workspace.current_directory
+    return workspace_root
+
+
+def _mime_type_for_path(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(".json"):
+        return "application/json"
+    if lower.endswith(".diff") or lower.endswith(".patch"):
+        return "text/x-diff"
+    if lower.endswith(".md"):
+        return "text/markdown"
+    return "text/plain"
+
+
+def _dedupe(values: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        output.append(value)
+    return output
 
 
 def _failure_source_value(value: Any) -> str:

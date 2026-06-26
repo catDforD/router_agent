@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
 from app.models.db_models import ArtifactRow, EventRow, GateResultRow, TaskRow, WorkerJobRow
 from app.models.router_schema import TaskState
-from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
+from app.repositories._helpers import (
+    dump_model,
+    enum_value,
+    flush_or_raise_conflict,
+    sanitize_legacy_task_state_payload,
+)
 
 
 class TaskRepository:
@@ -34,7 +39,7 @@ class TaskRepository:
         row = self.session.get(TaskRow, task_id)
         if row is None:
             raise RepositoryNotFoundError(f"task not found: {task_id}")
-        return TaskState.model_validate(row.state_json)
+        return TaskState.model_validate(sanitize_legacy_task_state_payload(row.state_json))
 
     def get_task_for_update(self, task_id: str) -> TaskState:
         row = self.session.execute(
@@ -45,7 +50,7 @@ class TaskRepository:
         ).scalar_one_or_none()
         if row is None:
             raise RepositoryNotFoundError(f"task not found: {task_id}")
-        return TaskState.model_validate(row.state_json)
+        return TaskState.model_validate(sanitize_legacy_task_state_payload(row.state_json))
 
     def list_tasks_by_session(self, session_id: str) -> list[TaskState]:
         rows = self.session.execute(
@@ -53,7 +58,10 @@ class TaskRepository:
             .where(TaskRow.session_id == session_id)
             .order_by(TaskRow.created_at, TaskRow.id)
         ).scalars()
-        return [TaskState.model_validate(row.state_json) for row in rows]
+        return [
+            TaskState.model_validate(sanitize_legacy_task_state_payload(row.state_json))
+            for row in rows
+        ]
 
     def list_recent_tasks(
         self,
@@ -71,7 +79,10 @@ class TaskRepository:
                 TaskRow.id.desc(),
             ).limit(limit)
         ).scalars()
-        return [TaskState.model_validate(row.state_json) for row in rows]
+        return [
+            TaskState.model_validate(sanitize_legacy_task_state_payload(row.state_json))
+            for row in rows
+        ]
 
     def update_task_state(self, task_state: TaskState) -> TaskState:
         row = self.session.get(TaskRow, task_state.task_id)

@@ -27,7 +27,7 @@ class AgentSessionConflictError(Exception):
 class AgentSessionCreateResult:
     session: AgentSession
     task: TaskState
-    raw_user_request_artifact_id: str
+    raw_user_request_path: str
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ class AgentSessionService:
         return AgentSessionCreateResult(
             session=agent_session,
             task=created.task,
-            raw_user_request_artifact_id=created.raw_user_request_artifact_id,
+            raw_user_request_path=created.raw_user_request_path,
         )
 
     def append_message(
