@@ -505,9 +505,8 @@ function TranscriptRow({
 }) {
   if (item.kind === "user") {
     return (
-      <article className="transcript-entry transcript-message user-message">
-        <div className="message-avatar">U</div>
-        <div className="message-body">
+      <article className="transcript-entry user-message">
+        <div className="user-message-bubble">
           <MarkdownText content={item.content} variant="message" />
         </div>
       </article>
@@ -687,7 +686,6 @@ function FinalAnswer({
   return (
     <article className="final-answer">
       <div className="final-answer-body">
-        {item.label ? <span className="message-label">{item.label}</span> : null}
         <MarkdownText content={item.content} variant="message" />
         {tokenUsageLabel ? (
           <span className="usage-chip">{tokenUsageLabel}</span>
