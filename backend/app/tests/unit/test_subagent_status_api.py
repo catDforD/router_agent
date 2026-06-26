@@ -29,6 +29,7 @@ def test_subagent_status_reports_configured_remote_workers(
             "latency_ms": 12,
             "status_code": 405,
             "error": None,
+            "scope": "transport_reachability",
             "checked_at": "2026-06-26T00:00:00+00:00",
         },
     )
@@ -38,6 +39,7 @@ def test_subagent_status_reports_configured_remote_workers(
     assert payload["mode"] == "subagent"
     assert payload["base_url"] == "http://subagent.example"
     assert payload["probe"]["status"] == "online"
+    assert payload["probe"]["scope"] == "transport_reachability"
     assert [worker["worker_type"] for worker in payload["workers"]] == [
         "plc-dev",
         "plc-test",
@@ -46,6 +48,9 @@ def test_subagent_status_reports_configured_remote_workers(
     ]
     assert {worker["route"] for worker in payload["workers"]} == {"subagent"}
     assert {worker["online"] for worker in payload["workers"]} == {True}
+    assert {worker["probe_scope"] for worker in payload["workers"]} == {
+        "transport_reachability"
+    }
 
 
 def test_subagent_status_keeps_non_subagent_routes_disabled(
@@ -69,6 +74,7 @@ def test_subagent_status_keeps_non_subagent_routes_disabled(
             "latency_ms": 2001,
             "status_code": None,
             "error": "Remote subagent probe timed out",
+            "scope": "transport_reachability",
             "checked_at": "2026-06-26T00:00:00+00:00",
         },
     )
@@ -79,8 +85,10 @@ def test_subagent_status_keeps_non_subagent_routes_disabled(
     }
     assert workers["plc-dev"]["status"] == "timeout"
     assert workers["plc-dev"]["online"] is False
+    assert workers["plc-dev"]["probe_scope"] == "transport_reachability"
     assert workers["plc-test"]["status"] == "mock"
     assert workers["plc-test"]["online"] is None
+    assert workers["plc-test"]["probe_scope"] is None
     assert workers["plc-formal"]["status"] == "real"
     assert workers["plc-formal"]["online"] is None
 
@@ -101,6 +109,7 @@ def test_probe_remote_subagent_marks_timeout_offline(monkeypatch) -> None:
     assert probe["status"] == "timeout"
     assert probe["online"] is False
     assert probe["status_code"] is None
+    assert probe["scope"] == "transport_reachability"
 
 
 def test_subagent_status_route_is_registered() -> None:

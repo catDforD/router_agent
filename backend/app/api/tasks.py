@@ -93,6 +93,7 @@ def get_task_service(
     return TaskService(
         session=session,
         artifact_root=request.app.state.settings.artifact_root,
+        session_workspace_root=request.app.state.settings.session_workspace_root,
     )
 
 

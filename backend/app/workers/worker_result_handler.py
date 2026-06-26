@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.errors import RepositoryNotFoundError
+from app.core.ids import prefixed_id
 from app.models.router_schema import (
     Artifact,
     ArtifactRef,
@@ -430,6 +431,22 @@ def _apply_test_result(
             }
         )
     elif outcome_status == WorkerOutcomeStatus.FAILED.value:
+        if not result.failures:
+            failures = [
+                *failures,
+                _blocking_worker_failure(
+                    result,
+                    source=FailureSource.TEST,
+                    title="PLC test worker failed",
+                    description=(
+                        "PLC test worker reported a failed outcome without "
+                        "structured failure details."
+                    ),
+                    evidence_artifact_id=_artifact_id(
+                        current_artifacts.latest_test_report
+                    ),
+                ),
+            ]
         gates = gates.model_copy(update={"latest_test_passed": False})
     return failures, gates
 
@@ -458,6 +475,22 @@ def _apply_formal_result(
             }
         )
     elif outcome_status == WorkerOutcomeStatus.FAILED.value:
+        if not result.failures:
+            failures = [
+                *failures,
+                _blocking_worker_failure(
+                    result,
+                    source=FailureSource.FORMAL,
+                    title="PLC formal verification worker failed",
+                    description=(
+                        "PLC formal verification worker reported a failed "
+                        "outcome without structured failure details."
+                    ),
+                    evidence_artifact_id=_artifact_id(
+                        current_artifacts.latest_formal_report
+                    ),
+                ),
+            ]
         gates = gates.model_copy(update={"latest_formal_passed": False})
     return failures, gates
 
@@ -528,6 +561,29 @@ def _merge_failures(
         merged.append(failure)
         by_id[failure.failure_id] = failure
     return merged
+
+
+def _blocking_worker_failure(
+    result: WorkerResult,
+    *,
+    source: FailureSource,
+    title: str,
+    description: str,
+    evidence_artifact_id: str | None,
+) -> Failure:
+    return Failure(
+        failure_id=prefixed_id("failure"),
+        source=source,
+        severity=Severity.BLOCKING,
+        title=title,
+        description=description,
+        evidence_artifact_ids=(
+            [evidence_artifact_id] if evidence_artifact_id is not None else []
+        ),
+        status=FailureStatus.OPEN,
+        created_by_worker_job_id=result.worker_job_id,
+        created_at=result.completed_at,
+    )
 
 
 def _merge_assumptions(

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import difflib
 import json
 from pathlib import PurePath
-from typing import Any, Iterable
+from time import sleep as default_sleep
+from typing import Any
 
 import httpx
 
@@ -77,6 +79,7 @@ REPORT_ARTIFACT_CONTENT_TYPES = {
     ArtifactType.REPAIR_SUMMARY.value,
     ArtifactType.PATCH.value,
 }
+RETRYABLE_HTTP_STATUS_CODES = (429, 502, 503, 504)
 
 
 class SubagentClientError(Exception):
@@ -120,6 +123,10 @@ class SubagentWorkerClient:
     api_token: str | None = None
     artifact_max_chars: int = 12_000
     http_client: httpx.Client | None = None
+    max_retries: int = 2
+    retry_backoff_seconds: float = 1.0
+    retry_status_codes: tuple[int, ...] = RETRYABLE_HTTP_STATUS_CODES
+    sleep: Callable[[float], None] = default_sleep
 
     def call_worker(
         self,
@@ -153,28 +160,71 @@ class SubagentWorkerClient:
 
         try:
             if self.http_client is not None:
-                return self._stream_with_client(self.http_client, url, headers, request)
+                return self._stream_with_retries(
+                    self.http_client,
+                    url,
+                    headers,
+                    request,
+                )
             timeout = httpx.Timeout(float(self.timeout_seconds))
             with httpx.Client(timeout=timeout) as client:
-                return self._stream_with_client(client, url, headers, request)
+                return self._stream_with_retries(client, url, headers, request)
+        except SubagentConnectionError:
+            raise
         except httpx.TimeoutException as exc:
             raise SubagentTimeoutError(
                 "Subagent worker call timed out",
                 details={"url": url},
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise SubagentConnectionError(
-                "Subagent API returned an HTTP error",
-                details={
-                    "url": url,
-                    "status_code": exc.response.status_code,
-                },
             ) from exc
         except httpx.HTTPError as exc:
             raise SubagentConnectionError(
                 "Subagent API cannot be reached",
                 details={"url": url, "exception_type": type(exc).__name__},
             ) from exc
+
+    def _stream_with_retries(
+        self,
+        client: httpx.Client,
+        url: str,
+        headers: dict[str, str],
+        request: dict[str, Any],
+    ) -> list[SubagentSseEvent]:
+        attempts = max(1, self.max_retries + 1)
+        last_status_error: httpx.HTTPStatusError | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._stream_with_client(client, url, headers, request)
+            except httpx.HTTPStatusError as exc:
+                last_status_error = exc
+                status_code = exc.response.status_code
+                retryable = status_code in self.retry_status_codes
+                if not retryable or attempt >= attempts:
+                    raise SubagentConnectionError(
+                        "Subagent API returned an HTTP error",
+                        details={
+                            "url": url,
+                            "status_code": status_code,
+                            "attempts": attempt,
+                            "max_retries": max(0, self.max_retries),
+                            "retryable_status_code": retryable,
+                        },
+                    ) from exc
+                self._sleep_before_retry(attempt)
+
+        raise SubagentConnectionError(
+            "Subagent API returned an HTTP error",
+            details={
+                "url": url,
+                "status_code": (
+                    last_status_error.response.status_code
+                    if last_status_error is not None
+                    else None
+                ),
+                "attempts": attempts,
+                "max_retries": max(0, self.max_retries),
+                "retryable_status_code": True,
+            },
+        )
 
     def _stream_with_client(
         self,
@@ -186,6 +236,11 @@ class SubagentWorkerClient:
         with client.stream("POST", url, headers=headers, json=request) as response:
             response.raise_for_status()
             return parse_sse_events(response.iter_lines())
+
+    def _sleep_before_retry(self, failed_attempt: int) -> None:
+        delay = self.retry_backoff_seconds * (2 ** max(failed_attempt - 1, 0))
+        if delay > 0:
+            self.sleep(delay)
 
 
 def build_subagent_request(

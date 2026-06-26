@@ -418,8 +418,8 @@ def test_terminal_followup_answers_in_same_task_without_rerunning_worker_chain(
     assert runner.calls == []
     assert [event.type for event in events][-3:] == [
         "task.updated",
-        "main_agent.started",
-        "main_agent.message",
+        "agent.started",
+        "agent.message",
     ]
     assert events[-1].payload["mode"] == "followup"
     assert "再解释" in events[-1].payload["content"]

@@ -48,6 +48,7 @@ from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     AgentRunState,
     ArtifactRef,
+    ArtifactType,
     CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
@@ -68,6 +69,7 @@ from app.models.router_schema import (
     TokenUsage,
     WorkspaceContext,
 )
+from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.services.event_service import EventService
 from app.services.scheduler_guard import SchedulerGuardViolation
@@ -91,17 +93,19 @@ TERMINAL_EVENT_BY_STATUS = {
 MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
 EVIDENCE_TOOL_NAMES = {
     "list_files",
+    "glob",
+    "grep",
     "read_file",
     "write_file",
     "apply_patch",
     "exec_command",
     "git_status",
-    "read_artifact",
-    "write_artifact",
+    "register_workspace_file",
     "plc_dev",
     "plc_test",
     "plc_formal",
     "plc_repair",
+    "run_quality_gate",
 }
 EXECUTION_REQUEST_KEYWORDS = (
     "plc",
@@ -494,7 +498,7 @@ class MainAgentService:
             session=self.session,
             artifact_root=self.artifact_root,
             workspace_root=_workspace_root_for_task(started, self.workspace_root),
-            execution_mode=self.execution_mode,
+            execution_mode=_effective_execution_mode(started, self.execution_mode),
             command_timeout_seconds=self.command_timeout_seconds,
             tool_output_max_chars=self.tool_output_max_chars,
             mcp_mode=self.mcp_mode,
@@ -584,17 +588,18 @@ class MainAgentService:
         openai_trace_id = task.trace.openai_trace_id or gen_trace_id()
         main_agent_run_id = new_main_agent_run_id()
         workspace_root = _workspace_root_for_task(task, self.workspace_root)
+        execution_mode = _effective_execution_mode(task, self.execution_mode)
         workspace = (
             WorkspaceContext(
                 root=str(workspace_root),
                 current_directory=str(workspace_root),
-                writable=self.execution_mode == "local_full_access",
+                writable=execution_mode == "local_full_access",
             )
             if workspace_root is not None
             else task.workspace
         )
         execution_policy = ExecutionPolicy(
-            mode=self.execution_mode,
+            mode=execution_mode,
             command_timeout_seconds=self.command_timeout_seconds,
             tool_output_max_chars=self.tool_output_max_chars,
         )
@@ -1024,6 +1029,7 @@ def build_session_context_view(
         return None
 
     event_service = EventService(session)
+    artifact_repository = ArtifactRepository(session)
     runs: list[dict[str, Any]] = []
     for task in previous_tasks:
         events = event_service.list_visible_events(task.task_id)
@@ -1055,6 +1061,10 @@ def build_session_context_view(
                     if completed is not None
                     else None
                 ),
+                "workspace_files": _workspace_file_refs_for_task(
+                    artifact_repository,
+                    task,
+                ),
                 "updated_at": task.updated_at.isoformat(),
             }
         )
@@ -1075,12 +1085,64 @@ def _bounded_session_text(value: str | None, *, limit: int = 2000) -> str | None
     return f"{compact[: limit - 3]}..."
 
 
+KEY_WORKSPACE_ARTIFACT_TYPES = {
+    ArtifactType.PLC_CODE.value,
+    ArtifactType.TEST_CASES.value,
+    ArtifactType.TEST_REPORT.value,
+    ArtifactType.FORMAL_PROPERTIES.value,
+    ArtifactType.FORMAL_REPORT.value,
+    ArtifactType.COUNTEREXAMPLE.value,
+    ArtifactType.PATCH.value,
+    ArtifactType.REPAIR_SUMMARY.value,
+    ArtifactType.FINAL_REPORT.value,
+}
+
+
+def _workspace_file_refs_for_task(
+    artifact_repository: ArtifactRepository,
+    task: TaskState,
+    *,
+    max_files: int = 8,
+) -> list[dict[str, Any]]:
+    seen_paths: set[str] = set()
+    refs: list[dict[str, Any]] = []
+    for artifact in reversed(artifact_repository.list_task_artifacts(task.task_id)):
+        workspace_path = artifact.metadata.workspace_path
+        if not workspace_path or workspace_path in seen_paths:
+            continue
+        if _value(artifact.type) not in KEY_WORKSPACE_ARTIFACT_TYPES:
+            continue
+        refs.append(
+            {
+                "artifact_id": artifact.artifact_id,
+                "artifact_type": _value(artifact.type),
+                "workspace_path": workspace_path,
+                "file_role": artifact.metadata.file_role,
+                "source_task_id": artifact.metadata.source_task_id,
+                "summary": _bounded_session_text(artifact.summary, limit=320),
+                "content_hash": artifact.storage.content_hash,
+            }
+        )
+        seen_paths.add(workspace_path)
+        if len(refs) >= max_files:
+            break
+    return list(reversed(refs))
+
+
 def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
     if task.workspace is not None:
         return Path(task.workspace.root)
     if task.project_context.workspace_root:
         return Path(task.project_context.workspace_root)
     return fallback
+
+
+def _effective_execution_mode(task: TaskState, configured: str) -> str:
+    if configured != "disabled":
+        return configured
+    if task.workspace is None:
+        return configured
+    return "local_full_access" if task.workspace.writable else "local_read_only"
 
 
 def _agent_run_status_from_final_status(status: str) -> str:
@@ -1147,6 +1209,17 @@ def _evaluate_stop_request(
     if not _task_requires_tool_evidence(task):
         return _StopDecision(allowed=True, reason="Task can be answered directly.")
     if _has_tool_evidence(context, task):
+        if _task_requires_quality_gate(task) and not _has_quality_gate_result(
+            context,
+            task,
+        ):
+            return _StopDecision(
+                allowed=False,
+                reason=(
+                    "This task requires run_quality_gate before a final answer "
+                    "can be accepted."
+                ),
+            )
         return _StopDecision(allowed=True, reason="Required execution evidence exists.")
     return _StopDecision(
         allowed=False,
@@ -1177,6 +1250,13 @@ def _task_requires_tool_evidence(task: TaskState) -> bool:
         return True
     request = f"{task.raw_user_request}\n{task.normalized_goal or ''}".lower()
     return any(keyword in request for keyword in EXECUTION_REQUEST_KEYWORDS)
+
+
+def _task_requires_quality_gate(task: TaskState) -> bool:
+    return (
+        _value(task.task_type) != TaskType.QA.value
+        and _task_requires_tool_evidence(task)
+    )
 
 
 def _has_tool_evidence(context: AgentToolContext, task: TaskState) -> bool:
@@ -1214,7 +1294,51 @@ def _events_have_tool_evidence(context: AgentToolContext, task_id: str) -> bool:
     )
 
 
+def _has_quality_gate_result(context: AgentToolContext, task: TaskState) -> bool:
+    if task.current_artifacts.latest_gate_report is not None:
+        return True
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is not None and any(
+        call.tool_name == "run_quality_gate" and _value(call.status) != "rejected"
+        for call in latest_run.tool_calls
+    ):
+        return True
+    return any(
+        event.type == EventType.MAIN_AGENT_TOOL_RESULT
+        and str(event.payload.get("tool_name") or "") == "run_quality_gate"
+        and str(event.payload.get("status") or "") != "rejected"
+        for event in EventService(context.session).list_visible_events(task.task_id)
+    )
+
+
+def _has_open_blocking_failure(task: TaskState) -> bool:
+    return any(
+        _value(failure.status) == "open"
+        and _value(failure.severity) == "blocking"
+        for failure in task.failures
+    )
+
+
 def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
+    if _has_open_blocking_failure(task):
+        return TaskStatus.FAILED.value
+    if _task_requires_quality_gate(task):
+        if task.gates.can_finish_as_success is True:
+            return TaskStatus.SUCCEEDED.value
+        return (
+            TaskStatus.PARTIAL_FAILED.value
+            if _has_quality_gate_result(context, task)
+            else TaskStatus.FAILED.value
+        )
+
     latest_run_id = task.trace.latest_main_agent_run_id
     latest_run = next(
         (
@@ -1243,14 +1367,6 @@ def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
                 if str(event.payload.get("status") or "") == "failed"
                 else TaskStatus.SUCCEEDED.value
             )
-    if task.failures:
-        open_blocking = any(
-            _value(failure.status) == "open"
-            and _value(failure.severity) == "blocking"
-            for failure in task.failures
-        )
-        if open_blocking:
-            return TaskStatus.FAILED.value
     return TaskStatus.SUCCEEDED.value
 
 
@@ -1793,7 +1909,27 @@ def _available_tools(task: TaskState) -> list[str]:
         return []
     if _value(task.status) == TaskStatus.WAITING_USER.value:
         return []
-    return list(MAIN_AGENT_TOOL_NAMES)
+    mode = (
+        _value(task.execution_policy.mode)
+        if task.execution_policy is not None
+        else "disabled"
+    )
+    read_tools = {"list_files", "glob", "grep", "read_file", "git_status"}
+    write_tools = {"write_file", "apply_patch", "exec_command"}
+    register_tools = {"register_workspace_file"}
+    if mode == "local_full_access":
+        return list(MAIN_AGENT_TOOL_NAMES)
+    if mode == "local_read_only":
+        return [
+            name
+            for name in MAIN_AGENT_TOOL_NAMES
+            if name not in write_tools
+        ]
+    return [
+        name
+        for name in MAIN_AGENT_TOOL_NAMES
+        if name not in read_tools | write_tools | register_tools
+    ]
 
 
 def _default_runner(

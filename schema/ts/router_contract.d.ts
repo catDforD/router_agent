@@ -741,6 +741,9 @@ export interface ArtifactMetadata {
   target_platform?: string | null;
 
   module_name?: string | null;
+  workspace_path?: string | null;
+  file_role?: string | null;
+  source_task_id?: string | null;
   requirement_ids?: string[];
 
   code_metadata?: {

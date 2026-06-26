@@ -22,6 +22,10 @@ class Settings(BaseSettings):
         default=Path("./data/artifacts"),
         validation_alias="ARTIFACT_ROOT",
     )
+    session_workspace_root: Path = Field(
+        default=Path("./data/workspaces"),
+        validation_alias="SESSION_WORKSPACE_ROOT",
+    )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     main_agent_provider: str = Field(
         default="openai_compatible",
@@ -98,6 +102,16 @@ class Settings(BaseSettings):
         default=300,
         ge=1,
         validation_alias="SUBAGENT_TIMEOUT_SECONDS",
+    )
+    subagent_max_retries: int = Field(
+        default=2,
+        ge=0,
+        validation_alias="SUBAGENT_MAX_RETRIES",
+    )
+    subagent_retry_backoff_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        validation_alias="SUBAGENT_RETRY_BACKOFF_SECONDS",
     )
     plc_dev_mode: str | None = Field(default=None, validation_alias="PLC_DEV_MODE")
     plc_test_mode: str | None = Field(default=None, validation_alias="PLC_TEST_MODE")
@@ -196,7 +210,10 @@ class Settings(BaseSettings):
             "plc_worker_artifact_max_chars": self.plc_worker_artifact_max_chars,
             "subagent_api_base_url": self.subagent_api_base_url,
             "subagent_timeout_seconds": self.subagent_timeout_seconds,
+            "subagent_max_retries": self.subagent_max_retries,
+            "subagent_retry_backoff_seconds": self.subagent_retry_backoff_seconds,
             "subagent_api_token": _redacted(self.subagent_api_token),
+            "session_workspace_root": str(self.session_workspace_root),
             "plc_dev_mode": self.plc_dev_mode,
             "plc_test_mode": self.plc_test_mode,
             "plc_formal_mode": self.plc_formal_mode,

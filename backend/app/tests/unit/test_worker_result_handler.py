@@ -354,6 +354,33 @@ def test_failed_plc_test_appends_failure_and_sets_blocking_gate(
     assert handled.task.failures[0].status == "open"
 
 
+def test_failed_plc_test_without_structured_failures_synthesizes_blocker(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    requirements, code = create_requirements_and_code(db_session, tmp_path, task)
+    payload = worker_input(task, WorkerType.PLC_TEST, [requirements, code])
+    result = adapter(db_session, tmp_path).call_worker(
+        payload,
+        scenario="test_failed_then_repair_pass",
+    ).model_copy(update={"failures": []})
+
+    handled = handler(db_session).handle_worker_result(result)
+
+    assert handled.task.gates.latest_test_passed is False
+    assert handled.task.gates.has_blocking_failure is True
+    assert len(handled.task.failures) == 1
+    failure = handled.task.failures[0]
+    assert failure.source == "test"
+    assert failure.severity == "blocking"
+    assert failure.status == "open"
+    assert failure.created_by_worker_job_id == payload.worker_job_id
+    assert failure.evidence_artifact_ids == [
+        handled.task.current_artifacts.latest_test_report.artifact_id
+    ]
+
+
 def test_failed_plc_formal_records_counterexample_and_failure(
     db_session: Session,
     tmp_path: Path,
@@ -374,6 +401,33 @@ def test_failed_plc_formal_records_counterexample_and_failure(
     assert handled.task.gates.has_blocking_failure is True
     assert len(handled.task.failures) == 1
     assert handled.task.failures[0].source == "formal"
+
+
+def test_failed_plc_formal_without_structured_failures_synthesizes_blocker(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    requirements, code = create_requirements_and_code(db_session, tmp_path, task)
+    payload = worker_input(task, WorkerType.PLC_FORMAL, [requirements, code])
+    result = adapter(db_session, tmp_path).call_worker(
+        payload,
+        scenario="formal_failed_then_repair_pass",
+    ).model_copy(update={"failures": []})
+
+    handled = handler(db_session).handle_worker_result(result)
+
+    assert handled.task.gates.latest_formal_passed is False
+    assert handled.task.gates.has_blocking_failure is True
+    assert len(handled.task.failures) == 1
+    failure = handled.task.failures[0]
+    assert failure.source == "formal"
+    assert failure.severity == "blocking"
+    assert failure.status == "open"
+    assert failure.created_by_worker_job_id == payload.worker_job_id
+    assert failure.evidence_artifact_ids == [
+        handled.task.current_artifacts.latest_formal_report.artifact_id
+    ]
 
 
 def test_passed_plc_repair_updates_code_and_regression_state(

@@ -80,9 +80,17 @@ class UserMessageResult:
 class TaskService:
     """Coordinates task state, artifact, and event writes for Task API flows."""
 
-    def __init__(self, session: Session, artifact_root: Path) -> None:
+    def __init__(
+        self,
+        session: Session,
+        artifact_root: Path,
+        session_workspace_root: Path | None = None,
+    ) -> None:
         self.task_repository = TaskRepository(session)
         self.artifact_root = artifact_root
+        self.session_workspace_root = session_workspace_root or (
+            artifact_root.parent / "workspaces"
+        )
         self.artifact_store = ArtifactStore(session=session, artifact_root=artifact_root)
         self.event_service = EventService(session)
 
@@ -335,6 +343,14 @@ class TaskService:
         user_id: str | None,
         now: datetime,
     ) -> TaskState:
+        workspace_root = _workspace_root(
+            project_context=project_context,
+            session_id=session_id,
+            session_workspace_root=self.session_workspace_root,
+        )
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        (workspace_root / ".router" / "runs").mkdir(parents=True, exist_ok=True)
+
         return TaskState(
             schema_version=DEFAULT_SCHEMA_VERSION,
             task_id=new_task_id(),
@@ -372,14 +388,10 @@ class TaskService:
                 need_clarification=False,
             ),
             project_context=project_context,
-            workspace=(
-                WorkspaceContext(
-                    root=project_context.workspace_root,
-                    current_directory=project_context.workspace_root,
-                    writable=True,
-                )
-                if project_context.workspace_root is not None
-                else None
+            workspace=WorkspaceContext(
+                root=str(workspace_root),
+                current_directory=str(workspace_root),
+                writable=project_context.workspace_root is None,
             ),
             runtime_limits=RuntimeLimits(
                 max_repair_rounds=3,
@@ -460,6 +472,17 @@ def _project_context(value: ProjectContext | dict[str, Any] | None) -> ProjectCo
     if isinstance(value, ProjectContext):
         return value
     return ProjectContext.model_validate(value)
+
+
+def _workspace_root(
+    *,
+    project_context: ProjectContext,
+    session_id: str,
+    session_workspace_root: Path,
+) -> Path:
+    if project_context.workspace_root is not None:
+        return Path(project_context.workspace_root).expanduser().resolve()
+    return (session_workspace_root / session_id).expanduser().resolve()
 
 
 def _task_title(message: str) -> str:

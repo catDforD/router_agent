@@ -1037,6 +1037,9 @@ class ArtifactMetadata(RouterBaseModel):
     target_plc_language: str | None = None
     target_platform: str | None = None
     module_name: str | None = None
+    workspace_path: str | None = None
+    file_role: str | None = None
+    source_task_id: str | None = None
     requirement_ids: list[str] | None = None
     code_metadata: CodeMetadata | None = None
     test_metadata: TestArtifactMetadata | None = None

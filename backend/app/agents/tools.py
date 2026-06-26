@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+import fnmatch
 import json
 from pathlib import Path
 import subprocess
@@ -40,7 +41,9 @@ from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     AgentToolCallRecord,
     Artifact,
+    ArtifactCreator,
     ArtifactCreatorType,
+    ArtifactMetadata,
     ArtifactRef,
     ArtifactType,
     DEFAULT_SCHEMA_VERSION,
@@ -65,6 +68,7 @@ from app.models.router_schema import (
     WorkerInput,
     WorkerJobRef,
     WorkerJobStatus,
+    WorkerOutcomeStatus,
     WorkerResult,
     WorkerPipelineStage,
     WorkerRepairSource,
@@ -74,6 +78,7 @@ from app.models.router_schema import (
 )
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
+from app.repositories.worker_job_repo import WorkerJobRepository
 from app.services.artifact_store import (
     ArtifactContentWrite,
     ArtifactStore,
@@ -249,6 +254,7 @@ class AgentToolService:
             artifact_root=context.artifact_root,
         )
         self.event_service = EventService(context.session)
+        self.worker_job_repository = WorkerJobRepository(context.session)
 
     def list_files(
         self,
@@ -448,6 +454,178 @@ class AgentToolService:
                     "size_chars": len(content),
                 },
             )
+        self._record_tool_result(tool_name, result)
+        return result
+
+    def glob(
+        self,
+        task_id: str,
+        *,
+        pattern: str,
+        path: str = ".",
+        max_entries: int = 200,
+    ) -> AgentToolResult:
+        tool_name = "glob"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=f"Find workspace files matching {pattern}.",
+            arguments={
+                "task_id": task_id,
+                "pattern": pattern,
+                "path": path,
+                "max_entries": max_entries,
+            },
+        )
+        rejected = self._require_execution_mode(
+            tool_name,
+            task_id,
+            allowed={"local_read_only", "local_full_access"},
+        )
+        if rejected is not None:
+            self._record_tool_result(tool_name, rejected)
+            return rejected
+        if max_entries < 1:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_max_entries",
+                message="max_entries must be greater than zero",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        try:
+            root = self._resolve_workspace_path(path)
+        except (ValueError, FileNotFoundError) as exc:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="workspace_path_rejected",
+                message=str(exc),
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        matches: list[dict[str, Any]] = []
+        for item in root.glob(pattern):
+            if len(matches) >= max_entries:
+                break
+            if not item.exists():
+                continue
+            matches.append(
+                {
+                    "path": self._workspace_relative_path(item),
+                    "type": "directory" if item.is_dir() else "file",
+                    "size_bytes": item.stat().st_size if item.is_file() else None,
+                }
+            )
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=f"Found {len(matches)} workspace path match{'es' if len(matches) != 1 else ''}.",
+            details={
+                "pattern": pattern,
+                "path": path,
+                "entries": matches,
+                "truncated": len(matches) >= max_entries,
+            },
+        )
+        self._record_tool_result(tool_name, result)
+        return result
+
+    def grep(
+        self,
+        task_id: str,
+        *,
+        pattern: str,
+        path: str = ".",
+        include: str | None = None,
+        max_matches: int = 200,
+    ) -> AgentToolResult:
+        tool_name = "grep"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=f"Search workspace files for {pattern}.",
+            arguments={
+                "task_id": task_id,
+                "pattern": pattern,
+                "path": path,
+                "include": include,
+                "max_matches": max_matches,
+            },
+        )
+        rejected = self._require_execution_mode(
+            tool_name,
+            task_id,
+            allowed={"local_read_only", "local_full_access"},
+        )
+        if rejected is not None:
+            self._record_tool_result(tool_name, rejected)
+            return rejected
+        if max_matches < 1:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_max_matches",
+                message="max_matches must be greater than zero",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        try:
+            root = self._resolve_workspace_path(path)
+        except (ValueError, FileNotFoundError) as exc:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="workspace_path_rejected",
+                message=str(exc),
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        files = [root] if root.is_file() else [item for item in root.rglob("*") if item.is_file()]
+        matches: list[dict[str, Any]] = []
+        for file_path in files:
+            rel = self._workspace_relative_path(file_path)
+            if include and not fnmatch.fnmatch(rel, include):
+                continue
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+            for line_no, line in enumerate(lines, start=1):
+                if pattern not in line:
+                    continue
+                matches.append({"path": rel, "line": line_no, "text": line[:500]})
+                if len(matches) >= max_matches:
+                    result = AgentToolResult(
+                        tool=tool_name,
+                        task_id=task_id,
+                        status=ToolStatus.APPLIED,
+                        summary=f"Found {len(matches)} text match{'es' if len(matches) != 1 else ''}.",
+                        details={
+                            "pattern": pattern,
+                            "path": path,
+                            "include": include,
+                            "matches": matches,
+                            "truncated": True,
+                        },
+                    )
+                    self._record_tool_result(tool_name, result)
+                    return result
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=f"Found {len(matches)} text match{'es' if len(matches) != 1 else ''}.",
+            details={
+                "pattern": pattern,
+                "path": path,
+                "include": include,
+                "matches": matches,
+                "truncated": False,
+            },
+        )
         self._record_tool_result(tool_name, result)
         return result
 
@@ -749,7 +927,13 @@ class AgentToolService:
         stderr = completed.stderr or ""
         combined = stdout + stderr
         refs: list[ArtifactRefSummary] = []
+        output_path: str | None = None
         if len(combined) > self.context.tool_output_max_chars:
+            output_path = self._write_run_output_file(
+                task_id=task_id,
+                name="command_output.txt",
+                content=f"$ {command}\n\n# stdout\n{stdout}\n\n# stderr\n{stderr}",
+            )
             output_artifact = self._write_tool_artifact(
                 task_id=task_id,
                 name="command_output.txt",
@@ -790,6 +974,7 @@ class AgentToolService:
                 "stderr": _bounded_output(stderr, self.context.tool_output_max_chars),
                 "stdout_truncated": len(stdout) > self.context.tool_output_max_chars,
                 "stderr_truncated": len(stderr) > self.context.tool_output_max_chars,
+                "output_path": output_path,
                 "duration_ms": duration_ms,
             },
         )
@@ -913,14 +1098,24 @@ class AgentToolService:
                 "summary": summary,
             },
         )
-        artifact = self._write_tool_artifact(
-            task_id=task_id,
-            name=name,
-            content=content,
-            summary=summary,
-            artifact_type=artifact_type,
-            mime_type=mime_type,
-        )
+        try:
+            artifact = self._write_tool_artifact(
+                task_id=task_id,
+                name=name,
+                content=content,
+                summary=summary,
+                artifact_type=artifact_type,
+                mime_type=mime_type,
+            )
+        except ValueError as exc:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_artifact_type",
+                message=str(exc),
+            )
+            self._record_tool_result(tool_name, result)
+            return result
         result = AgentToolResult(
             tool=tool_name,
             task_id=task_id,
@@ -928,6 +1123,113 @@ class AgentToolService:
             summary=summary,
             artifact_refs=[_artifact_ref_summary(artifact)],
             details={"artifact_id": artifact.artifact_id, "type": _value(artifact.type)},
+        )
+        self._record_tool_result(tool_name, result)
+        return result
+
+    def register_workspace_file(
+        self,
+        task_id: str,
+        *,
+        path: str,
+        artifact_type: str,
+        summary: str,
+        file_role: str | None = None,
+        mime_type: str | None = None,
+    ) -> AgentToolResult:
+        tool_name = "register_workspace_file"
+        self._record_tool_call(
+            tool_name=tool_name,
+            task_id=task_id,
+            rationale_summary=f"Register workspace file {path} as {artifact_type}.",
+            arguments={
+                "task_id": task_id,
+                "path": path,
+                "artifact_type": artifact_type,
+                "summary": summary,
+                "file_role": file_role,
+            },
+        )
+        rejected = self._require_execution_mode(
+            tool_name,
+            task_id,
+            allowed={"local_read_only", "local_full_access"},
+        )
+        if rejected is not None:
+            self._record_tool_result(tool_name, rejected)
+            return rejected
+        try:
+            resolved_type = _artifact_type_from_tool(artifact_type)
+        except ValueError as exc:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_artifact_type",
+                message=str(exc),
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        try:
+            target = self._resolve_workspace_path(path)
+        except ValueError as exc:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="workspace_path_rejected",
+                message=str(exc),
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        except FileNotFoundError:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="file_not_found",
+                message=f"file does not exist: {path}",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        if not target.is_file():
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="path_is_not_file",
+                message=f"path is not a file: {path}",
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+        rel_path = self._workspace_relative_path(target)
+        artifact = self.artifact_store.write_artifact_content(
+            ArtifactContentWrite(
+                task_id=task_id,
+                artifact_type=resolved_type,
+                version=1,
+                name=target.name,
+                content=target.read_bytes(),
+                summary=summary,
+                visibility="user",
+                created_by=ArtifactCreator(type=ArtifactCreatorType.MAIN_AGENT),
+                metadata=ArtifactMetadata(
+                    workspace_path=rel_path,
+                    file_role=file_role or _value(resolved_type),
+                    source_task_id=task_id,
+                    tags=["workspace_file", rel_path],
+                ),
+                mime_type=mime_type,
+            )
+        ).artifact
+        artifact_ref = self.artifact_store.get_artifact_ref(artifact.artifact_id)
+        result = AgentToolResult(
+            tool=tool_name,
+            task_id=task_id,
+            status=ToolStatus.APPLIED,
+            summary=f"Registered {rel_path} as {resolved_type.value}.",
+            artifact_refs=[_artifact_ref_summary(artifact_ref)],
+            details={
+                "path": rel_path,
+                "artifact_id": artifact.artifact_id,
+                "type": _value(artifact.type),
+            },
         )
         self._record_tool_result(tool_name, result)
         return result
@@ -944,12 +1246,18 @@ class AgentToolService:
 
         now = utc_now()
         task_type = _domain_task_type_for_worker(worker_type)
+        gate_updates: dict[str, Any] = {}
+        if worker_type == WorkerType.PLC_TEST.value:
+            gate_updates["test_required"] = True
+        elif worker_type == WorkerType.PLC_FORMAL.value:
+            gate_updates["formal_required"] = True
         updated = task.model_copy(
             deep=True,
             update={
                 "status": TaskStatus.RUNNING.value,
                 "phase": TaskPhase.PLANNING.value,
                 "task_type": task_type,
+                "gates": task.gates.model_copy(update=gate_updates),
                 "normalized_goal": task.normalized_goal or task.raw_user_request,
                 "updated_at": now,
             },
@@ -1537,6 +1845,16 @@ class AgentToolService:
                 self._record_tool_result(tool_name, result)
                 return result
 
+        for worker_input in worker_inputs:
+            debounced = self._debounced_worker_retry_result(
+                tool_name=tool_name,
+                task=task,
+                worker_input=worker_input,
+            )
+            if debounced is not None:
+                self._record_tool_result(tool_name, debounced)
+                return debounced
+
         results = [
             self._dispatch_worker_input(tool_name=tool_name, worker_input=worker_input)
             for worker_input in worker_inputs
@@ -1772,12 +2090,66 @@ class AgentToolService:
             self._record_tool_result(tool_name, result)
             return result
 
+        debounced = self._debounced_worker_retry_result(
+            tool_name=tool_name,
+            task=task,
+            worker_input=worker_input,
+        )
+        if debounced is not None:
+            self._record_tool_result(tool_name, debounced)
+            return debounced
+
         result = self._dispatch_worker_input(
             tool_name=tool_name,
             worker_input=worker_input,
         )
         self._record_tool_result(tool_name, result)
         return result
+
+    def _debounced_worker_retry_result(
+        self,
+        *,
+        tool_name: str,
+        task: TaskState,
+        worker_input: WorkerInput,
+        max_failures: int = 2,
+    ) -> AgentToolResult | None:
+        signature = _worker_input_signature(worker_input)
+        failure_counts: dict[str, int] = {}
+        for job in self.worker_job_repository.list_task_jobs(task.task_id):
+            if _value(job.worker_type) != _value(worker_input.worker_type):
+                continue
+            if _worker_input_signature(job.input) != signature:
+                continue
+            if job.result is None:
+                continue
+            for failure_type in _worker_failure_types(job.result):
+                failure_counts[failure_type] = failure_counts.get(failure_type, 0) + 1
+
+        blocked = [
+            failure_type
+            for failure_type, count in failure_counts.items()
+            if count >= max_failures
+        ]
+        if not blocked:
+            return None
+
+        return self._rejected_result(
+            tool_name=tool_name,
+            task_id=task.task_id,
+            task=task,
+            code="worker_retry_debounce",
+            message=(
+                "worker retry debounce rejected dispatch after repeated failures "
+                "for the same worker and input artifacts"
+            ),
+            details={
+                "worker_type": _value(worker_input.worker_type),
+                "input_signature": list(signature),
+                "blocked_failure_types": sorted(blocked),
+                "max_failures": max_failures,
+            },
+        )
 
     def _dispatch_worker_input(
         self,
@@ -1947,6 +2319,23 @@ class AgentToolService:
         except ValueError:
             return path.as_posix()
 
+    def _write_run_output_file(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        content: str,
+    ) -> str:
+        safe_name = Path(name).name or "output.txt"
+        output_dir = self._resolve_workspace_path(
+            f".router/runs/{task_id}/outputs",
+            allow_missing=True,
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"{int(time.time() * 1000)}_{safe_name}"
+        output_file.write_text(content, encoding="utf-8")
+        return self._workspace_relative_path(output_file)
+
     def _write_tool_artifact(
         self,
         *,
@@ -1957,10 +2346,14 @@ class AgentToolService:
         artifact_type: str = ArtifactType.MISC.value,
         mime_type: str | None = None,
     ) -> ArtifactRef:
+        try:
+            resolved_type = _artifact_type_from_tool(artifact_type)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
         artifact = self.artifact_store.write_artifact_content(
             ArtifactContentWrite(
                 task_id=task_id,
-                artifact_type=_artifact_type_from_tool(artifact_type),
+                artifact_type=resolved_type,
                 version=1,
                 name=name,
                 content=content,
@@ -2635,6 +3028,44 @@ def read_file(
 
 
 @function_tool(strict_mode=False)
+def glob(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    pattern: str,
+    path: str = ".",
+    max_entries: int = 200,
+) -> AgentToolResult:
+    """Find workspace files matching a glob pattern."""
+
+    return AgentToolService(ctx.context).glob(
+        task_id=task_id,
+        pattern=pattern,
+        path=path,
+        max_entries=max_entries,
+    )
+
+
+@function_tool(strict_mode=False)
+def grep(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    pattern: str,
+    path: str = ".",
+    include: str | None = None,
+    max_matches: int = 200,
+) -> AgentToolResult:
+    """Search UTF-8 workspace files for literal text."""
+
+    return AgentToolService(ctx.context).grep(
+        task_id=task_id,
+        pattern=pattern,
+        path=path,
+        include=include,
+        max_matches=max_matches,
+    )
+
+
+@function_tool(strict_mode=False)
 def write_file(
     ctx: RunContextWrapper[AgentToolContext],
     task_id: str,
@@ -2715,6 +3146,28 @@ def write_artifact(
         content=content,
         summary=summary,
         artifact_type=artifact_type,
+        mime_type=mime_type,
+    )
+
+
+@function_tool(strict_mode=False)
+def register_workspace_file(
+    ctx: RunContextWrapper[AgentToolContext],
+    task_id: str,
+    path: str,
+    artifact_type: str,
+    summary: str,
+    file_role: str | None = None,
+    mime_type: str | None = None,
+) -> AgentToolResult:
+    """Register an existing workspace file as a Router artifact."""
+
+    return AgentToolService(ctx.context).register_workspace_file(
+        task_id=task_id,
+        path=path,
+        artifact_type=artifact_type,
+        summary=summary,
+        file_role=file_role,
         mime_type=mime_type,
     )
 
@@ -2968,6 +3421,33 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         executor_method="read_file",
     ),
     MainAgentToolDefinition(
+        name="glob",
+        description="Find workspace files matching a glob pattern.",
+        properties={
+            "task_id": {"type": "string"},
+            "pattern": {"type": "string"},
+            "path": {"type": "string"},
+            "max_entries": {"type": "integer", "minimum": 1},
+        },
+        required=("task_id", "pattern"),
+        sdk_tool=glob,
+        executor_method="glob",
+    ),
+    MainAgentToolDefinition(
+        name="grep",
+        description="Search UTF-8 workspace files for literal text.",
+        properties={
+            "task_id": {"type": "string"},
+            "pattern": {"type": "string"},
+            "path": {"type": "string"},
+            "include": {"type": "string"},
+            "max_matches": {"type": "integer", "minimum": 1},
+        },
+        required=("task_id", "pattern"),
+        sdk_tool=grep,
+        executor_method="grep",
+    ),
+    MainAgentToolDefinition(
         name="write_file",
         description="Write UTF-8 text to a file inside the workspace.",
         properties={
@@ -3051,6 +3531,27 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         executor_method="write_artifact",
     ),
     MainAgentToolDefinition(
+        name="register_workspace_file",
+        description=(
+            "Register an existing workspace file as a Router artifact and update "
+            "current artifact pointers such as current PLC code."
+        ),
+        properties={
+            "task_id": {"type": "string"},
+            "path": {"type": "string"},
+            "artifact_type": {
+                "type": "string",
+                "description": "Use plc_code for PLC source files; code is accepted as an alias.",
+            },
+            "summary": {"type": "string"},
+            "file_role": {"type": "string"},
+            "mime_type": {"type": "string"},
+        },
+        required=("task_id", "path", "artifact_type", "summary"),
+        sdk_tool=register_workspace_file,
+        executor_method="register_workspace_file",
+    ),
+    MainAgentToolDefinition(
         name="plc_dev",
         description="Generate or update PLC artifacts with direct worker controls.",
         properties=_direct_worker_tool_properties(WorkerType.PLC_DEV.value),
@@ -3081,6 +3582,17 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         required=("task_id",),
         sdk_tool=plc_repair,
         executor_method="plc_repair",
+    ),
+    MainAgentToolDefinition(
+        name="run_quality_gate",
+        description="Run and persist the Quality Gate assessment for final delivery.",
+        properties={
+            "task_id": {"type": "string"},
+            "rationale_summary": {"type": "string"},
+        },
+        required=("task_id",),
+        sdk_tool=run_quality_gate,
+        executor_method="run_quality_gate",
     ),
 )
 GENERIC_MAIN_AGENT_TOOL_BY_NAME = {
@@ -3274,10 +3786,52 @@ def _worker_config_schema() -> dict[str, Any]:
 
 
 def _artifact_type_from_tool(value: str | ArtifactType) -> ArtifactType:
+    aliases = {
+        "code": ArtifactType.PLC_CODE,
+        "plc": ArtifactType.PLC_CODE,
+        "st": ArtifactType.PLC_CODE,
+    }
+    normalized = _value(value)
+    if isinstance(normalized, str):
+        normalized = normalized.strip().lower()
+        if normalized in aliases:
+            return aliases[normalized]
     try:
-        return ArtifactType(_value(value))
+        return ArtifactType(normalized)
     except ValueError:
-        return ArtifactType.MISC
+        allowed = ", ".join(sorted(item.value for item in ArtifactType))
+        raise ValueError(
+            f"unsupported artifact_type {value!r}; use one of: {allowed}"
+        )
+
+
+def _worker_input_signature(worker_input: WorkerInput) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            (
+                f"{_value(artifact.type)}:"
+                f"{artifact.content_hash or artifact.artifact_id}"
+            )
+            for artifact in worker_input.input_artifacts
+        )
+    )
+
+
+def _worker_failure_types(result: WorkerResult) -> tuple[str, ...]:
+    execution_status = _value(result.execution_status)
+    outcome_status = _value(result.outcome.status)
+    if execution_status != WorkerExecutionStatus.COMPLETED.value:
+        if result.error is not None:
+            return (result.error.error_code,)
+        return ("worker_execution_failed",)
+    if outcome_status != WorkerOutcomeStatus.FAILED.value:
+        return ()
+    sources = sorted({_value(failure.source) for failure in result.failures})
+    if sources:
+        return tuple(sources)
+    if result.error is not None:
+        return (result.error.error_code,)
+    return (f"{_value(result.worker_type)}_failed",)
 
 
 def _bounded_output(value: Any, limit: int = DEFAULT_AGENT_TOOL_OUTPUT_MAX_CHARS) -> str:

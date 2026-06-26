@@ -115,6 +115,8 @@ class McpAdapter:
         subagent_api_base_url: str | None = None,
         subagent_api_token: str | None = None,
         subagent_timeout_seconds: int | None = None,
+        subagent_max_retries: int | None = None,
+        subagent_retry_backoff_seconds: float | None = None,
         plc_dev_mode: str | None = None,
         plc_test_mode: str | None = None,
         plc_formal_mode: str | None = None,
@@ -151,6 +153,16 @@ class McpAdapter:
         )
         self.subagent_timeout_seconds = (
             subagent_timeout_seconds or settings.subagent_timeout_seconds
+        )
+        self.subagent_max_retries = (
+            subagent_max_retries
+            if subagent_max_retries is not None
+            else settings.subagent_max_retries
+        )
+        self.subagent_retry_backoff_seconds = (
+            subagent_retry_backoff_seconds
+            if subagent_retry_backoff_seconds is not None
+            else settings.subagent_retry_backoff_seconds
         )
         self.worker_modes = {
             WorkerType.PLC_DEV.value: plc_dev_mode if plc_dev_mode is not None else settings.plc_dev_mode,
@@ -413,6 +425,8 @@ class McpAdapter:
             timeout_seconds=self.subagent_timeout_seconds,
             api_token=self.subagent_api_token,
             artifact_max_chars=self.plc_worker_artifact_max_chars,
+            max_retries=self.subagent_max_retries,
+            retry_backoff_seconds=self.subagent_retry_backoff_seconds,
         )
         log_with_context(
             LOGGER,

@@ -41,12 +41,22 @@ class AgentSessionMessageResult:
 class AgentSessionService:
     """Coordinates session-level conversation operations."""
 
-    def __init__(self, session: Session, artifact_root: Path) -> None:
+    def __init__(
+        self,
+        session: Session,
+        artifact_root: Path,
+        session_workspace_root: Path | None = None,
+    ) -> None:
         self.session = session
         self.artifact_root = artifact_root
+        self.session_workspace_root = session_workspace_root
         self.session_repository = AgentSessionRepository(session)
         self.task_repository = TaskRepository(session)
-        self.task_service = TaskService(session=session, artifact_root=artifact_root)
+        self.task_service = TaskService(
+            session=session,
+            artifact_root=artifact_root,
+            session_workspace_root=session_workspace_root,
+        )
 
     def create_session(
         self,

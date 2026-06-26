@@ -7,6 +7,7 @@ import pytest
 
 from app.mcp.draft import McpInputArtifactSnapshot, validate_worker_draft_output
 from app.mcp.subagent_client import (
+    SubagentConnectionError,
     SubagentExecutionError,
     SubagentWorkerClient,
     build_subagent_request,
@@ -322,6 +323,80 @@ def test_client_posts_stream_and_raises_error_event() -> None:
     assert captured["url"] == "http://subagent.example/api/chat/stream"
     assert captured["authorization"] == "Bearer secret-token"
     assert captured["body"]["agent_id"] == "fuzz_testing_agent"
+
+
+def test_client_retries_transient_gateway_status_before_success() -> None:
+    attempts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(str(request.url))
+        if len(attempts) == 1:
+            return httpx.Response(502, text="bad gateway", request=request)
+        return httpx.Response(
+            200,
+            content=(
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "fuzz_report_json",
+                        "content": {
+                            "summary": "retry recovered",
+                            "total_cases": 1,
+                            "passed_cases": 1,
+                            "failed_cases": 0,
+                        },
+                    }
+                )
+                + "\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+            request=request,
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = SubagentWorkerClient(
+        base_url="http://subagent.example",
+        http_client=http_client,
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+
+    draft = client.call_worker(
+        worker_input(WorkerType.PLC_TEST),
+        snapshots(WorkerType.PLC_TEST),
+    )
+
+    assert draft.outcome.status == "passed"
+    assert len(attempts) == 2
+
+
+def test_client_reports_retry_details_after_gateway_status_exhaustion() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(502, text="bad gateway", request=request)
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = SubagentWorkerClient(
+        base_url="http://subagent.example",
+        http_client=http_client,
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+
+    with pytest.raises(SubagentConnectionError) as exc_info:
+        client.call_worker(
+            worker_input(WorkerType.PLC_TEST),
+            snapshots(WorkerType.PLC_TEST),
+        )
+
+    assert attempts == 3
+    assert exc_info.value.details["status_code"] == 502
+    assert exc_info.value.details["attempts"] == 3
+    assert exc_info.value.details["max_retries"] == 2
+    assert exc_info.value.details["retryable_status_code"] is True
 
 
 def worker_input(

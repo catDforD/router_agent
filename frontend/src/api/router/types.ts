@@ -49,11 +49,13 @@ export interface SubagentStatusWorker {
   latency_ms?: number | null;
   status_code?: number | null;
   error?: string | null;
+  probe_scope?: string | null;
 }
 
 export interface SubagentStatusProbe {
   method: string;
   path: string;
+  scope?: string;
   status: string;
   online?: boolean | null;
   latency_ms?: number | null;

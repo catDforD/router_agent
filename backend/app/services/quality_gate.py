@@ -481,7 +481,8 @@ def _requires_code(state: TaskState) -> bool:
 
 def _requires_test(state: TaskState) -> bool:
     return (
-        state.gates.test_required
+        _value(state.task_type) == TaskType.TEST_EXISTING_CODE.value
+        or state.gates.test_required
         or state.difficulty.requires_test
         or _difficulty_at_least(state, "L2")
     )
@@ -489,7 +490,8 @@ def _requires_test(state: TaskState) -> bool:
 
 def _requires_formal(state: TaskState) -> bool:
     return (
-        state.gates.formal_required
+        _value(state.task_type) == TaskType.FORMAL_VERIFY_EXISTING_CODE.value
+        or state.gates.formal_required
         or state.difficulty.requires_formal
         or _difficulty_at_least(state, "L3")
         or _has_formal_safety_signal(state)

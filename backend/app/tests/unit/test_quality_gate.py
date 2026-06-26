@@ -254,6 +254,25 @@ def test_l2_development_without_passing_test_evidence_fails_test_gate() -> None:
     assert outcome.blocking is True
 
 
+def test_test_existing_code_requires_latest_passing_test_report() -> None:
+    assessment = assess_quality_gate(
+        gate_task(
+            task_type="test_existing_code",
+            difficulty_profile=difficulty(level="L1"),
+            gates=gate_state(latest_test_passed=False),
+            current_code=code_ref(),
+            latest_test_report=report_ref(),
+        )
+    )
+
+    outcome = assessment.outcome_for(TEST_GATE)
+
+    assert assessment.status == "failed"
+    assert outcome.status == "failed"
+    assert outcome.blocking is True
+    assert outcome.details["latest_test_passed"] is False
+
+
 def test_l3_task_without_passing_formal_evidence_fails_formal_gate() -> None:
     assessment = assess_quality_gate(
         gate_task(
@@ -274,6 +293,25 @@ def test_l3_task_without_passing_formal_evidence_fails_formal_gate() -> None:
     assert assessment.status == "failed"
     assert outcome.status == "failed"
     assert outcome.blocking is True
+
+
+def test_formal_verify_existing_code_requires_latest_passing_formal_report() -> None:
+    assessment = assess_quality_gate(
+        gate_task(
+            task_type="formal_verify_existing_code",
+            difficulty_profile=difficulty(level="L1"),
+            gates=gate_state(latest_formal_passed=False),
+            current_code=code_ref(),
+            latest_formal_report=formal_report_ref(),
+        )
+    )
+
+    outcome = assessment.outcome_for(FORMAL_GATE)
+
+    assert assessment.status == "failed"
+    assert outcome.status == "failed"
+    assert outcome.blocking is True
+    assert outcome.details["latest_formal_passed"] is False
 
 
 def test_open_blocking_failure_fails_final_gate() -> None:
