@@ -10,6 +10,7 @@ ENV_KEYS = (
     "APP_ENV",
     "DATABASE_URL",
     "ARTIFACT_ROOT",
+    "SESSION_WORKSPACE_ROOT",
     "OPENAI_API_KEY",
     "MAIN_AGENT_PROVIDER",
     "MAIN_AGENT_API_KEY",
@@ -18,6 +19,10 @@ ENV_KEYS = (
     "MAIN_AGENT_MAX_TURNS",
     "MAIN_AGENT_TIMEOUT_SECONDS",
     "MAIN_AGENT_STREAM",
+    "AGENT_EXECUTION_MODE",
+    "AGENT_WORKSPACE_ROOT",
+    "AGENT_COMMAND_TIMEOUT_SECONDS",
+    "AGENT_TOOL_OUTPUT_MAX_CHARS",
     "MCP_MODE",
     "PLC_WORKER_MCP_URL",
     "PLC_WORKER_TIMEOUT_SECONDS",
@@ -25,6 +30,8 @@ ENV_KEYS = (
     "SUBAGENT_API_BASE_URL",
     "SUBAGENT_API_TOKEN",
     "SUBAGENT_TIMEOUT_SECONDS",
+    "SUBAGENT_MAX_RETRIES",
+    "SUBAGENT_RETRY_BACKOFF_SECONDS",
     "PLC_DEV_MODE",
     "PLC_TEST_MODE",
     "PLC_FORMAL_MODE",
@@ -56,6 +63,7 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.app_env == "local"
     assert settings.database_url == "postgresql+psycopg://router:router@localhost:5432/router"
     assert settings.artifact_root == Path("data/artifacts")
+    assert settings.session_workspace_root == Path("data/workspaces")
     assert settings.openai_api_key is None
     assert settings.main_agent_provider == "openai_compatible"
     assert settings.main_agent_api_key is None
@@ -64,6 +72,10 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.main_agent_max_turns == 20
     assert settings.main_agent_timeout_seconds == 120
     assert settings.main_agent_stream is True
+    assert settings.agent_execution_mode == "disabled"
+    assert settings.agent_workspace_root == Path(".")
+    assert settings.agent_command_timeout_seconds == 120
+    assert settings.agent_tool_output_max_chars == 12_000
     assert settings.mcp_mode == "mock"
     assert settings.plc_worker_mcp_url == "http://localhost:9000/mcp"
     assert settings.plc_worker_timeout_seconds == 300
@@ -71,6 +83,8 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.subagent_api_base_url == "http://60.188.37.6:28080"
     assert settings.subagent_api_token is None
     assert settings.subagent_timeout_seconds == 300
+    assert settings.subagent_max_retries == 2
+    assert settings.subagent_retry_backoff_seconds == 1.0
     assert settings.plc_dev_mode is None
     assert settings.plc_test_mode is None
     assert settings.plc_formal_mode is None
@@ -88,6 +102,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://test:test@db:5432/router_test")
     monkeypatch.setenv("ARTIFACT_ROOT", "/tmp/router-artifacts")
+    monkeypatch.setenv("SESSION_WORKSPACE_ROOT", "/tmp/router-workspaces")
     monkeypatch.setenv("MAIN_AGENT_PROVIDER", "OPENAI_COMPATIBLE")
     monkeypatch.setenv("MAIN_AGENT_API_KEY", "main-agent-secret")
     monkeypatch.setenv("MAIN_AGENT_BASE_URL", "https://user:pass@main-agent.example/v1")
@@ -95,6 +110,10 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("MAIN_AGENT_MAX_TURNS", "12")
     monkeypatch.setenv("MAIN_AGENT_TIMEOUT_SECONDS", "90")
     monkeypatch.setenv("MAIN_AGENT_STREAM", "false")
+    monkeypatch.setenv("AGENT_EXECUTION_MODE", "LOCAL_FULL_ACCESS")
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", "/tmp/router-agent-workspace")
+    monkeypatch.setenv("AGENT_COMMAND_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("AGENT_TOOL_OUTPUT_MAX_CHARS", "2048")
     monkeypatch.setenv("MCP_MODE", "HYBRID")
     monkeypatch.setenv("PLC_WORKER_MCP_URL", "http://worker.example/mcp")
     monkeypatch.setenv("PLC_WORKER_TIMEOUT_SECONDS", "45")
@@ -102,6 +121,8 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("SUBAGENT_API_BASE_URL", "http://subagent.example")
     monkeypatch.setenv("SUBAGENT_API_TOKEN", "subagent-secret-value")
     monkeypatch.setenv("SUBAGENT_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("SUBAGENT_MAX_RETRIES", "4")
+    monkeypatch.setenv("SUBAGENT_RETRY_BACKOFF_SECONDS", "0.5")
     monkeypatch.setenv("PLC_DEV_MODE", "SUBAGENT")
     monkeypatch.setenv("PLC_TEST_MODE", "mock")
     monkeypatch.setenv("PLC_FORMAL_MODE", "real")
@@ -119,6 +140,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.app_env == "test"
     assert settings.database_url == "postgresql+psycopg://test:test@db:5432/router_test"
     assert settings.artifact_root == Path("/tmp/router-artifacts")
+    assert settings.session_workspace_root == Path("/tmp/router-workspaces")
     assert settings.main_agent_provider == "openai_compatible"
     assert settings.main_agent_api_key == "main-agent-secret"
     assert settings.main_agent_base_url == "https://user:pass@main-agent.example/v1"
@@ -126,6 +148,10 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.main_agent_max_turns == 12
     assert settings.main_agent_timeout_seconds == 90
     assert settings.main_agent_stream is False
+    assert settings.agent_execution_mode == "local_full_access"
+    assert settings.agent_workspace_root == Path("/tmp/router-agent-workspace")
+    assert settings.agent_command_timeout_seconds == 30
+    assert settings.agent_tool_output_max_chars == 2048
     assert settings.mcp_mode == "hybrid"
     assert settings.plc_worker_mcp_url == "http://worker.example/mcp"
     assert settings.plc_worker_timeout_seconds == 45
@@ -133,6 +159,8 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.subagent_api_base_url == "http://subagent.example"
     assert settings.subagent_api_token == "subagent-secret-value"
     assert settings.subagent_timeout_seconds == 120
+    assert settings.subagent_max_retries == 4
+    assert settings.subagent_retry_backoff_seconds == 0.5
     assert settings.plc_dev_mode == "subagent"
     assert settings.plc_test_mode == "mock"
     assert settings.plc_formal_mode == "real"
@@ -194,6 +222,10 @@ def test_redacted_diagnostics_do_not_expose_secrets() -> None:
     assert diagnostics["main_agent_base_url"] == "https://[redacted]@main-agent.example/v1"
     assert diagnostics["deepseek_api_key"] == "deep...alue"
     assert diagnostics["subagent_api_token"] == "suba...alue"
+    assert diagnostics["session_workspace_root"] == "data/workspaces"
+    assert diagnostics["agent_execution_mode"] == "disabled"
+    assert diagnostics["agent_workspace_root"] == "."
+    assert diagnostics["agent_tool_output_max_chars"] == 12_000
     assert "openai-secret-value" not in str(diagnostics)
     assert "main-agent-secret-value" not in str(diagnostics)
     assert "user:password" not in str(diagnostics)

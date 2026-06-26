@@ -1,90 +1,5 @@
 {
   "$defs": {
-    "ArtifactRef": {
-      "additionalProperties": false,
-      "properties": {
-        "artifact_id": {
-          "title": "Artifact Id",
-          "type": "string"
-        },
-        "type": {
-          "$ref": "#/$defs/ArtifactType"
-        },
-        "version": {
-          "minimum": 1,
-          "title": "Version",
-          "type": "integer"
-        },
-        "uri": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Uri"
-        },
-        "summary": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Summary"
-        },
-        "content_hash": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Content Hash"
-        }
-      },
-      "required": [
-        "artifact_id",
-        "type",
-        "version"
-      ],
-      "title": "ArtifactRef",
-      "type": "object"
-    },
-    "ArtifactType": {
-      "enum": [
-        "raw_user_request",
-        "requirements_ir",
-        "plc_code",
-        "io_contract",
-        "plc_project_bundle",
-        "test_cases",
-        "test_report",
-        "failing_trace",
-        "formal_properties",
-        "formal_model",
-        "formal_report",
-        "counterexample",
-        "patch",
-        "repair_summary",
-        "gate_report",
-        "final_report",
-        "worker_log",
-        "main_agent_log",
-        "misc"
-      ],
-      "title": "ArtifactType",
-      "type": "string"
-    },
     "Assumption": {
       "additionalProperties": false,
       "properties": {
@@ -160,21 +75,19 @@
       "title": "DifficultyLevel",
       "type": "string"
     },
-    "ExpectedOutputSpec": {
+    "ExpectedFileSpec": {
       "additionalProperties": false,
       "properties": {
-        "artifact_type": {
-          "$ref": "#/$defs/ArtifactType"
+        "path": {
+          "title": "Path",
+          "type": "string"
         },
         "required": {
+          "default": true,
           "title": "Required",
           "type": "boolean"
         },
         "description": {
-          "title": "Description",
-          "type": "string"
-        },
-        "schema_ref": {
           "anyOf": [
             {
               "type": "string"
@@ -184,15 +97,25 @@
             }
           ],
           "default": null,
-          "title": "Schema Ref"
+          "title": "Description"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
         }
       },
       "required": [
-        "artifact_type",
-        "required",
-        "description"
+        "path"
       ],
-      "title": "ExpectedOutputSpec",
+      "title": "ExpectedFileSpec",
       "type": "object"
     },
     "JsonValue": {},
@@ -1027,11 +950,26 @@
       "title": "Objective",
       "type": "string"
     },
-    "input_artifacts": {
+    "workspace_root": {
+      "title": "Workspace Root",
+      "type": "string"
+    },
+    "current_directory": {
+      "title": "Current Directory",
+      "type": "string"
+    },
+    "input_paths": {
       "items": {
-        "$ref": "#/$defs/ArtifactRef"
+        "type": "string"
       },
-      "title": "Input Artifacts",
+      "title": "Input Paths",
+      "type": "array"
+    },
+    "output_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Output Paths",
       "type": "array"
     },
     "context": {
@@ -1046,7 +984,7 @@
     },
     "expected_outputs": {
       "items": {
-        "$ref": "#/$defs/ExpectedOutputSpec"
+        "$ref": "#/$defs/ExpectedFileSpec"
       },
       "title": "Expected Outputs",
       "type": "array"
@@ -1101,10 +1039,10 @@
     "mcp_tool",
     "mode",
     "objective",
-    "input_artifacts",
+    "workspace_root",
+    "current_directory",
     "context",
     "constraints",
-    "expected_outputs",
     "budget",
     "trace_context",
     "idempotency_key",

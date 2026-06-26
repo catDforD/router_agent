@@ -97,6 +97,7 @@ def get_agent_session_service(
     return AgentSessionService(
         session=session,
         artifact_root=request.app.state.settings.artifact_root,
+        session_workspace_root=request.app.state.settings.session_workspace_root,
     )
 
 

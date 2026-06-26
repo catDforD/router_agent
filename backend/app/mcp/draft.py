@@ -43,10 +43,10 @@ class McpDraftBaseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
 
-class McpInputArtifactSnapshot(McpDraftBaseModel):
-    """Bounded artifact content sent with a WorkerInput to an MCP worker."""
+class McpInputFileSnapshot(McpDraftBaseModel):
+    """Bounded workspace file content sent with a WorkerInput to an MCP worker."""
 
-    artifact_id: str
+    path: str
     type: ArtifactType
     version: int = Field(ge=1)
     summary: str | None = None
@@ -61,7 +61,7 @@ class McpWorkerRequest(McpDraftBaseModel):
     """Envelope passed from Router to one MCP worker tool."""
 
     worker_input: WorkerInput
-    input_artifacts: list[McpInputArtifactSnapshot] = Field(default_factory=list)
+    input_files: list[McpInputFileSnapshot] = Field(default_factory=list)
 
 
 class LlmArtifactWriteDraft(McpDraftBaseModel):
@@ -101,11 +101,7 @@ REQUIRED_PASSED_ARTIFACTS_BY_WORKER: dict[str, set[str]] = {
     },
     WorkerType.PLC_TEST.value: {ArtifactType.TEST_REPORT.value},
     WorkerType.PLC_FORMAL.value: {ArtifactType.FORMAL_REPORT.value},
-    WorkerType.PLC_REPAIR.value: {
-        ArtifactType.PATCH.value,
-        ArtifactType.PLC_CODE.value,
-        ArtifactType.REPAIR_SUMMARY.value,
-    },
+    WorkerType.PLC_REPAIR.value: {ArtifactType.REPAIR_SUMMARY.value},
 }
 
 EXPECTED_WORKER_BY_TOOL: dict[str, str] = {

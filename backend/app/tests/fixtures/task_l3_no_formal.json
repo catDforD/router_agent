@@ -56,34 +56,6 @@
     "has_blocking_failure": false,
     "can_finish_as_success": false
   },
-  "current_artifacts": {
-    "raw_user_request": {
-      "artifact_id": "artifact-raw-request-l3-001",
-      "type": "raw_user_request",
-      "version": 1,
-      "uri": "local://artifacts/task-l3-no-formal/raw-request.json",
-      "summary": "Original user request"
-    },
-    "current_code": {
-      "artifact_id": "artifact-code-l3-001",
-      "type": "plc_code",
-      "version": 1,
-      "uri": "local://artifacts/task-l3-no-formal/plc-code.st",
-      "summary": "Generated PLC code"
-    },
-    "latest_test_report": {
-      "artifact_id": "artifact-test-report-l3-001",
-      "type": "test_report",
-      "version": 1,
-      "uri": "local://artifacts/task-l3-no-formal/test-report.json",
-      "summary": "Passing test report"
-    },
-    "all_artifact_ids": [
-      "artifact-raw-request-l3-001",
-      "artifact-code-l3-001",
-      "artifact-test-report-l3-001"
-    ]
-  },
   "active_worker_jobs": [],
   "completed_worker_job_ids": [
     "worker-job-dev-l3-001",

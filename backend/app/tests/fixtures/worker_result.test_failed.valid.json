@@ -1,5 +1,5 @@
 {
-  "schema_version": "router.v1",
+  "schema_version": "router.v2",
   "task_id": "task-001",
   "worker_job_id": "worker-job-test-001",
   "worker_type": "plc-test",
@@ -12,14 +12,14 @@
     "reason": "One interlock test failed."
   },
   "summary": "PLC tests completed with one blocking failure.",
-  "produced_artifacts": [
-    {
-      "artifact_id": "artifact-test-report-001",
-      "type": "test_report",
-      "version": 1,
-      "uri": "local://artifacts/task-001/test-report.json",
-      "summary": "Test report with one failed case"
-    }
+  "read_paths": [
+    "src/plc_code.st"
+  ],
+  "written_paths": [
+    ".router/reports/worker-job-test-001/test_report.json"
+  ],
+  "report_paths": [
+    ".router/reports/worker-job-test-001/test_report.json"
   ],
   "diagnostics": [
     {
@@ -27,8 +27,8 @@
       "severity": "error",
       "code": "TEST_FAILED",
       "message": "Pump output turned on while the interlock input was false.",
-      "related_artifact_ids": [
-        "artifact-test-report-001"
+      "related_file_paths": [
+        ".router/reports/worker-job-test-001/test_report.json"
       ]
     }
   ],
@@ -42,8 +42,8 @@
       "description": "The pump output was enabled without the required interlock.",
       "expected": "Pump output remains false when interlock is false.",
       "actual": "Pump output became true.",
-      "evidence_artifact_ids": [
-        "artifact-test-report-001"
+      "evidence_paths": [
+        ".router/reports/worker-job-test-001/test_report.json"
       ],
       "status": "open",
       "created_by_worker_job_id": "worker-job-test-001",

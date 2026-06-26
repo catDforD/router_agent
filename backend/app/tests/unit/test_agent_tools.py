@@ -32,9 +32,10 @@ from app.models.router_schema import (
     TaskStatus,
     WorkerType,
 )
+from app.mcp.mock_worker import run_mock_worker
+from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
 from app.repositories.worker_job_repo import WorkerJobRepository
-from app.mcp.mock_worker import run_mock_worker
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 from app.services.task_service import TaskService
@@ -280,6 +281,26 @@ def blocking_failure(task: TaskState, evidence: ArtifactRef) -> Failure:
     )
 
 
+def state_failure(
+    task: TaskState,
+    *,
+    failure_id: str = "failure-test-001",
+    status: str = "open",
+) -> Failure:
+    return Failure(
+        failure_id=failure_id,
+        source="test",
+        severity="blocking",
+        title="Blocking test failure",
+        description="The current PLC code failed a blocking test.",
+        reproduction=FailureReproduction(input_trace_path="reports/failure.json"),
+        evidence_paths=["reports/failure.json"],
+        status=status,
+        created_by_worker_job_id="worker-job-test-failed",
+        created_at=task.created_at,
+    )
+
+
 def worker_job_rows(db_session: Session) -> list[WorkerJobRow]:
     return list(db_session.execute(select(WorkerJobRow)).scalars())
 
@@ -290,16 +311,20 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
     assert [tool.name for tool in tools] == [
         "list_files",
         "read_file",
+        "glob",
+        "grep",
         "write_file",
         "apply_patch",
         "exec_command",
         "git_status",
         "read_artifact",
         "write_artifact",
+        "register_workspace_file",
         "plc_dev",
         "plc_test",
         "plc_formal",
         "plc_repair",
+        "run_quality_gate",
     ]
     assert [spec["function"]["name"] for spec in get_main_agent_tool_specs()] == [
         tool.name for tool in tools
@@ -421,10 +446,94 @@ def test_exec_command_records_output_and_failure(
     assert ok.details["exit_code"] == 0
     assert ok.details["stdout"] == "ab..."
     assert ok.details["stdout_truncated"] is True
+    assert ok.details["output_path"] is not None
+    assert (
+        workspace / ok.details["output_path"]
+    ).read_text(encoding="utf-8").startswith("$ printf abcdef")
     assert ok.artifact_refs
     assert failed.status == "failed"
     assert failed.error is not None
     assert failed.details["exit_code"] == 7
+
+
+def test_write_artifact_maps_code_alias_to_current_plc_code_and_rejects_unknown_type(
+    db_session: Session,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session, qa=True)
+
+    written = service.write_artifact(
+        task.task_id,
+        name="motor.st",
+        content="FUNCTION_BLOCK FB_Motor\nEND_FUNCTION_BLOCK\n",
+        summary="PLC source from tool output.",
+        artifact_type="code",
+        mime_type="text/plain",
+    )
+    rejected = service.write_artifact(
+        task.task_id,
+        name="unknown.txt",
+        content="x",
+        summary="Unknown artifact type should be rejected.",
+        artifact_type="not_a_contract_type",
+    )
+    updated = TaskRepository(db_session).get_task(task.task_id)
+
+    assert written.status == "applied"
+    assert written.artifact_refs[0].type == "plc_code"
+    assert updated.current_artifacts.current_code is not None
+    assert (
+        updated.current_artifacts.current_code.artifact_id
+        == written.artifact_refs[0].artifact_id
+    )
+    assert rejected.status == "rejected"
+    assert rejected.violation is not None
+    assert rejected.violation.code == "invalid_artifact_type"
+
+
+def test_register_workspace_file_registers_existing_plc_code_with_metadata(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "src" / "motor.st"
+    source.parent.mkdir()
+    source.write_text("FUNCTION_BLOCK FB_Motor\nEND_FUNCTION_BLOCK\n", encoding="utf-8")
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_read_only",
+        )
+    )
+
+    result = service.register_workspace_file(
+        task.task_id,
+        path="src/motor.st",
+        artifact_type="code",
+        summary="Existing PLC source in the session workspace.",
+        file_role="current_plc_code",
+        mime_type="text/plain",
+    )
+    updated = TaskRepository(db_session).get_task(task.task_id)
+    artifact = ArtifactRepository(db_session).get_artifact(
+        result.artifact_refs[0].artifact_id
+    )
+
+    assert result.status == "applied"
+    assert result.details["path"] == "src/motor.st"
+    assert result.artifact_refs[0].type == "plc_code"
+    assert updated.current_artifacts.current_code is not None
+    assert (
+        updated.current_artifacts.current_code.artifact_id
+        == result.artifact_refs[0].artifact_id
+    )
+    assert artifact.metadata.workspace_path == "src/motor.st"
+    assert artifact.metadata.file_role == "current_plc_code"
+    assert artifact.metadata.source_task_id == task.task_id
 
 
 def test_apply_patch_modifies_workspace_file(
@@ -802,6 +911,34 @@ def test_plc_test_without_current_code_is_rejected_without_side_effects(
     assert worker_job_rows(db_session) == []
 
 
+def test_plc_test_repeated_same_input_failure_is_debounced(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session)
+    create_requirements_and_code(db_session, tmp_path, task)
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            mock_scenario="test_failed_then_repair_pass",
+        )
+    )
+
+    first = service.plc_test(task.task_id)
+    second = service.plc_test(task.task_id)
+    third = service.plc_test(task.task_id)
+    updated = TaskRepository(db_session).get_task(task.task_id)
+
+    assert first.status == "applied"
+    assert second.status == "applied"
+    assert third.status == "rejected"
+    assert third.violation is not None
+    assert third.violation.code == "worker_retry_debounce"
+    assert third.violation.details["blocked_failure_types"] == ["test"]
+    assert updated.runtime_limits.worker_calls_used == 2
+
+
 def test_guard_rejection_is_recorded_when_observability_is_enabled(
     db_session: Session,
     tmp_path: Path,
@@ -973,6 +1110,82 @@ def test_run_quality_gate_returns_assessment_and_gate_report(
     assert result.artifact_refs[0].type == "gate_report"
     assert result.gate_state is not None
     assert result.gate_state.can_finish_as_success is True
+
+
+def test_quality_gate_passed_does_not_correlate_historical_failures(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, task_id="task-gate-passed", qa=True)
+    historical_failure = state_failure(task, status="resolved")
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(deep=True, update={"failures": [historical_failure]})
+    )
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-gate-passed",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.run_quality_gate(task.task_id)
+    event = [
+        event
+        for event in EventService(db_session).list_visible_events(task.task_id)
+        if event.type == "agent.tool_result"
+    ][-1]
+
+    assert result.details["assessment_status"] == "passed"
+    assert event.payload["failure_ids"] == []
+    assert event.correlation.failure_ids is None
+
+
+def test_quality_gate_failed_correlates_open_blocking_failures(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, task_id="task-gate-failed", qa=True)
+    failure = state_failure(task)
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(
+            deep=True,
+            update={
+                "failures": [failure],
+                "gates": task.gates.model_copy(update={"has_blocking_failure": True}),
+            },
+        )
+    )
+    recorder = MainAgentObservabilityRecorder(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        task_id=task.task_id,
+        main_agent_run_id="main-agent-run-gate-failed",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            observability_recorder=recorder,
+        )
+    )
+
+    result = service.run_quality_gate(task.task_id)
+    event = [
+        event
+        for event in EventService(db_session).list_visible_events(task.task_id)
+        if event.type == "agent.tool_result"
+    ][-1]
+
+    assert result.details["assessment_status"] == "failed"
+    assert event.payload["failure_ids"] == ["failure-test-001"]
+    assert event.correlation.failure_ids == ["failure-test-001"]
 
 
 def test_tool_checkpoint_callback_runs_after_gate_and_report(

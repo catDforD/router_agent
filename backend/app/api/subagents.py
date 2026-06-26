@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/subagents", tags=["subagents"])
 
 SUBAGENT_PROBE_PATH = "/api/chat/stream"
 SUBAGENT_PROBE_METHOD = "OPTIONS"
+SUBAGENT_PROBE_SCOPE = "transport_reachability"
 SUBAGENT_PROBE_TIMEOUT_SECONDS = 2.0
 
 
@@ -40,6 +41,7 @@ def subagent_status(request: Request) -> dict[str, Any]:
             "latency_ms": None,
             "status_code": None,
             "error": None,
+            "scope": SUBAGENT_PROBE_SCOPE,
             "checked_at": _now_iso(),
         }
     )
@@ -53,6 +55,11 @@ def subagent_status(request: Request) -> dict[str, Any]:
         error = probe["error"] if route == "subagent" else None
         latency_ms = probe["latency_ms"] if route == "subagent" else None
         status_code = probe["status_code"] if route == "subagent" else None
+        probe_scope = (
+            probe.get("scope", SUBAGENT_PROBE_SCOPE)
+            if route == "subagent"
+            else None
+        )
         workers.append(
             {
                 "worker_type": worker,
@@ -63,6 +70,7 @@ def subagent_status(request: Request) -> dict[str, Any]:
                 "latency_ms": latency_ms,
                 "status_code": status_code,
                 "error": error,
+                "probe_scope": probe_scope,
             }
         )
 
@@ -72,6 +80,7 @@ def subagent_status(request: Request) -> dict[str, Any]:
         "probe": {
             "method": SUBAGENT_PROBE_METHOD,
             "path": SUBAGENT_PROBE_PATH,
+            "scope": SUBAGENT_PROBE_SCOPE,
             **probe,
         },
         "workers": workers,
@@ -118,6 +127,7 @@ def probe_remote_subagent(settings: Settings) -> dict[str, Any]:
         "latency_ms": latency_ms,
         "status_code": response.status_code,
         "error": error,
+        "scope": SUBAGENT_PROBE_SCOPE,
         "checked_at": _now_iso(),
     }
 
@@ -144,6 +154,7 @@ def _probe_failure(started: float, status: str, error: str) -> dict[str, Any]:
         "latency_ms": _elapsed_ms(started),
         "status_code": None,
         "error": error,
+        "scope": SUBAGENT_PROBE_SCOPE,
         "checked_at": _now_iso(),
     }
 

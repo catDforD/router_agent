@@ -7,8 +7,6 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from app.models.router_schema import (
-    ArtifactRef,
-    ArtifactType,
     ClarificationStatus,
     FailureStatus,
     Severity,
@@ -68,7 +66,7 @@ class ProposedWorkerJob:
     """Minimal worker-call shape used to validate a parallel batch."""
 
     worker_type: WorkerType | str
-    input_artifacts: Sequence[ArtifactRef]
+    input_paths: Sequence[str]
 
 
 TERMINAL_STATUSES = {
@@ -81,41 +79,32 @@ TEST_OR_FORMAL_WORKERS = {
     WorkerType.PLC_TEST.value,
     WorkerType.PLC_FORMAL.value,
 }
-REPAIR_EVIDENCE_TYPES = {
-    ArtifactType.TEST_REPORT.value,
-    ArtifactType.FAILING_TRACE.value,
-    ArtifactType.FORMAL_REPORT.value,
-    ArtifactType.COUNTEREXAMPLE.value,
-}
-
-
 def validate_worker_call(
     state: TaskState,
     worker_type: WorkerType | str,
-    input_artifacts: Sequence[ArtifactRef],
+    input_paths: Sequence[str],
 ) -> None:
     """Validate a single proposed worker dispatch before any side effects."""
 
     worker = _value(worker_type)
-    artifacts = tuple(input_artifacts)
+    paths = tuple(input_paths)
     _validate_common_worker_preconditions(state, worker)
 
     if worker == WorkerType.PLC_DEV.value:
-        _require_any_artifact_type(
-            artifacts,
-            {ArtifactType.RAW_USER_REQUEST.value, ArtifactType.REQUIREMENTS_IR.value},
+        _require_any_path(
+            paths,
             code=SchedulerGuardViolationCode.MISSING_WORKER_INPUT,
-            message="plc-dev requires raw_user_request or requirements_ir input",
+            message="plc-dev requires at least one input path",
             worker_type=worker,
         )
         return
 
     if worker in TEST_OR_FORMAL_WORKERS:
-        _validate_current_code_and_requirements(state, artifacts, worker_type=worker)
+        _validate_current_code_in_inputs(state, paths, worker_type=worker)
         return
 
     if worker == WorkerType.PLC_REPAIR.value:
-        validate_repair_allowed(state, artifacts)
+        validate_repair_allowed(state, paths)
         return
 
     raise SchedulerGuardViolation(
@@ -127,14 +116,14 @@ def validate_worker_call(
 
 def validate_repair_allowed(
     state: TaskState,
-    input_artifacts: Sequence[ArtifactRef],
+    input_paths: Sequence[str],
 ) -> None:
     """Validate repair-specific dispatch rules."""
 
-    artifacts = tuple(input_artifacts)
+    paths = tuple(input_paths)
     _validate_current_code_in_inputs(
         state,
-        artifacts,
+        paths,
         worker_type=WorkerType.PLC_REPAIR.value,
     )
 
@@ -155,13 +144,23 @@ def validate_repair_allowed(
             },
         )
 
-    if not _artifact_types(artifacts) & REPAIR_EVIDENCE_TYPES:
+    evidence_paths = {
+        path
+        for path in (
+            state.current_files.latest_test_report,
+            state.current_files.latest_failing_trace,
+            state.current_files.latest_formal_report,
+            state.current_files.latest_counterexample,
+        )
+        if path
+    }
+    if not evidence_paths & set(paths):
         raise SchedulerGuardViolation(
             SchedulerGuardViolationCode.MISSING_REPAIR_EVIDENCE,
-            "plc-repair requires test or formal failure evidence",
+            "plc-repair requires test or formal failure evidence paths",
             details={
                 "worker_type": WorkerType.PLC_REPAIR.value,
-                "required_artifact_types": sorted(REPAIR_EVIDENCE_TYPES),
+                "required_paths": sorted(evidence_paths),
             },
         )
 
@@ -207,7 +206,7 @@ def validate_parallel_jobs(
             )
 
     for job in proposed:
-        validate_worker_call(state, _job_worker_type(job), _job_input_artifacts(job))
+        validate_worker_call(state, _job_worker_type(job), _job_input_paths(job))
 
 
 def _validate_common_worker_preconditions(state: TaskState, worker_type: str) -> None:
@@ -268,75 +267,46 @@ def _validate_common_worker_preconditions(state: TaskState, worker_type: str) ->
         )
 
 
-def _validate_current_code_and_requirements(
-    state: TaskState,
-    input_artifacts: Sequence[ArtifactRef],
-    *,
-    worker_type: str,
-) -> None:
-    _validate_current_code_in_inputs(state, input_artifacts, worker_type=worker_type)
-
-    requirements = state.current_artifacts.requirements_ir
-    if requirements is None:
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.MISSING_REQUIREMENTS,
-            f"{worker_type} requires current requirements_ir",
-            details={"worker_type": worker_type},
-        )
-
-    if not _contains_artifact_ref(input_artifacts, requirements):
-        raise SchedulerGuardViolation(
-            SchedulerGuardViolationCode.MISSING_REQUIREMENTS,
-            f"{worker_type} input must include current requirements_ir",
-            details={
-                "worker_type": worker_type,
-                "expected_artifact_id": requirements.artifact_id,
-                "input_artifact_ids": _artifact_ids(input_artifacts),
-            },
-        )
-
-
 def _validate_current_code_in_inputs(
     state: TaskState,
-    input_artifacts: Sequence[ArtifactRef],
+    input_paths: Sequence[str],
     *,
     worker_type: str,
 ) -> None:
-    current_code = state.current_artifacts.current_code
+    current_code = state.current_files.current_code
     if current_code is None:
         raise SchedulerGuardViolation(
             SchedulerGuardViolationCode.MISSING_CURRENT_CODE,
-            f"{worker_type} requires current plc_code",
+            f"{worker_type} requires current PLC code path",
             details={"worker_type": worker_type},
         )
 
-    if not _contains_artifact_ref(input_artifacts, current_code):
+    if current_code not in set(input_paths):
         raise SchedulerGuardViolation(
             SchedulerGuardViolationCode.MISSING_CURRENT_CODE,
-            f"{worker_type} input must include current plc_code",
+            f"{worker_type} input must include current PLC code path",
             details={
                 "worker_type": worker_type,
-                "expected_artifact_id": current_code.artifact_id,
-                "input_artifact_ids": _artifact_ids(input_artifacts),
+                "expected_path": current_code,
+                "input_paths": list(input_paths),
             },
         )
 
 
-def _require_any_artifact_type(
-    input_artifacts: Sequence[ArtifactRef],
-    required_types: set[str],
+def _require_any_path(
+    input_paths: Sequence[str],
     *,
     code: SchedulerGuardViolationCode,
     message: str,
     worker_type: str,
 ) -> None:
-    if not _artifact_types(input_artifacts) & required_types:
+    if not input_paths:
         raise SchedulerGuardViolation(
             code,
             message,
             details={
                 "worker_type": worker_type,
-                "required_artifact_types": sorted(required_types),
+                "input_paths": [],
             },
         )
 
@@ -365,40 +335,21 @@ def _has_open_blocking_failure(state: TaskState) -> bool:
     )
 
 
-def _artifact_types(input_artifacts: Sequence[ArtifactRef]) -> set[str]:
-    return {_value(artifact.type) for artifact in input_artifacts}
-
-
-def _artifact_ids(input_artifacts: Sequence[ArtifactRef]) -> list[str]:
-    return [artifact.artifact_id for artifact in input_artifacts]
-
-
-def _contains_artifact_ref(
-    input_artifacts: Sequence[ArtifactRef],
-    expected: ArtifactRef,
-) -> bool:
-    return any(
-        artifact.artifact_id == expected.artifact_id
-        and _value(artifact.type) == _value(expected.type)
-        for artifact in input_artifacts
-    )
-
-
 def _job_worker_type(job: ProposedWorkerJob | Mapping[str, Any]) -> str:
     if isinstance(job, ProposedWorkerJob):
         return _value(job.worker_type)
     return _value(job["worker_type"])
 
 
-def _job_input_artifacts(
+def _job_input_paths(
     job: ProposedWorkerJob | Mapping[str, Any],
-) -> Sequence[ArtifactRef]:
+) -> Sequence[str]:
     if isinstance(job, ProposedWorkerJob):
-        return job.input_artifacts
-    artifacts = job["input_artifacts"]
-    if not isinstance(artifacts, Sequence):
-        raise TypeError("job input_artifacts must be a sequence")
-    return artifacts
+        return job.input_paths
+    paths = job["input_paths"]
+    if not isinstance(paths, Sequence):
+        raise TypeError("job input_paths must be a sequence")
+    return paths
 
 
 def _value(value: Any) -> str:

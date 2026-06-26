@@ -17,7 +17,12 @@ from app.models.router_schema import (
     EventVisibility,
     RouterEvent,
 )
-from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
+from app.repositories._helpers import (
+    dump_model,
+    enum_value,
+    flush_or_raise_conflict,
+    sanitize_legacy_agent_session_payload,
+)
 
 
 class AgentSessionRepository:
@@ -284,7 +289,7 @@ class AgentSessionRepository:
         payload["event_seq"] = row.event_seq
         payload["latest_run_id"] = row.latest_run_id
         payload["latest_task_id"] = row.latest_task_id
-        return AgentSession.model_validate(payload)
+        return AgentSession.model_validate(sanitize_legacy_agent_session_payload(payload))
 
     @staticmethod
     def _apply_session(row: AgentSessionRow, agent_session: AgentSession) -> None:

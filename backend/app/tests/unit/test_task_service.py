@@ -62,6 +62,30 @@ def test_create_task_persists_task_state_with_request_context(
     assert restored.project_context.target_plc_language == "ST"
     assert restored.project_context.target_platform == "Codesys"
     assert restored.task_type == "unknown"
+    assert restored.workspace is not None
+    workspace_root = Path(restored.workspace.root)
+    assert workspace_root.exists()
+    assert (workspace_root / ".router" / "runs").is_dir()
+    assert restored.workspace.writable is True
+
+
+def test_create_task_uses_project_workspace_as_read_only_controlled_root(
+    db_session: Session,
+    service: TaskService,
+    tmp_path: Path,
+) -> None:
+    project_workspace = tmp_path / "project"
+
+    result = service.create_task(
+        message="Inspect this project.",
+        project_context={"workspace_root": str(project_workspace)},
+    )
+    restored = TaskRepository(db_session).get_task(result.task.task_id)
+
+    assert restored.workspace is not None
+    assert restored.workspace.root == str(project_workspace.resolve())
+    assert restored.workspace.writable is False
+    assert (project_workspace / ".router" / "runs").is_dir()
 
 
 def test_create_task_keeps_classification_pending_until_agent_runs(

@@ -1,9 +1,10 @@
-"""Stable payload builder for Main Agent final report artifacts."""
+"""Stable payload builder for Main Agent file-centric final reports."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, JsonValue
@@ -11,14 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.agents.output_schema import MainAgentEpisodeOutput
 from app.models.router_schema import (
-    Artifact,
-    ArtifactRef,
-    CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     Failure,
     TaskState,
 )
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.gate_repo import GateResultRecord, GateResultRepository
 from app.repositories.task_repo import TaskRepository
 
@@ -36,12 +33,10 @@ def build_final_report_payload(
     main_agent_run_id: str | None,
     created_at: datetime,
 ) -> dict[str, JsonValue]:
-    """Build the compact, stable JSON payload stored in FINAL_REPORT artifacts."""
+    """Build the compact, stable JSON payload stored as a workspace final report."""
 
     task = TaskRepository(session).get_task(task_id)
-    artifacts = ArtifactRepository(session).list_task_artifacts(task_id)
     gate_results = GateResultRepository(session).list_results(task_id)
-    artifact_by_id = {artifact.artifact_id: artifact for artifact in artifacts}
 
     payload: dict[str, Any] = {
         "kind": "main_agent_final_report",
@@ -56,13 +51,9 @@ def build_final_report_payload(
         "summary": _bounded_text(output.summary),
         "plan": [_jsonable(step) for step in output.plan],
         "decisions": [_jsonable(decision) for decision in output.decisions],
-        "delivery_artifacts": _delivery_artifacts(task.current_artifacts, artifact_by_id),
-        "validation_summary": _validation_summary(
-            task=task,
-            gate_results=gate_results,
-            artifact_by_id=artifact_by_id,
-        ),
-        "repair_summary": _repair_summary(task, artifact_by_id),
+        "delivery_files": _delivery_files(task),
+        "validation_summary": _validation_summary(task=task, gate_results=gate_results),
+        "repair_summary": _repair_summary(task),
         "assumptions": [_jsonable(assumption) for assumption in task.assumptions],
         "unresolved_items": _unresolved_items(task),
         "gate_summary": {
@@ -95,40 +86,41 @@ def _classification(task: TaskState) -> dict[str, JsonValue]:
     }
 
 
-def _delivery_artifacts(
-    current_artifacts: CurrentArtifacts,
-    artifact_by_id: dict[str, Artifact],
-) -> dict[str, JsonValue]:
-    named_refs = {
-        "raw_user_request": current_artifacts.raw_user_request,
-        "requirements_ir": current_artifacts.requirements_ir,
-        "final_plc_code": current_artifacts.current_code,
-        "io_contract": current_artifacts.current_io_contract,
-        "test_cases": current_artifacts.latest_test_cases,
-        "test_report": current_artifacts.latest_test_report,
-        "failing_trace": current_artifacts.latest_failing_trace,
-        "formal_properties": current_artifacts.latest_formal_properties,
-        "formal_report": current_artifacts.latest_formal_report,
-        "counterexample": current_artifacts.latest_counterexample,
-        "patch": current_artifacts.latest_patch,
-        "repair_summary": current_artifacts.latest_repair_summary,
-        "gate_report": current_artifacts.latest_gate_report,
+def _delivery_files(task: TaskState) -> dict[str, JsonValue]:
+    current_files = task.current_files
+    named_paths = {
+        "raw_user_request": current_files.raw_user_request,
+        "requirements": current_files.requirements,
+        "final_plc_code": current_files.current_code,
+        "io_contract": current_files.current_io_contract,
+        "test_cases": current_files.latest_test_cases,
+        "test_report": current_files.latest_test_report,
+        "failing_trace": current_files.latest_failing_trace,
+        "formal_properties": current_files.latest_formal_properties,
+        "formal_report": current_files.latest_formal_report,
+        "counterexample": current_files.latest_counterexample,
+        "patch": current_files.latest_patch,
+        "repair_summary": current_files.latest_repair_summary,
+        "gate_report": current_files.latest_gate_report,
+        "final_report": current_files.final_report,
+        "main_agent_log": current_files.main_agent_log,
     }
-    all_refs = [
-        _artifact_summary_from_id(artifact_id, artifact_by_id)
-        for artifact_id in current_artifacts.all_artifact_ids
-    ]
     return {
-        key: _artifact_summary(ref, artifact_by_id) if ref is not None else None
-        for key, ref in named_refs.items()
-    } | {"all": [ref for ref in all_refs if ref is not None]}
+        key: _file_summary(task, path) if path is not None else None
+        for key, path in named_paths.items()
+    } | {
+        "all": [
+            summary
+            for path in current_files.all_paths
+            if (summary := _file_summary(task, path)) is not None
+        ]
+    }
 
 
 def _validation_summary(
     *,
     task: TaskState,
     gate_results: list[GateResultRecord],
-    artifact_by_id: dict[str, Artifact],
 ) -> dict[str, JsonValue]:
     return {
         "test_required": task.gates.test_required,
@@ -139,40 +131,22 @@ def _validation_summary(
         "latest_formal_passed": task.gates.latest_formal_passed,
         "has_blocking_failure": task.gates.has_blocking_failure,
         "can_finish_as_success": task.gates.can_finish_as_success,
-        "latest_test_report": _artifact_summary(
-            task.current_artifacts.latest_test_report,
-            artifact_by_id,
-        ),
-        "latest_formal_report": _artifact_summary(
-            task.current_artifacts.latest_formal_report,
-            artifact_by_id,
-        ),
-        "latest_gate_report": _artifact_summary(
-            task.current_artifacts.latest_gate_report,
-            artifact_by_id,
-        ),
+        "latest_test_report_path": task.current_files.latest_test_report,
+        "latest_formal_report_path": task.current_files.latest_formal_report,
+        "latest_gate_report_path": task.current_files.latest_gate_report,
         "gate_results": [_gate_result_summary(result) for result in gate_results],
     }
 
 
-def _repair_summary(
-    task: TaskState,
-    artifact_by_id: dict[str, Artifact],
-) -> dict[str, JsonValue]:
+def _repair_summary(task: TaskState) -> dict[str, JsonValue]:
     return {
         "repair_rounds": task.runtime_limits.repair_rounds,
         "max_repair_rounds": task.runtime_limits.max_repair_rounds,
         "repair_budget_exhausted": (
             task.runtime_limits.repair_rounds >= task.runtime_limits.max_repair_rounds
         ),
-        "latest_patch": _artifact_summary(
-            task.current_artifacts.latest_patch,
-            artifact_by_id,
-        ),
-        "latest_repair_summary": _artifact_summary(
-            task.current_artifacts.latest_repair_summary,
-            artifact_by_id,
-        ),
+        "latest_patch_path": task.current_files.latest_patch,
+        "latest_repair_summary_path": task.current_files.latest_repair_summary,
         "open_failure_count": _failure_count(task.failures, status="open"),
         "resolved_failure_count": _failure_count(task.failures, status="resolved"),
         "failures": [_failure_summary(failure) for failure in task.failures],
@@ -227,73 +201,57 @@ def _main_agent_output_summary(output: MainAgentEpisodeOutput) -> dict[str, Json
     }
 
 
-def _artifact_summary(
-    ref: ArtifactRef | None,
-    artifact_by_id: dict[str, Artifact],
-) -> dict[str, JsonValue] | None:
-    if ref is None:
+def _file_summary(task: TaskState, relative_path: str | None) -> dict[str, JsonValue] | None:
+    if not relative_path:
         return None
-    artifact = artifact_by_id.get(ref.artifact_id)
-    return _artifact_summary_from_ref(ref, artifact)
 
+    summary: dict[str, Any] = {"path": relative_path}
+    root = _workspace_root(task)
+    if root is None:
+        return summary
 
-def _artifact_summary_from_id(
-    artifact_id: str,
-    artifact_by_id: dict[str, Artifact],
-) -> dict[str, JsonValue] | None:
-    artifact = artifact_by_id.get(artifact_id)
-    if artifact is None:
-        return {"artifact_id": artifact_id}
-    return _artifact_summary_from_artifact(artifact)
+    try:
+        target = (root / relative_path).resolve()
+        target.relative_to(root)
+    except ValueError:
+        summary["exists"] = False
+        summary["error"] = "path_outside_workspace"
+        return summary
 
-
-def _artifact_summary_from_ref(
-    ref: ArtifactRef,
-    artifact: Artifact | None,
-) -> dict[str, JsonValue]:
-    summary: dict[str, Any] = {
-        "artifact_id": ref.artifact_id,
-        "type": _value(ref.type),
-        "version": ref.version,
-        "uri": ref.uri,
-        "summary": _bounded_text(ref.summary),
-        "content_hash": ref.content_hash,
-    }
-    if artifact is not None:
-        summary.update(_artifact_storage_summary(artifact))
+    summary["exists"] = target.exists()
+    if target.is_file():
+        summary["size_bytes"] = target.stat().st_size
+        summary["mime_type"] = _mime_type_for_path(relative_path)
     return summary
 
 
-def _artifact_summary_from_artifact(artifact: Artifact) -> dict[str, JsonValue]:
-    return {
-        "artifact_id": artifact.artifact_id,
-        "type": _value(artifact.type),
-        "version": artifact.version,
-        "uri": artifact.storage.uri,
-        "summary": _bounded_text(artifact.summary),
-        "content_hash": artifact.storage.content_hash,
-        **_artifact_storage_summary(artifact),
-    }
+def _workspace_root(task: TaskState) -> Path | None:
+    if task.workspace is not None and task.workspace.root:
+        return Path(task.workspace.root).expanduser().resolve()
+    if task.project_context.workspace_root:
+        return Path(task.project_context.workspace_root).expanduser().resolve()
+    return None
 
 
-def _artifact_storage_summary(artifact: Artifact) -> dict[str, JsonValue]:
-    return {
-        "status": _value(artifact.status),
-        "visibility": _value(artifact.visibility),
-        "mime_type": artifact.storage.mime_type,
-        "size_bytes": artifact.storage.size_bytes,
-        "created_by": _jsonable(artifact.created_by),
-        "metadata": _jsonable(artifact.metadata),
-    }
+def _mime_type_for_path(path: str) -> str | None:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".json":
+        return "application/json"
+    if suffix in {".md", ".markdown"}:
+        return "text/markdown"
+    if suffix in {".st", ".scl", ".txt", ".diff", ".patch"}:
+        return "text/plain"
+    return None
 
 
 def _gate_result_summary(result: GateResultRecord) -> dict[str, JsonValue]:
+    result_payload = result.result if isinstance(result.result, dict) else {}
     return {
         "gate_result_id": result.id,
         "gate_type": result.gate_type,
         "status": result.status,
         "blocking": result.blocking,
-        "evidence_artifact_ids": list(result.evidence_artifact_ids),
+        "evidence_paths": list(result_payload.get("evidence_paths") or []),
         "result": _jsonable(result.result),
         "created_at": result.created_at.isoformat(),
     }
@@ -306,11 +264,11 @@ def _failure_summary(failure: Failure) -> dict[str, JsonValue]:
         "severity": _value(failure.severity),
         "title": _bounded_text(failure.title),
         "description": _bounded_text(failure.description),
-        "evidence_artifact_ids": list(failure.evidence_artifact_ids),
+        "evidence_paths": list(failure.evidence_paths),
         "status": _value(failure.status),
         "created_by_worker_job_id": failure.created_by_worker_job_id,
         "resolved_by_worker_job_id": failure.resolved_by_worker_job_id,
-        "resolved_by_artifact_id": failure.resolved_by_artifact_id,
+        "resolved_by_path": failure.resolved_by_path,
         "created_at": failure.created_at.isoformat(),
         "resolved_at": (
             failure.resolved_at.isoformat() if failure.resolved_at is not None else None

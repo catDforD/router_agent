@@ -64,7 +64,7 @@ export function AgentCards({
   const statusByWorker = new Map(
     subagentStatus?.workers.map((worker) => [worker.worker_type, worker]) ?? [],
   );
-  const onlineCount =
+  const reachableCount =
     subagentStatus?.workers.filter((worker) => worker.online === true).length ?? 0;
 
   return (
@@ -72,7 +72,7 @@ export function AgentCards({
       <div className="dock-section-title">
         <span>Subagents</span>
         <span>
-          {subagentStatusLoading ? "checking" : `${onlineCount}/4 online`}
+          {subagentStatusLoading ? "checking" : `${reachableCount}/4 reachable`}
         </span>
       </div>
       {subagentStatusError ? (
@@ -135,7 +135,10 @@ function WorkerCard({
       <div className="worker-foot">
         <span className="mini-pill">
           <FileCheck2 size={13} />
-          {worker.artifactIds.length} artifacts
+          {worker.writtenPaths.length} written
+        </span>
+        <span className="mini-pill">
+          {worker.reportPaths.length} reports
         </span>
         {worker.failureIds.length ? (
           <span data-tone="bad" className="status-pill">
@@ -164,7 +167,9 @@ function remoteStatus(status: SubagentStatusWorker | undefined): {
     const latency = Number.isFinite(status.latency_ms)
       ? ` ${status.latency_ms}ms`
       : "";
-    return { label: `online${latency}`, tone: "ok", online: true };
+    const label =
+      status.probe_scope === "transport_reachability" ? "reachable" : "online";
+    return { label: `${label}${latency}`, tone: "ok", online: true };
   }
   if (status.status === "timeout") {
     return { label: "timeout", tone: "bad", online: false };

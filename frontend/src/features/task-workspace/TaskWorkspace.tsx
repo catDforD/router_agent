@@ -1,28 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Bot, Boxes } from "lucide-react";
+import { Activity, Bot, FolderTree } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { getTaskTrace } from "../../api/router/trace";
-import type { TaskTraceSummary } from "../../api/router/types";
+import type { TaskState, TaskTraceSummary } from "../../api/router/types";
 import { AgentCards } from "./AgentCards";
-import { ArtifactPanel } from "./ArtifactPanel";
 import { ChatPanel, type RailView } from "./ChatPanel";
 import { ExecutionTimeline } from "./ExecutionTimeline";
 import { SseConsole } from "./SseConsole";
 import { TraceView } from "./TraceView";
-import { useTaskArtifacts } from "./hooks/useTaskArtifacts";
+import { WorkspacePanel } from "./WorkspacePanel";
 import { useTaskEvents } from "./hooks/useTaskEvents";
 import { useSubagentStatus } from "./hooks/useSubagentStatus";
 import { readableError, useTaskState } from "./hooks/useTaskState";
 import {
   buildWorkerCards,
-  findFinalReportArtifact,
-  shouldRefreshArtifacts,
+  shouldRefreshWorkspace,
   shouldRefreshTask,
   shouldRefreshTrace,
 } from "./selectors";
 
-type DockTab = "overview" | "artifacts" | "trace";
+type DockTab = "overview" | "workspace" | "trace";
 
 export function TaskWorkspace() {
   const taskState = useTaskState();
@@ -35,7 +33,6 @@ export function TaskWorkspace() {
     eventReconnectSignal,
   );
   const subagentStatus = useSubagentStatus();
-  const artifactState = useTaskArtifacts(taskState.taskId);
   const [trace, setTrace] = useState<TaskTraceSummary | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | undefined>();
@@ -66,7 +63,6 @@ export function TaskWorkspace() {
 
   useEffect(() => {
     if (taskState.taskId) {
-      void artifactState.refreshArtifacts();
       void loadTrace();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -91,30 +87,11 @@ export function TaskWorkspace() {
     if (pendingEvents.some(shouldRefreshTask)) {
       void taskState.refreshTask();
     }
-    if (pendingEvents.some(shouldRefreshArtifacts)) {
-      void artifactState.refreshArtifacts();
-    }
-    if (pendingEvents.some(shouldRefreshTrace)) {
+    if (pendingEvents.some(shouldRefreshWorkspace) || pendingEvents.some(shouldRefreshTrace)) {
       void loadTrace();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventState.events]);
-
-  const finalReportArtifact = findFinalReportArtifact(
-    taskState.task,
-    artifactState.artifacts,
-    eventState.events,
-  );
-  const finalReportArtifactId = finalReportArtifact?.artifact_id;
-
-  useEffect(() => {
-    if (
-      finalReportArtifactId &&
-      artifactState.contentById[finalReportArtifactId] === undefined
-    ) {
-      void artifactState.loadContent(finalReportArtifactId).catch(() => undefined);
-    }
-  }, [finalReportArtifactId, artifactState]);
 
   const workerCards = useMemo(
     () => buildWorkerCards(taskState.task, eventState.events, trace),
@@ -125,7 +102,7 @@ export function TaskWorkspace() {
       .length ?? 0;
   const dockHeader = dockHeaderForTab({
     activeDockTab,
-    artifactCount: artifactState.artifacts.length,
+    workspaceCount: workspacePathCount(taskState.task, trace),
     eventCount: eventState.events.length,
     phase: taskState.task?.phase ?? "idle",
     subagentOnlineCount,
@@ -133,7 +110,6 @@ export function TaskWorkspace() {
 
   const refreshWorkspace = () => {
     void taskState.refreshTask();
-    void artifactState.refreshArtifacts();
     void loadTrace();
     void subagentStatus.refresh();
   };
@@ -229,10 +205,6 @@ export function TaskWorkspace() {
               )
             }
             onCancel={() => void taskState.cancelCurrentTask()}
-            onArtifactClick={(artifactId) => {
-              void artifactState.loadContent(artifactId).catch(() => undefined);
-              setActiveDockTab("artifacts");
-            }}
             draftMessage={draftMessage}
             focusSignal={composerFocusSignal}
             resetSignal={composerResetSignal}
@@ -256,11 +228,11 @@ export function TaskWorkspace() {
                 onClick={() => setActiveDockTab("overview")}
               />
               <DockTabButton
-                active={activeDockTab === "artifacts"}
-                icon={Boxes}
-                label="Artifacts"
-                count={artifactState.artifacts.length}
-                onClick={() => setActiveDockTab("artifacts")}
+                active={activeDockTab === "workspace"}
+                icon={FolderTree}
+                label="Workspace"
+                count={workspacePathCount(taskState.task, trace)}
+                onClick={() => setActiveDockTab("workspace")}
               />
               <DockTabButton
                 active={activeDockTab === "trace"}
@@ -279,36 +251,25 @@ export function TaskWorkspace() {
                   subagentStatusLoading={subagentStatus.loading}
                 />
               ) : null}
-              {activeDockTab === "artifacts" ? (
-                <ArtifactPanel
-                  artifacts={artifactState.artifacts}
-                  loading={artifactState.loading}
-                  error={artifactState.error}
-                  selectedArtifactId={artifactState.selectedArtifactId}
-                  selectedContent={artifactState.selectedContent}
-                  onSelect={(artifactId) => {
-                    void artifactState.loadContent(artifactId).catch(() => undefined);
-                  }}
+              {activeDockTab === "workspace" ? (
+                <WorkspacePanel
+                  task={taskState.task}
+                  trace={trace}
+                  loading={traceLoading}
+                  error={traceError}
+                  onRefresh={refreshWorkspace}
                 />
               ) : null}
               {activeDockTab === "trace" ? (
                 <>
                   <ExecutionTimeline
                     events={eventState.events}
-                    onArtifactClick={(artifactId) => {
-                      void artifactState.loadContent(artifactId).catch(() => undefined);
-                      setActiveDockTab("artifacts");
-                    }}
                   />
                   <TraceView
                     trace={trace}
                     loading={traceLoading}
                     error={traceError}
                     onRefresh={() => void loadTrace()}
-                    onArtifactClick={(artifactId) => {
-                      void artifactState.loadContent(artifactId).catch(() => undefined);
-                      setActiveDockTab("artifacts");
-                    }}
                   />
                 </>
               ) : null}
@@ -350,13 +311,13 @@ function DockTabButton({
 
 function dockHeaderForTab({
   activeDockTab,
-  artifactCount,
+  workspaceCount,
   eventCount,
   phase,
   subagentOnlineCount,
 }: {
   activeDockTab: DockTab;
-  artifactCount: number;
+  workspaceCount: number;
   eventCount: number;
   phase: string;
   subagentOnlineCount: number;
@@ -365,11 +326,11 @@ function dockHeaderForTab({
   subtitle: string;
   badge: string;
 } {
-  if (activeDockTab === "artifacts") {
+  if (activeDockTab === "workspace") {
     return {
-      title: "Artifacts",
-      subtitle: artifactCount ? "Generated task files" : "No generated files yet",
-      badge: `${artifactCount} artifacts`,
+      title: "Workspace",
+      subtitle: workspaceCount ? "Generated task files" : "No generated files yet",
+      badge: `${workspaceCount} paths`,
     };
   }
   if (activeDockTab === "trace") {
@@ -384,4 +345,37 @@ function dockHeaderForTab({
     subtitle: phase,
     badge: `${subagentOnlineCount}/4 online`,
   };
+}
+
+function workspacePathCount(
+  task: TaskState | null,
+  trace: TaskTraceSummary | null,
+): number {
+  const paths = new Set<string>();
+  for (const path of task?.current_files.all_paths ?? []) {
+    addWorkspacePath(paths, path);
+  }
+  for (const file of trace?.files ?? []) {
+    addWorkspacePath(paths, file.path);
+  }
+  for (const job of trace?.worker_jobs ?? []) {
+    job.input_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.read_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.written_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.report_paths.forEach((path) => addWorkspacePath(paths, path));
+  }
+  return paths.size;
+}
+
+function addWorkspacePath(paths: Set<string>, path: string): void {
+  if (!isSystemWorkspacePath(path)) {
+    paths.add(path);
+  }
+}
+
+function isSystemWorkspacePath(path: string): boolean {
+  return (
+    (path === ".router" || path.startsWith(".router/")) &&
+    !path.startsWith(".router/reports/")
+  );
 }

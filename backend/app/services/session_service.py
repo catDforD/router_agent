@@ -27,7 +27,7 @@ class AgentSessionConflictError(Exception):
 class AgentSessionCreateResult:
     session: AgentSession
     task: TaskState
-    raw_user_request_artifact_id: str
+    raw_user_request_path: str
 
 
 @dataclass(frozen=True)
@@ -41,12 +41,22 @@ class AgentSessionMessageResult:
 class AgentSessionService:
     """Coordinates session-level conversation operations."""
 
-    def __init__(self, session: Session, artifact_root: Path) -> None:
+    def __init__(
+        self,
+        session: Session,
+        artifact_root: Path,
+        session_workspace_root: Path | None = None,
+    ) -> None:
         self.session = session
         self.artifact_root = artifact_root
+        self.session_workspace_root = session_workspace_root
         self.session_repository = AgentSessionRepository(session)
         self.task_repository = TaskRepository(session)
-        self.task_service = TaskService(session=session, artifact_root=artifact_root)
+        self.task_service = TaskService(
+            session=session,
+            artifact_root=artifact_root,
+            session_workspace_root=session_workspace_root,
+        )
 
     def create_session(
         self,
@@ -64,7 +74,7 @@ class AgentSessionService:
         return AgentSessionCreateResult(
             session=agent_session,
             task=created.task,
-            raw_user_request_artifact_id=created.raw_user_request_artifact_id,
+            raw_user_request_path=created.raw_user_request_path,
         )
 
     def append_message(

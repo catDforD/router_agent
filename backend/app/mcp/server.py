@@ -34,49 +34,49 @@ def create_plc_worker_mcp_server(
     @mcp.tool(name="plc_dev.run", structured_output=True)
     def plc_dev_run(
         worker_input: dict[str, Any],
-        input_artifacts: list[dict[str, Any]] | None = None,
+        input_files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Simulate PLC development from a Router WorkerInput."""
 
         return worker_service.run_tool(
             "plc_dev.run",
-            _payload(worker_input, input_artifacts),
+            _payload(worker_input, input_files),
         )
 
     @mcp.tool(name="plc_test.run", structured_output=True)
     def plc_test_run(
         worker_input: dict[str, Any],
-        input_artifacts: list[dict[str, Any]] | None = None,
+        input_files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Simulate PLC testing from a Router WorkerInput."""
 
         return worker_service.run_tool(
             "plc_test.run",
-            _payload(worker_input, input_artifacts),
+            _payload(worker_input, input_files),
         )
 
     @mcp.tool(name="plc_formal.run", structured_output=True)
     def plc_formal_run(
         worker_input: dict[str, Any],
-        input_artifacts: list[dict[str, Any]] | None = None,
+        input_files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Simulate PLC formal verification from a Router WorkerInput."""
 
         return worker_service.run_tool(
             "plc_formal.run",
-            _payload(worker_input, input_artifacts),
+            _payload(worker_input, input_files),
         )
 
     @mcp.tool(name="plc_repair.run", structured_output=True)
     def plc_repair_run(
         worker_input: dict[str, Any],
-        input_artifacts: list[dict[str, Any]] | None = None,
+        input_files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Simulate PLC repair from a Router WorkerInput."""
 
         return worker_service.run_tool(
             "plc_repair.run",
-            _payload(worker_input, input_artifacts),
+            _payload(worker_input, input_files),
         )
 
     return mcp
@@ -90,11 +90,11 @@ def main() -> None:
 
 def _payload(
     worker_input: dict[str, Any],
-    input_artifacts: list[dict[str, Any]] | None,
+    input_files: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
         "worker_input": worker_input,
-        "input_artifacts": input_artifacts or [],
+        "input_files": input_files or [],
     }
 
 

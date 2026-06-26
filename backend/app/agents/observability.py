@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,9 +16,6 @@ from app.agents.output_schema import MainAgentEpisodeOutput
 from app.core.ids import new_event_id
 from app.core.time import utc_now
 from app.models.router_schema import (
-    ArtifactCreatorType,
-    ArtifactRef,
-    ArtifactType,
     ArtifactVisibility,
     DEFAULT_SCHEMA_VERSION,
     EventCorrelation,
@@ -29,9 +27,9 @@ from app.models.router_schema import (
     RouterEvent,
     TokenUsage,
 )
-from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 from app.services.final_report import build_final_report_payload
+from app.repositories.task_repo import TaskRepository
 
 
 MAX_RATIONALE_CHARS = 800
@@ -168,11 +166,11 @@ class MainAgentObservabilityRecorder:
         tool_name: str,
         arguments: dict[str, Any] | None = None,
         rationale_summary: str | None = None,
-        input_artifact_ids: list[str] | None = None,
+        input_paths: list[str] | None = None,
         turn_index: int | None = None,
     ) -> RouterEvent:
         index = turn_index or self._ensure_turn()
-        artifact_ids = _clean_string_list(input_artifact_ids)
+        paths = _clean_string_list(input_paths)
         payload = {
             "task_id": self.task_id,
             "turn_index": index,
@@ -182,7 +180,7 @@ class MainAgentObservabilityRecorder:
                 limit=MAX_RATIONALE_CHARS,
             ),
             "arguments": _sanitize_value(arguments or {}),
-            "input_artifact_ids": artifact_ids,
+            "input_paths": paths,
         }
         self._record_entry("tool_called", payload)
         return self._append_event(
@@ -190,7 +188,6 @@ class MainAgentObservabilityRecorder:
             title=f"Main Agent selected {tool_name}",
             message=payload["rationale_summary"] or f"Main Agent selected {tool_name}.",
             payload=payload,
-            artifact_ids=artifact_ids or None,
         )
 
     def record_tool_result(
@@ -202,7 +199,6 @@ class MainAgentObservabilityRecorder:
     ) -> RouterEvent:
         index = turn_index or self._ensure_turn()
         summary = _extract_result_summary(result)
-        artifact_ids = _extract_artifact_ids(result)
         failure_ids = _extract_failure_ids(result)
         payload = {
             "task_id": self.task_id,
@@ -210,8 +206,10 @@ class MainAgentObservabilityRecorder:
             "tool_name": tool_name,
             "status": _extract_result_field(result, "status"),
             "summary": summary,
-            "artifact_ids": artifact_ids,
             "failure_ids": failure_ids,
+            "read_paths": _extract_path_list(result, "read_paths"),
+            "written_paths": _extract_path_list(result, "written_paths"),
+            "report_paths": _extract_path_list(result, "report_paths"),
             "worker_job_id": _extract_result_field(result, "worker_job_id"),
             "worker_type": _extract_result_field(result, "worker_type"),
             "next_recommended_action": _extract_result_field(
@@ -226,7 +224,6 @@ class MainAgentObservabilityRecorder:
             title=f"Main Agent observed {tool_name} result",
             message=summary,
             payload=payload,
-            artifact_ids=artifact_ids or None,
             failure_ids=failure_ids or None,
         )
 
@@ -268,10 +265,7 @@ class MainAgentObservabilityRecorder:
             },
         )
 
-    def write_final_report(
-        self,
-        output: MainAgentEpisodeOutput,
-    ) -> ArtifactRef:
+    def write_final_report(self, output: MainAgentEpisodeOutput) -> str:
         created_at = utc_now()
         content = build_final_report_payload(
             session=self.session,
@@ -280,34 +274,9 @@ class MainAgentObservabilityRecorder:
             main_agent_run_id=self.main_agent_run_id,
             created_at=created_at,
         )
-        result = ArtifactStore(
-            session=self.session,
-            artifact_root=self.artifact_root,
-        ).write_artifact_content(
-            ArtifactContentWrite(
-                task_id=self.task_id,
-                artifact_type=ArtifactType.FINAL_REPORT,
-                version=1,
-                name="main_agent_final_report.json",
-                content=content,
-                summary=_bounded_text(output.summary, limit=MAX_SUMMARY_CHARS)
-                or "Main Agent final report.",
-                visibility=ArtifactVisibility.USER,
-                created_by={
-                    "type": ArtifactCreatorType.MAIN_AGENT,
-                    "id": self.main_agent_run_id,
-                    "main_agent_run_id": self.main_agent_run_id,
-                },
-                metadata={"tags": ["main_agent", "final_report"]},
-                mime_type="application/json",
-                created_at=created_at,
-            )
-        )
+        path = self._write_run_json("main_agent_final_report.json", content)
         self._checkpoint()
-        return ArtifactStore(
-            session=self.session,
-            artifact_root=self.artifact_root,
-        ).get_artifact_ref(result.artifact.artifact_id)
+        return path
 
     def write_replay_log(
         self,
@@ -315,7 +284,7 @@ class MainAgentObservabilityRecorder:
         final_output: MainAgentEpisodeOutput | None = None,
         error: dict[str, Any] | None = None,
         visibility: ArtifactVisibility | str = ArtifactVisibility.INTERNAL,
-    ) -> ArtifactRef:
+    ) -> str:
         content = {
             "kind": "main_agent_replay_log",
             "schema_version": DEFAULT_SCHEMA_VERSION,
@@ -327,49 +296,26 @@ class MainAgentObservabilityRecorder:
                 final_output.model_dump(mode="json") if final_output is not None else None
             ),
             "error": _sanitize_value(error) if error is not None else None,
+            "visibility": _enum_value(visibility),
         }
-        result = ArtifactStore(
-            session=self.session,
-            artifact_root=self.artifact_root,
-        ).write_artifact_content(
-            ArtifactContentWrite(
-                task_id=self.task_id,
-                artifact_type=ArtifactType.MAIN_AGENT_LOG,
-                version=1,
-                name="main_agent_replay_log.json",
-                content=content,
-                summary="Main Agent orchestration replay log.",
-                visibility=visibility,
-                created_by={
-                    "type": ArtifactCreatorType.MAIN_AGENT,
-                    "id": self.main_agent_run_id,
-                    "main_agent_run_id": self.main_agent_run_id,
-                },
-                metadata={"tags": ["main_agent", "replay_log"]},
-                mime_type="application/json",
-            )
-        )
+        path = self._write_run_json("main_agent_replay_log.json", content)
         self._checkpoint()
-        return ArtifactStore(
-            session=self.session,
-            artifact_root=self.artifact_root,
-        ).get_artifact_ref(result.artifact.artifact_id)
+        return path
 
     def record_completed(
         self,
         *,
         output: MainAgentEpisodeOutput,
-        final_report: ArtifactRef,
-        replay_log: ArtifactRef,
+        final_report: str,
+        replay_log: str,
     ) -> RouterEvent:
-        artifact_ids = [final_report.artifact_id, replay_log.artifact_id]
         payload = {
             "task_id": self.task_id,
             "main_agent_run_id": self.main_agent_run_id,
             "final_task_status": _enum_value(output.final_task_status),
             "summary": _bounded_text(output.summary, limit=MAX_SUMMARY_CHARS),
-            "final_report_artifact_id": final_report.artifact_id,
-            "main_agent_log_artifact_id": replay_log.artifact_id,
+            "final_report_path": final_report,
+            "main_agent_log_path": replay_log,
             "decision_count": len(output.decisions),
             "plan_step_count": len(output.plan),
             "next_recommended_action": _enum_value(output.next_recommended_action),
@@ -384,8 +330,45 @@ class MainAgentObservabilityRecorder:
             title="Main Agent completed",
             message=payload["summary"],
             payload=payload,
-            artifact_ids=artifact_ids,
+            artifact_ids=None,
         )
+
+    def _write_run_json(self, file_name: str, content: Any) -> str:
+        safe_name = Path(file_name).name or "run.json"
+        task = TaskRepository(self.session).get_task(self.task_id)
+        workspace_root = (
+            Path(task.workspace.root)
+            if task.workspace is not None
+            else self.artifact_root.parent / "workspaces" / self.task_id
+        )
+        run_dir = workspace_root / ".router" / "runs" / self.task_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / safe_name
+        path.write_text(
+            json.dumps(content, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        rel_path = path.relative_to(workspace_root).as_posix()
+        field_name = (
+            "final_report"
+            if safe_name == "main_agent_final_report.json"
+            else "main_agent_log"
+        )
+        current_paths = list(task.current_files.all_paths)
+        if rel_path not in current_paths:
+            current_paths.append(rel_path)
+        TaskRepository(self.session).update_task_state(
+            task.model_copy(
+                deep=True,
+                update={
+                    "current_files": task.current_files.model_copy(
+                        update={field_name: rel_path, "all_paths": current_paths}
+                    ),
+                    "updated_at": utc_now(),
+                },
+            )
+        )
+        return rel_path
 
     def _ensure_turn(self) -> int:
         if self.turn_index == 0:
@@ -483,13 +466,61 @@ def _extract_artifact_ids(result: Any) -> list[str]:
 
 def _extract_failure_ids(result: Any) -> list[str]:
     data = _result_to_dict(result)
+    status = str(data.get("status") or "").lower()
+    if status == "failed":
+        return _dedupe(
+            [
+                *_explicit_failure_ids(data),
+                *_failure_summary_ids(data),
+                *[
+                    failure_id
+                    for child in data.get("results") or []
+                    for failure_id in _extract_failure_ids(child)
+                ],
+            ]
+        )
+    return _dedupe(
+        [
+            *_explicit_failure_ids(data),
+            *[
+                failure_id
+                for child in data.get("results") or []
+                for failure_id in _extract_failure_ids(child)
+            ],
+        ]
+    )
+
+
+def _explicit_failure_ids(data: dict[str, Any]) -> list[str]:
+    failure_ids: list[str] = []
+    for source in (data, data.get("details")):
+        if not isinstance(source, dict):
+            continue
+        value = source.get("failure_ids")
+        if isinstance(value, list):
+            failure_ids.extend(str(item) for item in value if item)
+        elif value:
+            failure_ids.append(str(value))
+    return _dedupe(failure_ids)
+
+
+def _failure_summary_ids(data: dict[str, Any]) -> list[str]:
     failure_ids: list[str] = []
     for failure in data.get("failures") or []:
         if isinstance(failure, dict) and failure.get("failure_id"):
             failure_ids.append(str(failure["failure_id"]))
-    for child in data.get("results") or []:
-        failure_ids.extend(_extract_failure_ids(child))
     return _dedupe(failure_ids)
+
+
+def _extract_path_list(result: Any, field_name: str) -> list[str]:
+    data = _result_to_dict(result)
+    paths: list[str] = []
+    value = data.get(field_name)
+    if isinstance(value, list):
+        paths.extend(str(item) for item in value if item)
+    for child in data.get("results") or []:
+        paths.extend(_extract_path_list(child, field_name))
+    return _dedupe(paths)
 
 
 def _result_to_dict(result: Any) -> dict[str, Any]:

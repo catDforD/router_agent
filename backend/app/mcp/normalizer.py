@@ -199,7 +199,7 @@ def _error_worker_result(
     details: dict[str, Any] | None = None,
 ) -> WorkerResult:
     return WorkerResult(
-        schema_version="router.v1",
+        schema_version="router.v2",
         task_id=worker_input.task_id,
         worker_job_id=worker_input.worker_job_id,
         worker_type=worker_input.worker_type,
@@ -212,7 +212,9 @@ def _error_worker_result(
             reason=message,
         ),
         summary=message,
-        produced_artifacts=[],
+        read_paths=list(worker_input.input_paths),
+        written_paths=[],
+        report_paths=[],
         diagnostics=[],
         assumptions=[],
         failures=[],

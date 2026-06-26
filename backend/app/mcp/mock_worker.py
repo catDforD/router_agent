@@ -117,7 +117,7 @@ def run_mock_worker(
 
 
 def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     config = worker_input.worker_config
     language = _worker_target_language(worker_input, config)
     platform = worker_input.context.target_platform or "Codesys"
@@ -163,7 +163,7 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
                 name="requirements_ir_v1.json",
                 content=requirements,
                 summary="Mock requirements IR for PLC development.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "target_plc_language": language,
                     "target_platform": platform,
@@ -177,7 +177,7 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
                 name=code_name,
                 content=code,
                 summary=code_summary,
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "target_plc_language": language,
                     "target_platform": platform,
@@ -197,7 +197,7 @@ def _plc_dev(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput:
                 name="io_contract_v1.json",
                 content=io_contract,
                 summary="Mock I/O contract for generated PLC code.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "target_plc_language": language,
                     "target_platform": platform,
@@ -257,7 +257,7 @@ def _plc_test_passed(
     scenario: str,
     fuzz_method: str | None,
 ) -> MockWorkerOutput:
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     report = {
         "status": "passed",
         "total": 4,
@@ -286,7 +286,7 @@ def _plc_test_passed(
                 name="test_report.json",
                 content=report,
                 summary="Mock passing PLC test report.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "test_metadata": {
                         "total": 4,
@@ -332,7 +332,7 @@ def _plc_test_failed(
     fuzz_method: str | None,
 ) -> MockWorkerOutput:
     now = utc_now()
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     report_version = _report_version(worker_input, ArtifactType.TEST_REPORT)
     report = {
         "status": "failed",
@@ -358,7 +358,7 @@ def _plc_test_failed(
         name="test_report_failed.json",
         content=report,
         summary="Mock failing PLC test report.",
-        parent_artifact_ids=parent_ids,
+        parent_artifact_ids=parent_paths,
         metadata={
             "test_metadata": {
                 "total": 4,
@@ -377,7 +377,7 @@ def _plc_test_failed(
         name="failing_trace.json",
         content=trace,
         summary="Mock failing trace for emergency stop behavior.",
-        parent_artifact_ids=parent_ids,
+        parent_artifact_ids=parent_paths,
         metadata={"tags": ["mock", "test", "failing_trace"]},
         mime_type="application/json",
     )
@@ -390,7 +390,6 @@ def _plc_test_failed(
         expected="MotorRun is false when EmergencyStop is true.",
         actual="MotorRun remained true.",
         reproduction=FailureReproduction(steps=["Run emergency_stop_forces_motor_off."]),
-        evidence_artifact_ids=[],
         status=FailureStatus.OPEN,
         created_by_worker_job_id=worker_input.worker_job_id,
         created_at=now,
@@ -468,7 +467,7 @@ def _plc_formal_passed(
     properties: Any,
     natural_language_requirements: str | None,
 ) -> MockWorkerOutput:
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     report = {
         "status": "passed",
         "properties": [
@@ -499,7 +498,7 @@ def _plc_formal_passed(
                 name="formal_report.json",
                 content=report,
                 summary="Mock passing formal verification report.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "formal_metadata": {
                         "total_properties": 3,
@@ -545,7 +544,7 @@ def _plc_formal_failed(
     natural_language_requirements: str | None,
 ) -> MockWorkerOutput:
     now = utc_now()
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     report_version = _report_version(worker_input, ArtifactType.FORMAL_REPORT)
     report = {
         "status": "failed",
@@ -576,7 +575,6 @@ def _plc_formal_failed(
         reproduction=FailureReproduction(
             steps=["Replay the mock counterexample trace."]
         ),
-        evidence_artifact_ids=[],
         status=FailureStatus.OPEN,
         created_by_worker_job_id=worker_input.worker_job_id,
         created_at=now,
@@ -596,7 +594,7 @@ def _plc_formal_failed(
                 name="formal_report_failed.json",
                 content=report,
                 summary="Mock failing formal verification report.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "formal_metadata": {
                         "total_properties": 3,
@@ -614,7 +612,7 @@ def _plc_formal_failed(
                 name="counterexample.json",
                 content=counterexample,
                 summary="Mock counterexample for emergency stop property.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={"tags": ["mock", "formal", "counterexample"]},
                 mime_type="application/json",
             ),
@@ -654,7 +652,7 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
     repair_targets = _worker_repair_targets(config)
     compiler_type = _worker_compiler_type(config)
     repair_failure_notes = config.repair_failure_notes if config is not None else None
-    parent_ids = _input_artifact_ids(worker_input)
+    parent_paths = _input_paths(worker_input)
     patch = (
         "--- plc_code_v1.st\n"
         "+++ plc_code_v2.st\n"
@@ -683,7 +681,7 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
     )
     summary = {
         "repair_round": repair_round,
-        "from_code_artifact_id": code_ref.artifact_id if code_ref else None,
+        "from_code_path": code_ref.artifact_id if code_ref else None,
         "to_code_version": next_version,
         "repair_source": repair_source,
         "repair_targets": repair_targets,
@@ -709,10 +707,10 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
                 name=f"patch_v{repair_round}.diff",
                 content=patch,
                 summary="Mock patch for PLC safety failure.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "patch_metadata": {
-                        "from_code_artifact_id": code_ref.artifact_id if code_ref else None,
+                        "from_code_path": code_ref.artifact_id if code_ref else None,
                         "changed_files": 1,
                         "changed_lines": 2,
                         "repair_round": repair_round,
@@ -727,7 +725,7 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
                 name=f"plc_code_v{next_version}.st",
                 content=patched_code,
                 summary=f"Mock patched PLC code v{next_version}.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={
                     "target_plc_language": worker_input.context.target_plc_language,
                     "target_platform": worker_input.context.target_platform,
@@ -747,7 +745,7 @@ def _plc_repair(worker_input: WorkerInput, *, scenario: str) -> MockWorkerOutput
                 name=f"repair_summary_v{repair_round}.json",
                 content=summary,
                 summary="Mock repair summary.",
-                parent_artifact_ids=parent_ids,
+                parent_artifact_ids=parent_paths,
                 metadata={"tags": ["mock", "repair", "summary"]},
                 mime_type="application/json",
             ),
@@ -831,9 +829,9 @@ def _report_version(worker_input: WorkerInput, artifact_type: ArtifactType) -> i
             return max(1, code_ref.version)
 
     same_type_versions = [
-        artifact.version
-        for artifact in worker_input.input_artifacts
-        if _value(artifact.type) == artifact_type.value
+        _path_version(path)
+        for path in worker_input.input_paths
+        if _path_artifact_type(path) == artifact_type
     ]
     return max(same_type_versions, default=0) + 1
 
@@ -842,14 +840,46 @@ def _artifact_ref(
     worker_input: WorkerInput,
     artifact_type: ArtifactType,
 ) -> ArtifactRef | None:
-    for artifact in worker_input.input_artifacts:
-        if _value(artifact.type) == artifact_type.value:
-            return artifact
+    for path in worker_input.input_paths:
+        if _path_artifact_type(path) == artifact_type:
+            return ArtifactRef(
+                artifact_id=path,
+                type=artifact_type,
+                version=_path_version(path),
+                uri=f"workspace://{path}",
+                summary=f"Workspace file {path}",
+            )
     return None
 
 
-def _input_artifact_ids(worker_input: WorkerInput) -> tuple[str, ...]:
-    return tuple(artifact.artifact_id for artifact in worker_input.input_artifacts)
+def _input_paths(worker_input: WorkerInput) -> tuple[str, ...]:
+    return tuple(worker_input.input_paths)
+
+
+def _path_artifact_type(path: str) -> ArtifactType:
+    lower = path.lower()
+    if lower.endswith((".st", ".scl", ".fbd", ".xml")) and "io_contract" not in lower:
+        return ArtifactType.PLC_CODE
+    if "requirements" in lower:
+        return ArtifactType.REQUIREMENTS_IR
+    if "test_report" in lower:
+        return ArtifactType.TEST_REPORT
+    if "failing_trace" in lower:
+        return ArtifactType.FAILING_TRACE
+    if "formal_report" in lower:
+        return ArtifactType.FORMAL_REPORT
+    if "counterexample" in lower:
+        return ArtifactType.COUNTEREXAMPLE
+    if lower.endswith((".diff", ".patch")) or "patch" in lower:
+        return ArtifactType.PATCH
+    return ArtifactType.MISC
+
+
+def _path_version(path: str) -> int:
+    import re
+
+    matches = re.findall(r"(?:_v|/v)(\d+)", path.lower())
+    return max((int(value) for value in matches), default=1)
 
 
 def _worker_target_language(

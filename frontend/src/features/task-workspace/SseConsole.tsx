@@ -2,7 +2,6 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUp,
-  Box,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -41,7 +40,6 @@ interface SseConsoleProps {
   onRefresh: () => void;
   onToggleTrace: () => void;
   onCancel: () => void;
-  onArtifactClick: (artifactId: string) => void;
   onNewTask: () => void;
   draftMessage?: string;
   focusSignal: number;
@@ -74,7 +72,7 @@ interface TranscriptRunView {
   processItems: ProcessTranscriptItem[];
   finalAnswer?: AgentTranscriptItem;
   terminalStatus?: StatusTranscriptItem;
-  finalReportArtifactId?: string;
+  finalReportPath?: string;
   tokenUsage?: TokenUsage;
   isTerminal: boolean;
   latestSeq: number;
@@ -99,7 +97,7 @@ interface AgentTranscriptItem extends BaseTranscriptItem {
   kind: "agent";
   content: string;
   label?: string;
-  finalReportArtifactId?: string;
+  finalReportPath?: string;
   tokenUsage?: TokenUsage;
 }
 
@@ -117,7 +115,10 @@ interface ToolTranscriptItem extends BaseTranscriptItem {
   status: "running" | "applied" | "rejected" | "failed" | "no-op" | "observed";
   rationale?: string;
   summary?: string;
-  artifactIds: string[];
+  inputPaths: string[];
+  readPaths: string[];
+  writtenPaths: string[];
+  reportPaths: string[];
   failureIds: string[];
   workerJobId?: string;
   workerType?: string;
@@ -151,7 +152,6 @@ export function SseConsole({
   onRefresh,
   onToggleTrace,
   onCancel,
-  onArtifactClick,
   onNewTask,
   draftMessage,
   focusSignal,
@@ -380,16 +380,12 @@ export function SseConsole({
               return (
                 <div className="transcript-run" key={run.id}>
                   {run.userMessage ? (
-                    <TranscriptRow
-                      item={run.userMessage}
-                      onArtifactClick={onArtifactClick}
-                    />
+                    <TranscriptRow item={run.userMessage} />
                   ) : null}
                   {run.processItems.length ? (
                     <ExecutionProcessPanel
                       elapsedLabel={formatElapsed(run.createdAt, run.latestAt)}
                       items={run.processItems}
-                      onArtifactClick={onArtifactClick}
                       onToggle={() => {
                         setProcessTouchedByRun((current) => ({
                           ...current,
@@ -498,10 +494,8 @@ export function SseConsole({
 
 function TranscriptRow({
   item,
-  onArtifactClick,
 }: {
   item: TranscriptItem;
-  onArtifactClick: (artifactId: string) => void;
 }) {
   if (item.kind === "user") {
     return (
@@ -587,22 +581,42 @@ function TranscriptRow({
             {item.workerJobId ? (
               <span className="mini-pill">{shortId(item.workerJobId)}</span>
             ) : null}
-            {item.artifactIds.map((artifactId) => (
-              <button
-                className="artifact-chip"
-                key={artifactId}
-                type="button"
-                onClick={() => onArtifactClick(artifactId)}
-              >
-                <Box size={13} />
-                {shortId(artifactId)}
-              </button>
-            ))}
-            {item.failureIds.map((failureId) => (
-              <span data-tone="bad" className="status-pill" key={failureId}>
-                {shortId(failureId)}
+            {item.inputPaths.map((path) => (
+              <span className="file-chip" key={`input:${path}`}>
+                <FileText size={13} />
+                input {truncateMiddle(path, 48)}
               </span>
             ))}
+            {item.readPaths.map((path) => (
+              <span className="file-chip" key={`read:${path}`}>
+                <FileText size={13} />
+                read {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.writtenPaths.map((path) => (
+              <span className="file-chip" key={`written:${path}`}>
+                <FileText size={13} />
+                wrote {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.reportPaths.map((path) => (
+              <span className="file-chip" key={`report:${path}`}>
+                <FileText size={13} />
+                report {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.failureIds.map((failureId) => {
+              const tone = failureChipTone(item);
+              return (
+                <span
+                  data-tone={tone}
+                  className={tone ? "status-pill" : "mini-pill"}
+                  key={failureId}
+                >
+                  related {shortId(failureId)}
+                </span>
+              );
+            })}
           </div>
           {item.argumentsPayload || item.details ? (
             <details className="payload-details compact-payload">
@@ -639,13 +653,11 @@ function TranscriptRow({
 function ExecutionProcessPanel({
   elapsedLabel,
   items,
-  onArtifactClick,
   onToggle,
   open,
 }: {
   elapsedLabel: string;
   items: ProcessTranscriptItem[];
-  onArtifactClick: (artifactId: string) => void;
   onToggle: () => void;
   open: boolean;
 }) {
@@ -668,7 +680,6 @@ function ExecutionProcessPanel({
             <TranscriptRow
               item={item}
               key={item.id}
-              onArtifactClick={onArtifactClick}
             />
           ))}
         </div>
@@ -708,12 +719,12 @@ function buildTranscriptView(
       const userMessage = runItems.find(
         (item): item is UserTranscriptItem => item.kind === "user",
       );
-      const finalReportArtifactId = latestFinalReportArtifactId(runEvents);
+      const finalReportPath = latestFinalReportPath(runEvents);
       const tokenUsage = latestCompletedTokenUsage(runEvents);
       const finalAnswer = pickFinalAnswer(
         runItems,
         runEvents,
-        finalReportArtifactId,
+        finalReportPath,
         tokenUsage,
       );
       const isTerminal = isTerminalRun(task, runEvents, runId);
@@ -759,7 +770,7 @@ function buildTranscriptView(
         processItems,
         finalAnswer,
         terminalStatus,
-        finalReportArtifactId,
+        finalReportPath,
         tokenUsage,
         isTerminal,
         latestSeq,
@@ -811,9 +822,10 @@ function eventRunId(event: RouterEvent): string {
 function pickFinalAnswer(
   items: TranscriptItem[],
   events: RouterEvent[],
-  finalReportArtifactId?: string,
+  finalReportPath?: string,
   tokenUsage?: TokenUsage,
 ): AgentTranscriptItem | undefined {
+  void items;
   const finalResponseEvent = [...events]
     .reverse()
     .find((event) => event.type === "agent.final_response");
@@ -828,23 +840,8 @@ function pickFinalAnswer(
       createdAt: finalResponseEvent.created_at,
       label: payloadString(finalResponseEvent, "final_status"),
       content: finalResponse,
-      finalReportArtifactId,
+      finalReportPath,
       tokenUsage,
-    };
-  }
-
-  const latestAgentMessage = [...items]
-    .reverse()
-    .find(
-      (item): item is AgentTranscriptItem =>
-        item.kind === "agent" && !item.label && Boolean(item.content),
-    );
-  if (latestAgentMessage) {
-    return {
-      ...latestAgentMessage,
-      finalReportArtifactId:
-        finalReportArtifactId ?? latestAgentMessage.finalReportArtifactId,
-      tokenUsage: tokenUsage ?? latestAgentMessage.tokenUsage,
     };
   }
 
@@ -862,7 +859,7 @@ function pickFinalAnswer(
       createdAt: completedEvent.created_at,
       label: payloadString(completedEvent, "final_task_status") ?? "completed",
       content: completedSummary,
-      finalReportArtifactId,
+      finalReportPath,
       tokenUsage,
     };
   }
@@ -881,7 +878,7 @@ function pickFinalAnswer(
       createdAt: terminalEvent.created_at,
       label: terminalEvent.title,
       content: terminalSummary,
-      finalReportArtifactId,
+      finalReportPath,
       tokenUsage,
     };
   }
@@ -975,7 +972,10 @@ function buildTranscript(
         turnIndex,
         status: "running",
         rationale: payloadString(event, "rationale_summary") ?? event.message ?? undefined,
-        artifactIds: payloadStringArray(event.payload.input_artifact_ids),
+        inputPaths: payloadStringArray(event.payload.input_paths),
+        readPaths: [],
+        writtenPaths: [],
+        reportPaths: [],
         failureIds: [],
         parameterChips: toolParameterPreview(toolName, event.payload.arguments),
         argumentsPayload: event.payload.arguments,
@@ -992,7 +992,9 @@ function buildTranscript(
       const key = toolKey(toolName, turnIndex);
       const matched = (pendingTools.get(key) ?? []).find((item) => !item.resultSeq);
       const status = normalizeToolStatus(payloadString(event, "status"));
-      const artifactIds = payloadStringArray(event.payload.artifact_ids);
+      const readPaths = payloadStringArray(event.payload.read_paths);
+      const writtenPaths = payloadStringArray(event.payload.written_paths);
+      const reportPaths = payloadStringArray(event.payload.report_paths);
       const failureIds = payloadStringArray(event.payload.failure_ids);
 
       if (matched) {
@@ -1000,7 +1002,9 @@ function buildTranscript(
         matched.resultSeq = event.seq;
         matched.resultCreatedAt = event.created_at;
         matched.summary = payloadString(event, "summary") ?? event.message ?? undefined;
-        matched.artifactIds = unique([...matched.artifactIds, ...artifactIds]);
+        matched.readPaths = unique([...matched.readPaths, ...readPaths]);
+        matched.writtenPaths = unique([...matched.writtenPaths, ...writtenPaths]);
+        matched.reportPaths = unique([...matched.reportPaths, ...reportPaths]);
         matched.failureIds = unique([...matched.failureIds, ...failureIds]);
         matched.workerJobId = payloadString(event, "worker_job_id");
         matched.workerType = payloadString(event, "worker_type");
@@ -1030,7 +1034,10 @@ function buildTranscript(
           turnIndex,
           status,
           summary: payloadString(event, "summary") ?? event.message ?? undefined,
-          artifactIds,
+          inputPaths: [],
+          readPaths,
+          writtenPaths,
+          reportPaths,
           failureIds,
           workerJobId: payloadString(event, "worker_job_id"),
           workerType: payloadString(event, "worker_type"),
@@ -1053,7 +1060,7 @@ function buildTranscript(
         createdAt: event.created_at,
         label: payloadString(event, "final_task_status") ?? "completed",
         content: payloadString(event, "summary") ?? event.message ?? "Main Agent completed.",
-        finalReportArtifactId: payloadString(event, "final_report_artifact_id"),
+        finalReportPath: payloadString(event, "final_report_path"),
         tokenUsage: tokenUsageFromPayload(event.payload.token_usage),
       });
       continue;
@@ -1086,12 +1093,12 @@ function buildTranscript(
   return items.sort((left, right) => left.seq - right.seq);
 }
 
-function latestFinalReportArtifactId(events: RouterEvent[]): string | undefined {
+function latestFinalReportPath(events: RouterEvent[]): string | undefined {
   const completedEvent = [...events]
     .reverse()
     .find((event) => event.type === "agent.completed");
   return completedEvent
-    ? payloadString(completedEvent, "final_report_artifact_id")
+    ? payloadString(completedEvent, "final_report_path")
     : undefined;
 }
 
@@ -1177,10 +1184,6 @@ function toolParameterPreview(toolName: string, value: unknown): string[] {
     addString("cwd");
   } else if (toolName === "call_mcp_tool") {
     addString("tool_name", "tool");
-  } else if (toolName === "read_artifact") {
-    addString("artifact_id", "artifact");
-  } else if (toolName === "write_artifact") {
-    addString("name");
   } else if (toolName === "git_status") {
     addString("cwd");
   }
@@ -1242,6 +1245,22 @@ function formatTokenUsage(usage: TokenUsage | undefined): string | undefined {
   ].join(" · ");
 }
 
+function failureChipTone(item: ToolTranscriptItem): "bad" | undefined {
+  if (item.status === "failed") {
+    return "bad";
+  }
+  const details = item.details;
+  if (
+    details &&
+    typeof details === "object" &&
+    "blocking" in details &&
+    (details as { blocking?: unknown }).blocking === true
+  ) {
+    return "bad";
+  }
+  return undefined;
+}
+
 function formatTokenCount(value: number | undefined): string {
   return value === undefined
     ? "-"
@@ -1299,13 +1318,11 @@ function toolTitle(toolName: string): string {
     apply_patch: "应用补丁",
     exec_command: "执行命令",
     git_status: "Git 状态",
-    write_artifact: "写入 Artifact",
     call_mcp_tool: "调用 MCP 工具",
     call_plc_dev: "调用 plc-dev",
     call_plc_test: "调用 plc-test",
     call_plc_formal: "调用 plc-formal",
     call_plc_repair: "调用 plc-repair",
-    read_artifact: "读取 Artifact",
   };
   return labels[toolName] ?? toolName;
 }
@@ -1321,8 +1338,6 @@ function toolIcon(toolName: string, status: ToolTranscriptItem["status"]) {
     return <CheckCircle2 size={15} />;
   }
   if (
-    toolName === "write_artifact" ||
-    toolName === "read_artifact" ||
     toolName === "read_file" ||
     toolName === "write_file" ||
     toolName === "apply_patch"

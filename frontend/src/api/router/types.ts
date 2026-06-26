@@ -8,6 +8,7 @@ export type {
   ArtifactVisibility,
   ClarificationQuestion,
   CurrentArtifacts,
+  CurrentFiles,
   EventCorrelation,
   EventSeverity,
   EventType,
@@ -49,11 +50,13 @@ export interface SubagentStatusWorker {
   latency_ms?: number | null;
   status_code?: number | null;
   error?: string | null;
+  probe_scope?: string | null;
 }
 
 export interface SubagentStatusProbe {
   method: string;
   path: string;
+  scope?: string;
   status: string;
   online?: boolean | null;
   latency_ms?: number | null;
@@ -110,7 +113,7 @@ export interface AppendSessionMessageResponse {
 
 export interface AppendUserMessageResponse {
   task: TaskState;
-  message_artifact_id: string;
+  message_path: string;
 }
 
 export interface ArtifactListResponse {
@@ -143,27 +146,6 @@ export interface TraceEventSummary {
   created_at: string;
 }
 
-export interface TraceArtifactSummary {
-  artifact_id: string;
-  type: string;
-  version: number;
-  status: string;
-  visibility: string;
-  uri: string;
-  content_hash?: string | null;
-  size_bytes?: number | null;
-  summary: string;
-  parent_artifact_ids: string[];
-  derived_from_worker_job_id?: string | null;
-  derived_from_artifact_ids?: string[] | null;
-  created_by_type: string;
-  created_by_id?: string | null;
-  created_by_worker_job_id?: string | null;
-  created_by_main_agent_run_id?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface TraceWorkerJobSummary {
   worker_job_id: string;
   worker_type: string;
@@ -172,8 +154,10 @@ export interface TraceWorkerJobSummary {
   openai_trace_id?: string | null;
   main_agent_run_id?: string | null;
   mcp_request_id?: string | null;
-  input_artifact_ids: string[];
-  produced_artifact_ids: string[];
+  input_paths: string[];
+  read_paths: string[];
+  written_paths: string[];
+  report_paths: string[];
   failure_ids: string[];
   execution_status?: string | null;
   outcome_status?: string | null;
@@ -189,7 +173,7 @@ export interface TraceGateResultSummary {
   gate_type: string;
   status: string;
   blocking: boolean;
-  evidence_artifact_ids: string[];
+  evidence_paths: string[];
   created_at: string;
 }
 
@@ -203,8 +187,15 @@ export interface TraceMainAgentRunSummary {
   completed_seq?: number | null;
   completed_at?: string | null;
   error_event_ids: string[];
-  final_report_artifact_id?: string | null;
-  replay_log_artifact_id?: string | null;
+  final_report_path?: string | null;
+  replay_log_path?: string | null;
+}
+
+export interface TraceFileSummary {
+  path: string;
+  exists?: boolean | null;
+  size_bytes?: number | null;
+  mime_type?: string | null;
 }
 
 export interface TaskTraceSummary {
@@ -216,7 +207,7 @@ export interface TaskTraceSummary {
   terminal_event_type?: string | null;
   main_agent_runs: TraceMainAgentRunSummary[];
   worker_jobs: TraceWorkerJobSummary[];
-  artifacts: TraceArtifactSummary[];
+  files: TraceFileSummary[];
   gate_results: TraceGateResultSummary[];
   events: TraceEventSummary[];
 }

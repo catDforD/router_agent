@@ -28,15 +28,10 @@ from app.agents.output_schema import MainAgentEpisodeOutput
 from app.core.config import Settings, get_settings
 from app.core.database import get_session_factory
 from app.core.errors import RepositoryNotFoundError
-from app.core.ids import new_artifact_id, new_event_id, prefixed_id
+from app.core.ids import new_event_id, prefixed_id
 from app.core.time import utc_now
 from app.models.db_models import TaskRow
 from app.models.router_schema import (
-    Artifact,
-    ArtifactCreator,
-    ArtifactCreatorType,
-    ArtifactType,
-    ArtifactVisibility,
     ClarificationQuestion,
     ClarificationStatus,
     DEFAULT_SCHEMA_VERSION,
@@ -52,9 +47,7 @@ from app.models.router_schema import (
     TaskStatus,
 )
 from app.repositories._helpers import enum_value
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
-from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 
 
@@ -266,7 +259,7 @@ class RuntimeService:
     def answer_followup_message(
         self,
         task_id: str,
-        message_artifact_id: str,
+        message_path: str,
     ) -> RuntimeRunResult:
         """Append an explanatory answer for a user follow-up in the same task."""
 
@@ -280,16 +273,12 @@ class RuntimeService:
                     reason="task_not_found",
                 )
 
-            user_message = _read_user_message_from_artifact(
-                session=session,
-                artifact_root=self.artifact_root,
-                artifact_id=message_artifact_id,
-            )
+            user_message = _read_user_message_from_workspace(task, message_path)
             if user_message is None:
                 return RuntimeRunResult(
                     task_id=task_id,
                     status="skipped",
-                    reason="message_artifact_not_found",
+                    reason="message_path_not_found",
                 )
 
             now = utc_now()
@@ -310,12 +299,12 @@ class RuntimeService:
                     message="Main Agent is answering a user follow-up.",
                     openai_trace_id=openai_trace_id,
                     main_agent_run_id=main_agent_run_id,
-                    artifact_ids=[message_artifact_id],
+                    artifact_ids=None,
                     payload={
                         "task_id": task_id,
                         "main_agent_run_id": main_agent_run_id,
                         "mode": "followup",
-                        "message_artifact_id": message_artifact_id,
+                        "message_path": message_path,
                     },
                     created_at=now,
                 )
@@ -328,46 +317,22 @@ class RuntimeService:
                     task=task,
                     user_message=user_message,
                 )
-                answer_artifact = ArtifactStore(
-                    session=session,
-                    artifact_root=self.artifact_root,
-                ).write_artifact_content(
-                    ArtifactContentWrite(
-                        task_id=task_id,
-                        artifact_type=ArtifactType.MISC,
-                        version=1,
-                        name="followup_answer.md",
-                        content=answer,
-                        summary="Main Agent follow-up answer.",
-                        visibility=ArtifactVisibility.USER,
-                        created_by=ArtifactCreator(
-                            type=ArtifactCreatorType.MAIN_AGENT,
-                            id=main_agent_run_id,
-                        ),
-                        metadata={"tags": [FOLLOWUP_ANSWER_TAG]},
-                        parent_artifact_ids=(message_artifact_id,),
-                        artifact_id=new_artifact_id(),
-                        created_at=utc_now(),
-                        mime_type="text/markdown",
-                    )
-                ).artifact
+                answer_path = _write_followup_answer(task, answer, main_agent_run_id)
                 latest_task = TaskRepository(session).get_task(task_id)
-                all_artifact_ids = list(latest_task.current_artifacts.all_artifact_ids)
-                if answer_artifact.artifact_id not in all_artifact_ids:
-                    all_artifact_ids.append(answer_artifact.artifact_id)
-                    TaskRepository(session).update_task_state(
-                        latest_task.model_copy(
-                            deep=True,
-                            update={
-                                "current_artifacts": (
-                                    latest_task.current_artifacts.model_copy(
-                                        update={"all_artifact_ids": all_artifact_ids}
-                                    )
-                                ),
-                                "updated_at": answer_artifact.updated_at,
-                            },
-                        )
+                all_paths = list(latest_task.current_files.all_paths)
+                if answer_path not in all_paths:
+                    all_paths.append(answer_path)
+                TaskRepository(session).update_task_state(
+                    latest_task.model_copy(
+                        deep=True,
+                        update={
+                            "current_files": latest_task.current_files.model_copy(
+                                update={"all_paths": all_paths}
+                            ),
+                            "updated_at": utc_now(),
+                        },
                     )
+                )
                 EventService(session).append_event(
                     build_main_agent_event(
                         task_id=task_id,
@@ -376,16 +341,13 @@ class RuntimeService:
                         message=answer,
                         openai_trace_id=openai_trace_id,
                         main_agent_run_id=main_agent_run_id,
-                        artifact_ids=[
-                            message_artifact_id,
-                            answer_artifact.artifact_id,
-                        ],
+                        artifact_ids=None,
                         payload={
                             "task_id": task_id,
                             "mode": "followup",
                             "content": answer,
-                            "message_artifact_id": message_artifact_id,
-                            "answer_artifact_id": answer_artifact.artifact_id,
+                            "message_path": message_path,
+                            "answer_path": answer_path,
                         },
                         created_at=utc_now(),
                     )
@@ -735,14 +697,14 @@ def run_runtime_resume_task(task_id: str, settings: Settings | None = None) -> N
 
 def run_runtime_followup_task(
     task_id: str,
-    message_artifact_id: str,
+    message_path: str,
     settings: Settings | None = None,
 ) -> None:
     """BackgroundTasks entrypoint for answering a same-task follow-up."""
 
     RuntimeService(settings=settings).answer_followup_message(
         task_id,
-        message_artifact_id,
+        message_path,
     )
 
 
@@ -752,46 +714,35 @@ def latest_user_message_answer_context(
     artifact_root: Path,
     task_id: str,
 ) -> str | None:
-    """Return compact answer context from the latest user message artifact."""
+    """Return compact answer context from the latest user message workspace file."""
 
-    artifact = _latest_user_message_artifact(session, task_id)
-    if artifact is None:
+    _ = artifact_root
+    task = TaskRepository(session).get_task(task_id)
+    message_path = _latest_user_message_path(task)
+    if message_path is None:
         return None
 
-    stored = ArtifactStore(session=session, artifact_root=artifact_root).read_artifact_content(
-        artifact.artifact_id
-    )
-    try:
-        payload = json.loads(stored.content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        message = stored.artifact.summary
-    else:
-        message = str(payload.get("message") or stored.artifact.summary)
+    message = _read_user_message_from_workspace(task, message_path)
+    if message is None:
+        return None
 
     compact = " ".join(message.split())
     if len(compact) > ANSWER_MAX_CHARS:
         compact = f"{compact[: ANSWER_MAX_CHARS - 3]}..."
-    return f"{compact}\n\nSource artifact: {artifact.artifact_id}"
+    return f"{compact}\n\nSource file: {message_path}"
 
 
-def _read_user_message_from_artifact(
-    *,
-    session: Session,
-    artifact_root: Path,
-    artifact_id: str,
-) -> str | None:
+def _read_user_message_from_workspace(task: TaskState, message_path: str) -> str | None:
     try:
-        stored = ArtifactStore(
-            session=session,
-            artifact_root=artifact_root,
-        ).read_artifact_content(artifact_id)
+        target = _workspace_path(task, message_path)
+        raw = target.read_text(encoding="utf-8")
     except Exception:
         return None
 
     try:
-        payload = json.loads(stored.content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        message = stored.content.decode("utf-8", errors="replace")
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        message = raw
     else:
         message = str(payload.get("message") or "")
     return " ".join(message.split()) or None
@@ -830,21 +781,14 @@ def _read_final_report_text(
     artifact_root: Path,
     task: TaskState,
 ) -> str | None:
-    final_report = task.current_artifacts.final_report
-    if final_report is None:
+    _ = (session, artifact_root)
+    final_report_path = task.current_files.final_report
+    if final_report_path is None:
         return None
     try:
-        stored = ArtifactStore(
-            session=session,
-            artifact_root=artifact_root,
-        ).read_artifact_content(final_report.artifact_id)
+        return _workspace_path(task, final_report_path).read_text(encoding="utf-8")
     except Exception:
-        return final_report.summary
-
-    try:
-        return stored.content.decode("utf-8")
-    except UnicodeDecodeError:
-        return final_report.summary
+        return None
 
 
 def _followup_prompt(
@@ -927,20 +871,36 @@ def _get_locked_task(session: Session, task_id: str) -> TaskState:
     return TaskState.model_validate(row.state_json)
 
 
-def _latest_user_message_artifact(session: Session, task_id: str) -> Artifact | None:
-    artifacts = ArtifactRepository(session).list_task_artifacts(task_id)
-    user_messages = [
-        artifact
-        for artifact in artifacts
-        if _artifact_has_tag(artifact, USER_MESSAGE_TAG)
+def _latest_user_message_path(task: TaskState) -> str | None:
+    candidates = [
+        path
+        for path in task.current_files.all_paths
+        if path.startswith(".router/requests/") and path.endswith("_user_message.json")
     ]
-    if not user_messages:
-        return None
-    return max(user_messages, key=lambda artifact: artifact.created_at)
+    return candidates[-1] if candidates else None
 
 
-def _artifact_has_tag(artifact: Artifact, tag: str) -> bool:
-    return tag in set(artifact.metadata.tags or [])
+def _workspace_path(task: TaskState, path: str) -> Path:
+    if task.workspace is None:
+        raise RuntimeError("task workspace is required")
+    root = Path(task.workspace.root).resolve()
+    target = (root / path).resolve(strict=False)
+    target.relative_to(root)
+    return target
+
+
+def _write_followup_answer(
+    task: TaskState,
+    answer: str,
+    main_agent_run_id: str,
+) -> str:
+    target = _workspace_path(
+        task,
+        f".router/runs/{task.task_id}/{main_agent_run_id}_followup_answer.md",
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(answer, encoding="utf-8")
+    return target.relative_to(Path(task.workspace.root).resolve()).as_posix()
 
 
 def _runtime_metadata(task: TaskState) -> dict[str, Any]:

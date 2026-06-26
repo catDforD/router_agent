@@ -7,7 +7,6 @@ interface TraceViewProps {
   loading: boolean;
   error?: string;
   onRefresh: () => void;
-  onArtifactClick: (artifactId: string) => void;
 }
 
 export function TraceView({
@@ -15,7 +14,6 @@ export function TraceView({
   loading,
   error,
   onRefresh,
-  onArtifactClick,
 }: TraceViewProps) {
   return (
     <section className="stack">
@@ -47,7 +45,7 @@ export function TraceView({
               <div className="trace-row" key={run.main_agent_run_id}>
                 <strong>{run.main_agent_run_id}</strong>
                 <span className="small muted">
-                  final report {run.final_report_artifact_id ?? "none"}
+                  final report {run.final_report_path ?? "none"}
                 </span>
               </div>
             ))}
@@ -60,15 +58,15 @@ export function TraceView({
                 </strong>
                 <span className="small muted">{job.worker_job_id}</span>
                 <div className="inline-list">
-                  {job.produced_artifact_ids.map((artifactId) => (
-                    <button
-                      className="mini-pill"
-                      key={artifactId}
-                      type="button"
-                      onClick={() => onArtifactClick(artifactId)}
-                    >
-                      {artifactId}
-                    </button>
+                  {[
+                    ...job.input_paths,
+                    ...job.read_paths,
+                    ...job.written_paths,
+                    ...job.report_paths,
+                  ].map((path) => (
+                    <span className="mini-pill" key={path}>
+                      {path}
+                    </span>
                   ))}
                 </div>
               </div>

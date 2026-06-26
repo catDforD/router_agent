@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.artifacts import router as artifacts_router
 from app.api.events import router as events_router
 from app.api.health import router as health_router
 from app.api.sessions import router as sessions_router
@@ -32,7 +31,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(subagents_router)
     app.include_router(sessions_router)
     app.include_router(tasks_router)
-    app.include_router(artifacts_router)
     app.include_router(events_router)
     return app
 
