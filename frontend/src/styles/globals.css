@@ -501,6 +501,7 @@ select:focus {
 .status-pill,
 .mini-pill,
 .artifact-chip,
+.usage-chip,
 .event-type,
 .artifact-type,
 .gate-pill,
@@ -671,17 +672,6 @@ select:focus {
   flex: 0 0 auto;
 }
 
-.process-header-meta {
-  display: flex;
-  min-width: 0;
-  margin-left: auto;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  color: #9aa3ad;
-  font-size: 0.74rem;
-}
-
 .process-items {
   display: grid;
   gap: 11px;
@@ -697,7 +687,7 @@ select:focus {
   min-width: 0;
 }
 
-.final-answer .artifact-chip {
+.final-answer .usage-chip {
   margin-top: 9px;
 }
 
@@ -1117,6 +1107,15 @@ select:focus {
 .artifact-chip {
   border-color: #d8e1ea;
   background: #f7fafc;
+}
+
+.usage-chip {
+  border-color: rgb(38 144 255 / 18%);
+  background: rgb(38 144 255 / 7%);
+  color: #24679f;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 button.tiny-link {
@@ -1580,11 +1579,6 @@ button.artifact-chip {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
-  }
-
-  .process-header-meta {
-    margin-left: 0;
-    justify-content: flex-start;
   }
 
   .event-rail,

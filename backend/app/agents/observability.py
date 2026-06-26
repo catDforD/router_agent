@@ -27,6 +27,7 @@ from app.models.router_schema import (
     EventType,
     EventVisibility,
     RouterEvent,
+    TokenUsage,
 )
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
@@ -51,6 +52,7 @@ class MainAgentObservabilityRecorder:
     checkpoint: Callable[[], None] | None = None
     entries: list[dict[str, Any]] = field(default_factory=list)
     turn_index: int = 0
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
 
     def start_turn(self, *, phase: str = "orchestration") -> int:
         self.turn_index += 1
@@ -250,6 +252,22 @@ class MainAgentObservabilityRecorder:
             severity=EventSeverity.ERROR,
         )
 
+    def add_token_usage(self, usage: TokenUsage | None) -> None:
+        if usage is None or not _has_token_usage(usage):
+            return
+        self.token_usage = _merge_token_usage(self.token_usage, usage)
+        self._record_entry(
+            "token_usage",
+            {
+                "task_id": self.task_id,
+                "main_agent_run_id": self.main_agent_run_id,
+                "turn_index": self.turn_index or None,
+                "token_usage_delta": _token_usage_payload(usage),
+                "token_usage_total": _token_usage_payload(self.token_usage),
+                "token_usage_scope": "main_agent",
+            },
+        )
+
     def write_final_report(
         self,
         output: MainAgentEpisodeOutput,
@@ -356,6 +374,10 @@ class MainAgentObservabilityRecorder:
             "plan_step_count": len(output.plan),
             "next_recommended_action": _enum_value(output.next_recommended_action),
         }
+        token_usage = _token_usage_payload(self.token_usage)
+        if token_usage:
+            payload["token_usage"] = token_usage
+            payload["token_usage_scope"] = "main_agent"
         self._record_entry("completed", payload)
         return self._append_event(
             event_type=EventType.MAIN_AGENT_COMPLETED,
@@ -542,6 +564,68 @@ def _enum_value(value: Any) -> Any:
     return value
 
 
+def _has_token_usage(usage: TokenUsage) -> bool:
+    return (
+        usage.input_tokens is not None
+        or usage.output_tokens is not None
+        or usage.total_tokens is not None
+    )
+
+
+def _merge_token_usage(current: TokenUsage, delta: TokenUsage) -> TokenUsage:
+    input_tokens = _sum_optional(current.input_tokens, delta.input_tokens)
+    output_tokens = _sum_optional(current.output_tokens, delta.output_tokens)
+    total_tokens = _sum_optional(
+        _effective_total_tokens(current),
+        _effective_total_tokens(delta),
+    )
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _effective_total_tokens(usage: TokenUsage) -> int | None:
+    if usage.total_tokens is not None:
+        return usage.total_tokens
+    parts = [
+        value
+        for value in (usage.input_tokens, usage.output_tokens)
+        if value is not None
+    ]
+    return sum(parts) if parts else None
+
+
+def _sum_optional(left: int | None, right: int | None) -> int | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _token_usage_payload(usage: TokenUsage) -> dict[str, int]:
+    payload = usage.model_dump(mode="json", exclude_none=True)
+    return {
+        key: value
+        for key, value in payload.items()
+        if isinstance(value, int)
+    }
+
+
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
+    if lowered in {
+        "token_usage",
+        "token_usage_delta",
+        "token_usage_total",
+        "token_usage_scope",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+    }:
+        return False
     return any(token in lowered for token in ("key", "token", "secret", "password"))

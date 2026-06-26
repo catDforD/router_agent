@@ -332,9 +332,22 @@ task.succeeded
 | `agent.plan_updated` | `task_id`、`plan` | 更新计划面板；也可作为时间线事件 |
 | `agent.tool_called` | `task_id`、`turn_index`、`tool_name`、`rationale_summary`、`arguments`、`input_artifact_ids` | 展示“正在调用某工具/worker”；参数已清洗但仍建议做折叠展示 |
 | `agent.tool_result` | `task_id`、`turn_index`、`tool_name`、`status`、`summary`、`artifact_ids`、`failure_ids`、`worker_job_id`、`worker_type`、`next_recommended_action` | 更新步骤状态；`status=failed` 或 `rejected` 不一定是任务失败，Main Agent 可能会在下一轮修正 |
-| `agent.completed` | `task_id`、`main_agent_run_id`、`final_task_status`、`summary`、`final_report_artifact_id`、`main_agent_log_artifact_id` | 读取最终报告；注意终态任务事件可能紧随其后才到达 |
+| `agent.completed` | `task_id`、`main_agent_run_id`、`final_task_status`、`summary`、`final_report_artifact_id`、`main_agent_log_artifact_id`、`token_usage`、`token_usage_scope` | 读取最终报告；`token_usage` 仅统计本次 Main Agent provider 调用，不包含 worker/MCP token；注意终态任务事件可能紧随其后才到达 |
 
 Runtime finalization 写入的 `final_report` 和 `main_agent_log` 不要求额外产生 `artifact.created` 事件。前端应优先从 `agent.completed.payload.final_report_artifact_id` 或刷新后的 Artifact 列表中发现最终报告。
+
+`agent.completed.payload.token_usage` 为可选字段，provider 未返回 usage 时不会出现。存在时形如：
+
+```json
+{
+  "token_usage": {
+    "input_tokens": 123,
+    "output_tokens": 45,
+    "total_tokens": 168
+  },
+  "token_usage_scope": "main_agent"
+}
+```
 
 Main Agent 工具名是后端实现细节，但当前前端可用于展示的常见值包括：
 
@@ -396,6 +409,7 @@ source.addEventListener("agent.completed", (message) => {
   const event = JSON.parse(message.data);
   lastSeq = Number(message.lastEventId || event.seq);
   queueFinalReportFetch(event.payload.final_report_artifact_id);
+  renderTokenUsage(event.payload.token_usage);
 });
 
 source.addEventListener("worker.started", (message) => {
