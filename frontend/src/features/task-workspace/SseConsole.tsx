@@ -20,6 +20,7 @@ import type {
   ProjectContext,
   RouterEvent,
   TaskState,
+  TokenUsage,
 } from "../../api/router/types";
 import type { StreamState } from "../../api/router/events";
 import { MarkdownText } from "./MarkdownText";
@@ -68,6 +69,7 @@ interface TranscriptRunView {
   finalAnswer?: AgentTranscriptItem;
   terminalStatus?: StatusTranscriptItem;
   finalReportArtifactId?: string;
+  tokenUsage?: TokenUsage;
   isTerminal: boolean;
   latestSeq: number;
   createdAt?: string;
@@ -92,6 +94,7 @@ interface AgentTranscriptItem extends BaseTranscriptItem {
   content: string;
   label?: string;
   finalReportArtifactId?: string;
+  tokenUsage?: TokenUsage;
 }
 
 interface PlanTranscriptItem extends BaseTranscriptItem {
@@ -158,6 +161,7 @@ export function SseConsole({
     0,
   );
   const latestRun = transcriptView.runs.at(-1);
+  const latestTokenUsageLabel = formatTokenUsage(latestRun?.tokenUsage);
   const latestEventAt =
     latestRun?.latestAt ?? events.at(-1)?.created_at ?? task?.updated_at ?? task?.created_at;
   const elapsedLabel = formatElapsed(latestRun?.createdAt ?? task?.created_at, latestEventAt);
@@ -211,6 +215,12 @@ export function SseConsole({
             <span>SSE {streamState}</span>
             <span aria-hidden="true">·</span>
             <span>seq {latestSeq}</span>
+            {latestTokenUsageLabel ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{latestTokenUsageLabel}</span>
+              </>
+            ) : null}
             {task?.task_id ? (
               <>
                 <span aria-hidden="true">·</span>
@@ -295,7 +305,6 @@ export function SseConsole({
                     <ExecutionProcessPanel
                       elapsedLabel={formatElapsed(run.createdAt, run.latestAt)}
                       items={run.processItems}
-                      latestSeq={run.latestSeq}
                       onArtifactClick={onArtifactClick}
                       onToggle={() => {
                         setProcessTouchedByRun((current) => ({
@@ -312,14 +321,11 @@ export function SseConsole({
                         }));
                       }}
                       open={processOpen}
-                      streamState={streamState}
-                      terminalStatus={run.terminalStatus}
                     />
                   ) : null}
                   {run.finalAnswer ? (
                     <FinalAnswer
                       item={run.finalAnswer}
-                      onArtifactClick={onArtifactClick}
                     />
                   ) : null}
                 </div>
@@ -329,16 +335,6 @@ export function SseConsole({
           </div>
         ) : null}
 
-        {events.length ? (
-          <details className="raw-stream-details">
-            <summary>Raw SSE events · {events.length}</summary>
-            <div className="raw-event-list">
-              {events.slice(-16).map((event) => (
-                <EventPayload event={event} key={event.event_id} />
-              ))}
-            </div>
-          </details>
-        ) : null}
       </div>
 
       {openQuestions.length ? (
@@ -407,16 +403,6 @@ function TranscriptRow({
         <div className="message-body">
           {item.label ? <span className="message-label">{item.label}</span> : null}
           <MarkdownText content={item.content} variant="message" />
-          {item.finalReportArtifactId ? (
-            <button
-              className="artifact-chip"
-              type="button"
-              onClick={() => onArtifactClick(item.finalReportArtifactId!)}
-            >
-              <FileText size={13} />
-              final_report
-            </button>
-          ) : null}
         </div>
       </article>
     );
@@ -534,24 +520,16 @@ function TranscriptRow({
 function ExecutionProcessPanel({
   elapsedLabel,
   items,
-  latestSeq,
   onArtifactClick,
   onToggle,
   open,
-  streamState,
-  terminalStatus,
 }: {
   elapsedLabel: string;
   items: ProcessTranscriptItem[];
-  latestSeq: number;
   onArtifactClick: (artifactId: string) => void;
   onToggle: () => void;
   open: boolean;
-  streamState: StreamState;
-  terminalStatus?: StatusTranscriptItem;
 }) {
-  const statusLabel = terminalStatus?.title ?? `SSE ${streamState}`;
-
   return (
     <section className="execution-process" data-open={open}>
       <button
@@ -563,11 +541,6 @@ function ExecutionProcessPanel({
         <span className="process-header-main">
           <span>{elapsedLabel}</span>
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </span>
-        <span className="process-header-meta">
-          <span>{statusLabel}</span>
-          <span>seq {latestSeq}</span>
-          <span>{items.length} events</span>
         </span>
       </button>
       {open ? (
@@ -587,39 +560,20 @@ function ExecutionProcessPanel({
 
 function FinalAnswer({
   item,
-  onArtifactClick,
 }: {
   item: AgentTranscriptItem;
-  onArtifactClick: (artifactId: string) => void;
 }) {
+  const tokenUsageLabel = formatTokenUsage(item.tokenUsage);
   return (
     <article className="final-answer">
       <div className="final-answer-body">
         {item.label ? <span className="message-label">{item.label}</span> : null}
         <MarkdownText content={item.content} variant="message" />
-        {item.finalReportArtifactId ? (
-          <button
-            className="artifact-chip"
-            type="button"
-            onClick={() => onArtifactClick(item.finalReportArtifactId!)}
-          >
-            <FileText size={13} />
-            final_report
-          </button>
+        {tokenUsageLabel ? (
+          <span className="usage-chip">{tokenUsageLabel}</span>
         ) : null}
       </div>
     </article>
-  );
-}
-
-function EventPayload({ event }: { event: RouterEvent }) {
-  return (
-    <details className="payload-details raw-payload">
-      <summary>
-        #{event.seq} · {event.type}
-      </summary>
-      <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-    </details>
   );
 }
 
@@ -637,7 +591,13 @@ function buildTranscriptView(
         (item): item is UserTranscriptItem => item.kind === "user",
       );
       const finalReportArtifactId = latestFinalReportArtifactId(runEvents);
-      const finalAnswer = pickFinalAnswer(runItems, runEvents, finalReportArtifactId);
+      const tokenUsage = latestCompletedTokenUsage(runEvents);
+      const finalAnswer = pickFinalAnswer(
+        runItems,
+        runEvents,
+        finalReportArtifactId,
+        tokenUsage,
+      );
       const isTerminal = isTerminalRun(task, runEvents, runId);
       const terminalStatus = isTerminal
         ? [...runItems]
@@ -682,6 +642,7 @@ function buildTranscriptView(
         finalAnswer,
         terminalStatus,
         finalReportArtifactId,
+        tokenUsage,
         isTerminal,
         latestSeq,
         createdAt,
@@ -733,6 +694,7 @@ function pickFinalAnswer(
   items: TranscriptItem[],
   events: RouterEvent[],
   finalReportArtifactId?: string,
+  tokenUsage?: TokenUsage,
 ): AgentTranscriptItem | undefined {
   const finalResponseEvent = [...events]
     .reverse()
@@ -749,6 +711,7 @@ function pickFinalAnswer(
       label: payloadString(finalResponseEvent, "final_status"),
       content: finalResponse,
       finalReportArtifactId,
+      tokenUsage,
     };
   }
 
@@ -763,6 +726,7 @@ function pickFinalAnswer(
       ...latestAgentMessage,
       finalReportArtifactId:
         finalReportArtifactId ?? latestAgentMessage.finalReportArtifactId,
+      tokenUsage: tokenUsage ?? latestAgentMessage.tokenUsage,
     };
   }
 
@@ -781,6 +745,7 @@ function pickFinalAnswer(
       label: payloadString(completedEvent, "final_task_status") ?? "completed",
       content: completedSummary,
       finalReportArtifactId,
+      tokenUsage,
     };
   }
 
@@ -799,6 +764,7 @@ function pickFinalAnswer(
       label: terminalEvent.title,
       content: terminalSummary,
       finalReportArtifactId,
+      tokenUsage,
     };
   }
 
@@ -970,6 +936,7 @@ function buildTranscript(
         label: payloadString(event, "final_task_status") ?? "completed",
         content: payloadString(event, "summary") ?? event.message ?? "Main Agent completed.",
         finalReportArtifactId: payloadString(event, "final_report_artifact_id"),
+        tokenUsage: tokenUsageFromPayload(event.payload.token_usage),
       });
       continue;
     }
@@ -1007,6 +974,15 @@ function latestFinalReportArtifactId(events: RouterEvent[]): string | undefined 
     .find((event) => event.type === "agent.completed");
   return completedEvent
     ? payloadString(completedEvent, "final_report_artifact_id")
+    : undefined;
+}
+
+function latestCompletedTokenUsage(events: RouterEvent[]): TokenUsage | undefined {
+  const completedEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "agent.completed");
+  return completedEvent
+    ? tokenUsageFromPayload(completedEvent.payload.token_usage)
     : undefined;
 }
 
@@ -1101,6 +1077,73 @@ function payloadString(event: RouterEvent, key: string): string | undefined {
 function payloadNumber(event: RouterEvent, key: string): number | undefined {
   const value = event.payload[key];
   return typeof value === "number" ? value : undefined;
+}
+
+function tokenUsageFromPayload(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = tokenCount(record.input_tokens);
+  const outputTokens = tokenCount(record.output_tokens);
+  const totalTokens = tokenCount(record.total_tokens);
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens:
+      totalTokens ?? sumTokenParts(inputTokens, outputTokens),
+  };
+}
+
+function formatTokenUsage(usage: TokenUsage | undefined): string | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const inputTokens = tokenCount(usage.input_tokens);
+  const outputTokens = tokenCount(usage.output_tokens);
+  const totalTokens =
+    tokenCount(usage.total_tokens) ?? sumTokenParts(inputTokens, outputTokens);
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return [
+    `input_tokens ${formatTokenCount(inputTokens)}`,
+    `output_tokens ${formatTokenCount(outputTokens)}`,
+    `total_tokens ${formatTokenCount(totalTokens)}`,
+  ].join(" · ");
+}
+
+function formatTokenCount(value: number | undefined): string {
+  return value === undefined
+    ? "-"
+    : new Intl.NumberFormat("en-US").format(value);
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function sumTokenParts(
+  inputTokens: number | undefined,
+  outputTokens: number | undefined,
+): number | undefined {
+  const parts = [inputTokens, outputTokens].filter(
+    (value): value is number => value !== undefined,
+  );
+  return parts.length ? parts.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {

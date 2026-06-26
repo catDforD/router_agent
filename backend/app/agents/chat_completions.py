@@ -69,6 +69,8 @@ class OpenAICompatibleChatClient:
             "tool_choice": "auto",
             "stream": bool(stream),
         }
+        if stream:
+            request["stream_options"] = {"include_usage": True}
         self.captured_requests.append(request)
 
         try:

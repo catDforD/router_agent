@@ -13,7 +13,7 @@ from app.agents.output_schema import (
     MainAgentGateSummary,
 )
 from app.models.db_models import ArtifactRow, Base, EventRow
-from app.models.router_schema import TaskState
+from app.models.router_schema import TaskState, TokenUsage
 from app.repositories.task_repo import TaskRepository
 from app.services.artifact_store import ArtifactStore
 
@@ -167,6 +167,10 @@ def test_recorder_writes_report_log_and_completed_event(
     )
 
     observed.start_turn()
+    observed.add_token_usage(
+        TokenUsage(input_tokens=20, output_tokens=5, total_tokens=25)
+    )
+    observed.add_token_usage(TokenUsage(input_tokens=10, output_tokens=3))
     final_report = observed.write_final_report(output)
     replay_log = observed.write_replay_log(final_output=output)
     completed = observed.record_completed(
@@ -191,6 +195,12 @@ def test_recorder_writes_report_log_and_completed_event(
         "succeeded"
     )
     assert completed.type == "agent.completed"
+    assert completed.payload["token_usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 8,
+        "total_tokens": 38,
+    }
+    assert completed.payload["token_usage_scope"] == "main_agent"
     assert completed.correlation.artifact_ids == [
         final_report.artifact_id,
         replay_log.artifact_id,

@@ -19,6 +19,7 @@ export type {
   TaskPhase,
   TaskState,
   TaskStatus,
+  TokenUsage,
   WorkerJobRef,
   WorkerType,
 } from "../../../../schema/ts/router_contract";

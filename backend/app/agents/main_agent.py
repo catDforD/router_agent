@@ -65,6 +65,7 @@ from app.models.router_schema import (
     TaskStatus,
     TaskTrace,
     TaskType,
+    TokenUsage,
     WorkspaceContext,
 )
 from app.repositories.task_repo import TaskRepository
@@ -194,6 +195,7 @@ class _ChatToolCall:
 class _AssistantTurn:
     content: str | None
     tool_calls: list[_ChatToolCall]
+    token_usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,8 @@ class OpenAICompatibleToolLoopRunner:
                 model=model,
                 recorder=recorder,
             )
+            if recorder is not None:
+                recorder.add_token_usage(assistant_turn.token_usage)
             assistant_message = _assistant_message_for_history(assistant_turn)
             messages.append(assistant_message)
 
@@ -1490,7 +1494,8 @@ def _episode_summary_from_tool_result(result: AgentToolResult) -> str:
 
 def _assistant_turn_from_response(response: Any) -> _AssistantTurn:
     if _has_choices(response):
-        return _assistant_turn_from_message(_first_choice_message(response))
+        turn = _assistant_turn_from_message(_first_choice_message(response))
+        return replace(turn, token_usage=_token_usage_from_response(response))
     return _assistant_turn_from_stream(response)
 
 
@@ -1507,7 +1512,11 @@ def _assistant_turn_from_message(message: Any) -> _AssistantTurn:
 def _assistant_turn_from_stream(chunks: Any) -> _AssistantTurn:
     content_parts: list[str] = []
     tool_call_parts: dict[int, dict[str, str]] = {}
+    token_usage: TokenUsage | None = None
     for chunk in chunks:
+        chunk_usage = _token_usage_from_response(chunk)
+        if chunk_usage is not None:
+            token_usage = chunk_usage
         if not _has_choices(chunk):
             continue
         choice = _first_choice(chunk)
@@ -1545,6 +1554,7 @@ def _assistant_turn_from_stream(chunks: Any) -> _AssistantTurn:
             )
             for _, part in sorted(tool_call_parts.items())
         ],
+        token_usage=token_usage,
     )
 
 
@@ -1595,6 +1605,63 @@ def _content_to_text(content: Any) -> str | None:
                     parts.append(str(text))
         return "".join(parts).strip() or None
     return str(content).strip() or None
+
+
+def _token_usage_from_response(response: Any) -> TokenUsage | None:
+    usage = _get_value(response, "usage")
+    if usage is None:
+        return None
+
+    input_tokens = _first_token_count(
+        usage,
+        "input_tokens",
+        "prompt_tokens",
+    )
+    output_tokens = _first_token_count(
+        usage,
+        "output_tokens",
+        "completion_tokens",
+    )
+    total_tokens = _first_token_count(usage, "total_tokens")
+    if total_tokens is None:
+        parts = [
+            value
+            for value in (input_tokens, output_tokens)
+            if value is not None
+        ]
+        total_tokens = sum(parts) if parts else None
+
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+    ):
+        return None
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _first_token_count(usage: Any, *field_names: str) -> int | None:
+    for field_name in field_names:
+        count = _token_count_value(_get_value(usage, field_name))
+        if count is not None:
+            return count
+    return None
+
+
+def _token_count_value(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def build_main_agent_event(

@@ -609,14 +609,16 @@ export interface Diagnostic {
   related_requirement_ids?: string[];
 }
 
+export interface TokenUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+}
+
 export interface WorkerMetrics {
   duration_ms?: number | null;
 
-  token_usage?: {
-    input_tokens?: number | null;
-    output_tokens?: number | null;
-    total_tokens?: number | null;
-  } | null;
+  token_usage?: TokenUsage | null;
 
   test_metrics?: {
     total?: number | null;
@@ -968,6 +970,23 @@ export interface RouterEvent {
   payload: Record<string, JsonValue>;
 
   created_at: ISODateTime;
+}
+
+export interface MainAgentCompletedPayload {
+  task_id: string;
+  main_agent_run_id?: string | null;
+  final_task_status: string;
+  summary?: string | null;
+  final_report_artifact_id?: string | null;
+  main_agent_log_artifact_id?: string | null;
+  decision_count?: number | null;
+  plan_step_count?: number | null;
+  next_recommended_action?: string | null;
+  /**
+   * Main Agent provider token usage for this answer only. Worker/MCP usage is not included.
+   */
+  token_usage?: TokenUsage | null;
+  token_usage_scope?: "main_agent" | null;
 }
 
 /**

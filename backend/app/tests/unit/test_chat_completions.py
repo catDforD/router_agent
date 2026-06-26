@@ -48,7 +48,35 @@ def test_openai_compatible_client_constructs_tool_request_without_response_forma
     assert created_requests[0]["tools"][0]["function"]["name"] == "update_plan"
     assert created_requests[0]["tool_choice"] == "auto"
     assert created_requests[0]["stream"] is False
+    assert "stream_options" not in created_requests[0]
     assert "response_format" not in created_requests[0]
+
+
+def test_openai_compatible_client_requests_stream_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_requests: list[dict[str, Any]] = []
+
+    class FakeCompletions:
+        def create(self, **request: Any) -> list[dict[str, Any]]:
+            created_requests.append(request)
+            return []
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.chat = FakeChat()
+
+    monkeypatch.setattr("app.agents.chat_completions.OpenAI", FakeOpenAI)
+    client = OpenAICompatibleChatClient(api_key="main-agent-key", base_url=None)
+
+    client.complete(model="provider-model", messages=[], tools=[], stream=True)
+
+    assert created_requests[0]["stream"] is True
+    assert created_requests[0]["stream_options"] == {"include_usage": True}
 
 
 def test_openai_compatible_client_requires_main_agent_or_openai_key() -> None:

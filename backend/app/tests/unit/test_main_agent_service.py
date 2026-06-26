@@ -214,8 +214,9 @@ def chat_response(
     *,
     content: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    response = {
         "choices": [
             {
                 "message": {
@@ -226,12 +227,16 @@ def chat_response(
             }
         ]
     }
+    if usage is not None:
+        response["usage"] = usage
+    return response
 
 
 def streamed_chat_chunks(
     *,
     content: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     delta: dict[str, Any] = {}
     if content is not None:
@@ -248,7 +253,10 @@ def streamed_chat_chunks(
             }
             for index, call in enumerate(tool_calls)
         ]
-    return [{"choices": [{"delta": delta}]}]
+    chunks = [{"choices": [{"delta": delta}]}]
+    if usage is not None:
+        chunks.append({"choices": [], "usage": usage})
+    return chunks
 
 
 def tool_call(name: str, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
@@ -607,6 +615,11 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
         [
             chat_response(
                 content="I will inspect the workspace first.",
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 3,
+                    "total_tokens": 13,
+                },
                 tool_calls=[
                     tool_call(
                         "list_files",
@@ -620,6 +633,11 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
             ),
             chat_response(
                 content="I will write a small deliverable.",
+                usage={
+                    "input_tokens": 20,
+                    "output_tokens": 4,
+                    "total_tokens": 24,
+                },
                 tool_calls=[
                     tool_call(
                         "write_file",
@@ -635,6 +653,10 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
             ),
             chat_response(
                 content="Created `notes/result.txt` with the requested deliverable.",
+                usage={
+                    "prompt_tokens": 30,
+                    "completion_tokens": 5,
+                },
             ),
         ]
     )
@@ -670,6 +692,7 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     final_response = next(
         event for event in events if event.type == "agent.final_response"
     )
+    completed = next(event for event in events if event.type == "agent.completed")
     assert progress_messages == [
         "I will inspect the workspace first.",
         "I will write a small deliverable.",
@@ -677,6 +700,12 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     assert final_response.payload["content"] == (
         "Created `notes/result.txt` with the requested deliverable."
     )
+    assert completed.payload["token_usage"] == {
+        "input_tokens": 60,
+        "output_tokens": 12,
+        "total_tokens": 72,
+    }
+    assert completed.payload["token_usage_scope"] == "main_agent"
     assert row_count(db_session, WorkerJobRow) == 0
     assert chat_client.requests[0]["model"] == "fake-main-agent"
     assert chat_client.requests[0]["messages"][0]["role"] == "system"
@@ -730,6 +759,11 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
             ),
             streamed_chat_chunks(
                 content="Workspace inspected. No files were present.",
+                usage={
+                    "prompt_tokens": 21,
+                    "completion_tokens": 7,
+                    "total_tokens": 28,
+                },
             ),
         ]
     )
@@ -746,10 +780,17 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
     output = service.run_episode(task_id)
     events = EventService(db_session).list_visible_events(task_id)
     message_event = next(event for event in events if event.type == "agent.message")
+    completed = next(event for event in events if event.type == "agent.completed")
 
     assert output.final_task_status == "succeeded"
     assert chat_client.requests[0]["stream"] is True
     assert message_event.payload["content"] == "I will inspect the workspace."
+    assert completed.payload["token_usage"] == {
+        "input_tokens": 21,
+        "output_tokens": 7,
+        "total_tokens": 28,
+    }
+    assert completed.payload["token_usage_scope"] == "main_agent"
     assert "agent.final_response" in [event.type for event in events]
     assert "agent.completed" in [event.type for event in events]
 
@@ -778,11 +819,15 @@ def test_tool_loop_runner_finalizes_from_content_only_stop(
 
     output = service.run_episode(task_id)
     task = persisted_task(db_session, task_id)
+    events = EventService(db_session).list_visible_events(task_id)
     types = event_types(db_session, task_id)
+    completed = next(event for event in events if event.type == "agent.completed")
 
     assert output.final_task_status == "succeeded"
     assert task.status == "succeeded"
     assert task.current_artifacts.final_report is not None
+    assert "token_usage" not in completed.payload
+    assert "token_usage_scope" not in completed.payload
     assert types.index("agent.final_response") < types.index("agent.completed")
     assert types.index("agent.completed") < types.index("task.succeeded")
     assert "finish_task" not in [
