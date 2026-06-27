@@ -106,6 +106,9 @@ from app.workers.worker_result_handler import handle_worker_result
 DEFAULT_READ_ARTIFACT_MAX_CHARS = 12_000
 DEFAULT_AGENT_TOOL_OUTPUT_MAX_CHARS = 12_000
 DEFAULT_AGENT_COMMAND_TIMEOUT_SECONDS = 120
+DEFAULT_REPORT_PREVIEW_CHARS = 1_200
+REPORT_ERROR_TEXT_MAX_CHARS = 500
+READ_FILE_MODES = {"auto", "summary", "full"}
 CheckpointCallback = Callable[[], None]
 TERMINAL_EVENT_BY_STATUS = {
     TaskStatus.SUCCEEDED.value: EventType.TASK_SUCCEEDED,
@@ -386,13 +389,20 @@ class AgentToolService:
         *,
         path: str,
         max_chars: int | None = None,
+        mode: str = "auto",
     ) -> AgentToolResult:
         tool_name = "read_file"
+        normalized_mode = (mode or "auto").lower()
         self._record_tool_call(
             tool_name=tool_name,
             task_id=task_id,
             rationale_summary=f"Read workspace file {path}.",
-            arguments={"task_id": task_id, "path": path, "max_chars": max_chars},
+            arguments={
+                "task_id": task_id,
+                "path": path,
+                "max_chars": max_chars,
+                "mode": normalized_mode,
+            },
         )
         rejected = self._require_execution_mode(
             tool_name,
@@ -402,6 +412,16 @@ class AgentToolService:
         if rejected is not None:
             self._record_tool_result(tool_name, rejected)
             return rejected
+        if normalized_mode not in READ_FILE_MODES:
+            result = self._rejected_result(
+                tool_name=tool_name,
+                task_id=task_id,
+                code="invalid_read_mode",
+                message="mode must be one of: auto, summary, full",
+                details={"mode": mode},
+            )
+            self._record_tool_result(tool_name, result)
+            return result
         limit = max_chars or self.context.tool_output_max_chars
         if limit < 1:
             result = self._rejected_result(
@@ -423,6 +443,8 @@ class AgentToolService:
                 code="workspace_path_rejected",
                 message=str(exc),
             )
+            self._record_tool_result(tool_name, result)
+            return result
         except FileNotFoundError:
             result = self._rejected_result(
                 tool_name=tool_name,
@@ -430,6 +452,8 @@ class AgentToolService:
                 code="file_not_found",
                 message=f"file does not exist: {path}",
             )
+            self._record_tool_result(tool_name, result)
+            return result
         except IsADirectoryError:
             result = self._rejected_result(
                 tool_name=tool_name,
@@ -437,6 +461,8 @@ class AgentToolService:
                 code="path_is_directory",
                 message=f"path is a directory: {path}",
             )
+            self._record_tool_result(tool_name, result)
+            return result
         except UnicodeDecodeError:
             result = self._failed_result(
                 tool_name=tool_name,
@@ -444,22 +470,42 @@ class AgentToolService:
                 message=f"file is not UTF-8 text: {path}",
                 error_code="file_not_utf8",
             )
-        else:
-            truncated = len(content) > limit
+            self._record_tool_result(tool_name, result)
+            return result
+
+        rel_path = self._workspace_relative_path(target)
+        if _read_file_should_summarize(rel_path, normalized_mode):
+            details = _report_file_summary(rel_path, content)
+            details["mode"] = normalized_mode
+            result = AgentToolResult(
+                tool=tool_name,
+                task_id=task_id,
+                status=ToolStatus.APPLIED,
+                summary=_report_file_summary_text(rel_path, details),
+                read_paths=[rel_path],
+                report_paths=[rel_path] if _is_report_path(rel_path) else [],
+                details=details,
+            )
+            self._record_tool_result(tool_name, result)
+            return result
+
+        truncated = len(content) > limit
         result = AgentToolResult(
             tool=tool_name,
             task_id=task_id,
             status=ToolStatus.APPLIED,
-            summary=f"Read {self._workspace_relative_path(target)}.",
-            read_paths=[self._workspace_relative_path(target)],
+            summary=f"Read {rel_path}.",
+            read_paths=[rel_path],
+            report_paths=[rel_path] if _is_report_path(rel_path) else [],
             details={
-                "path": self._workspace_relative_path(target),
+                "path": rel_path,
+                "mode": normalized_mode,
                 "content": content[:limit],
-                    "content_truncated": truncated,
-                    "content_chars": min(len(content), limit),
-                    "size_chars": len(content),
-                },
-            )
+                "content_truncated": truncated,
+                "content_chars": min(len(content), limit),
+                "size_chars": len(content),
+            },
+        )
         self._record_tool_result(tool_name, result)
         return result
 
@@ -3179,6 +3225,7 @@ def read_file(
     task_id: str,
     path: str,
     max_chars: int | None = None,
+    mode: str = "auto",
 ) -> AgentToolResult:
     """Read bounded UTF-8 text from a workspace file."""
 
@@ -3186,6 +3233,7 @@ def read_file(
         task_id=task_id,
         path=path,
         max_chars=max_chars,
+        mode=mode,
     )
 
 
@@ -3572,11 +3620,31 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
     ),
     MainAgentToolDefinition(
         name="read_file",
-        description="Read bounded UTF-8 text from a file inside the workspace.",
+        description=(
+            "Read a workspace UTF-8 file. Use mode=auto by default: source files "
+            "return bounded content, while .router/reports and report-like logs "
+            "return a structured summary plus preview. Use mode=full only for a "
+            "specific detail after summary/grep, with a small max_chars."
+        ),
         properties={
             "task_id": {"type": "string"},
             "path": {"type": "string"},
-            "max_chars": {"type": "integer", "minimum": 1},
+            "max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Maximum characters to return for full reads. Keep this small "
+                    "when inspecting one report detail."
+                ),
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["auto", "summary", "full"],
+                "description": (
+                    "auto is the default; summary forces report-style summaries; "
+                    "full returns bounded file content and should be used sparingly."
+                ),
+            },
         },
         required=("task_id", "path"),
         sdk_tool=read_file,
@@ -3597,13 +3665,30 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
     ),
     MainAgentToolDefinition(
         name="grep",
-        description="Search UTF-8 workspace files for literal text.",
+        description=(
+            "Search UTF-8 workspace files for a literal substring. Use this before "
+            "full reads to find symbols, statuses, error phrases, test names, or "
+            "report sections; narrow with path/include/max_matches."
+        ),
         properties={
             "task_id": {"type": "string"},
-            "pattern": {"type": "string"},
-            "path": {"type": "string"},
-            "include": {"type": "string"},
-            "max_matches": {"type": "integer", "minimum": 1},
+            "pattern": {
+                "type": "string",
+                "description": "Literal substring to search for, not a regex.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Workspace file or directory to search within.",
+            },
+            "include": {
+                "type": "string",
+                "description": "Optional glob for relative paths, such as **/*.json.",
+            },
+            "max_matches": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum matching lines to return.",
+            },
         },
         required=("task_id", "pattern"),
         sdk_tool=grep,
@@ -4030,12 +4115,24 @@ def _current_file_field_for_path(path: str) -> str | None:
     return None
 
 
+def _normalized_workspace_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
 def _append_unique_path(paths: list[str], path: str) -> list[str]:
     return paths if path in paths else [*paths, path]
 
 
+def _is_router_report_path(path: str) -> bool:
+    lower = _normalized_workspace_path(path).lower()
+    return lower == ".router/reports" or lower.startswith(".router/reports/")
+
+
 def _is_report_path(path: str) -> bool:
-    return _current_file_field_for_path(path) in {
+    return _is_router_report_path(path) or _current_file_field_for_path(path) in {
         "latest_test_report",
         "latest_failing_trace",
         "latest_formal_report",
@@ -4046,6 +4143,107 @@ def _is_report_path(path: str) -> bool:
         "final_report",
         "main_agent_log",
     }
+
+
+def _read_file_should_summarize(path: str, mode: str) -> bool:
+    if mode == "summary":
+        return True
+    if mode == "full":
+        return False
+    return _is_report_path(path)
+
+
+def _report_file_summary(path: str, content: str) -> dict[str, Any]:
+    preview = _bounded_output(content, DEFAULT_REPORT_PREVIEW_CHARS)
+    summary: dict[str, Any] = {
+        "path": path,
+        "read_paths": [path],
+        "report_paths": [path] if _is_report_path(path) else [],
+        "size_chars": len(content),
+        "preview": preview,
+        "preview_chars": len(preview),
+        "preview_truncated": len(content) > DEFAULT_REPORT_PREVIEW_CHARS,
+        "content_omitted": True,
+        "refetch_hint": (
+            "Call read_file with mode=\"full\" and an explicit max_chars to inspect "
+            "the report body."
+        ),
+    }
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        summary["format"] = "text"
+        return summary
+
+    summary["format"] = "json"
+    summary["json_type"] = type(parsed).__name__
+    if not isinstance(parsed, dict):
+        summary["value"] = _compact_report_value(parsed)
+        summary["top_level_keys"] = []
+        return summary
+
+    summary["top_level_keys"] = list(parsed.keys())
+    for key in (
+        "status",
+        "summary",
+        "failed_details",
+        "compilation_report",
+        "assessment",
+        "metrics",
+    ):
+        if key in parsed:
+            summary[key] = _compact_report_value(parsed[key])
+    return summary
+
+
+def _compact_report_value(
+    value: Any,
+    *,
+    string_limit: int = REPORT_ERROR_TEXT_MAX_CHARS,
+    max_items: int = 8,
+    max_mapping_keys: int = 12,
+) -> Any:
+    if isinstance(value, str):
+        return _bounded_output(value, string_limit)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, list):
+        compacted = [
+            _compact_report_value(
+                item,
+                string_limit=string_limit,
+                max_items=max_items,
+                max_mapping_keys=max_mapping_keys,
+            )
+            for item in value[:max_items]
+        ]
+        if len(value) > max_items:
+            compacted.append({"omitted_items": len(value) - max_items})
+        return compacted
+    if isinstance(value, dict):
+        compacted_mapping: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= max_mapping_keys:
+                compacted_mapping["omitted_keys"] = len(value) - max_mapping_keys
+                break
+            compacted_mapping[str(key)] = _compact_report_value(
+                item,
+                string_limit=string_limit,
+                max_items=max_items,
+                max_mapping_keys=max_mapping_keys,
+            )
+        return compacted_mapping
+    return _bounded_output(value, string_limit)
+
+
+def _report_file_summary_text(path: str, details: dict[str, Any]) -> str:
+    summary = details.get("summary")
+    if isinstance(summary, str) and summary:
+        return f"Read report summary for {path}: {_bounded_output(summary, 300)}"
+    status = details.get("status")
+    if status not in (None, ""):
+        return f"Read report summary for {path} (status: {status})."
+    return f"Read report summary for {path}."
 
 
 def _json_safe_mapping(value: dict[str, Any]) -> dict[str, Any]:

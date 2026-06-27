@@ -25,6 +25,16 @@ Operating rules:
 - Use workspace files under .router/runs or .router/reports for durable notes,
   long outputs, reports, or generated deliverables that should outlive the
   model context.
+- Prefer targeted discovery before reading full files: use glob/list_files to
+  find candidate paths, and grep to locate exact symbols, statuses, error
+  phrases, test names, or report sections. grep is literal substring search;
+  narrow it with path, include, and max_matches.
+- Use read_file mode="auto" by default. For ordinary source/config files it
+  returns bounded content; for .router/reports, test/formal/repair/gate/final
+  reports, and main-agent logs it returns a deterministic summary plus preview.
+- Use read_file mode="summary" when you only need report status, metrics, or
+  top-level failure details. Use mode="full" only after summary/grep identifies
+  a specific missing detail, and pass max_chars small enough for that question.
 - Use plc_dev, plc_test, plc_formal, and plc_repair for PLC domain work when
   the task requires worker assistance. Fill their direct worker parameters when
   target language, compiler, fuzzing, formal, repair, or LLM controls matter.

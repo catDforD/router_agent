@@ -337,6 +337,18 @@ def test_finish_task_is_not_exposed_to_main_agent_model() -> None:
     ]
 
 
+def test_read_file_tool_spec_accepts_optional_mode() -> None:
+    read_file_spec = next(
+        spec
+        for spec in get_main_agent_tool_specs()
+        if spec["function"]["name"] == "read_file"
+    )
+    parameters = read_file_spec["function"]["parameters"]
+
+    assert parameters["properties"]["mode"]["enum"] == ["auto", "summary", "full"]
+    assert "mode" not in parameters["required"]
+
+
 def test_file_tools_read_write_and_reject_foreign_paths(
     db_session: Session,
     tmp_path: Path,
@@ -371,6 +383,111 @@ def test_file_tools_read_write_and_reject_foreign_paths(
     assert rejected.status == "rejected"
     assert rejected.violation is not None
     assert rejected.violation.code == "workspace_path_rejected"
+
+
+def test_read_file_missing_path_returns_rejected_without_exception(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    result = service.read_file(task.task_id, path="missing.txt")
+
+    assert result.status == "rejected"
+    assert result.violation is not None
+    assert result.violation.code == "file_not_found"
+
+
+def test_read_file_report_auto_mode_returns_summary_not_full_body(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    report_path = workspace / ".router" / "reports" / "test_report.json"
+    report_path.parent.mkdir(parents=True)
+    long_error = "compile failed: " + ("x" * 2_000)
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "summary": "Blocking validation failure.",
+                "failed_details": [{"message": long_error}],
+                "metrics": {"cases": 12, "failed": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    result = service.read_file(
+        task.task_id,
+        path=".router/reports/test_report.json",
+    )
+
+    assert result.status == "applied"
+    assert result.read_paths == [".router/reports/test_report.json"]
+    assert result.report_paths == [".router/reports/test_report.json"]
+    assert result.details["format"] == "json"
+    assert result.details["status"] == "failed"
+    assert result.details["summary"] == "Blocking validation failure."
+    assert result.details["failed_details"][0]["message"].endswith("...")
+    assert len(result.details["failed_details"][0]["message"]) == 500
+    assert result.details["content_omitted"] is True
+    assert result.details["preview_chars"] <= 1_200
+    assert result.details["refetch_hint"]
+    assert "content" not in result.details
+
+
+def test_read_file_full_mode_can_return_bounded_report_content(
+    db_session: Session,
+    tmp_path: Path,
+) -> None:
+    task = classified_task(db_session, qa=True)
+    workspace = tmp_path / "workspace"
+    report_path = workspace / ".router" / "reports" / "gate_report.txt"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text("gate report\n" + ("x" * 200), encoding="utf-8")
+    service = AgentToolService(
+        AgentToolContext(
+            session=db_session,
+            artifact_root=tmp_path / "artifacts",
+            workspace_root=workspace,
+            execution_mode="local_full_access",
+        )
+    )
+
+    result = service.read_file(
+        task.task_id,
+        path=".router/reports/gate_report.txt",
+        mode="full",
+        max_chars=40,
+    )
+
+    assert result.status == "applied"
+    assert result.report_paths == [".router/reports/gate_report.txt"]
+    assert result.details["mode"] == "full"
+    assert result.details["content"].startswith("gate report\n")
+    assert len(result.details["content"]) == 40
+    assert result.details["content_truncated"] is True
+    assert result.details["size_chars"] == 212
 
 
 def test_workspace_tools_return_results_for_invalid_paths(

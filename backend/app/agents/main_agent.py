@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
 import json
@@ -73,6 +74,10 @@ from app.services.scheduler_guard import SchedulerGuardViolation
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
 MAX_STOP_BLOCKS = 2
+TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS = 2_000
+TOOL_RESULT_RECENT_KEEP_COUNT = 6
+TOOL_RESULT_PREVIEW_CHARS = 1_200
+TOOL_RESULT_CLEARED_SUMMARY_CHARS = 500
 LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -394,9 +399,10 @@ class OpenAICompatibleToolLoopRunner:
         model: str,
         recorder: MainAgentObservabilityRecorder | None,
     ) -> _AssistantTurn:
+        request_messages = _messages_for_model_context(messages)
         try:
             response = self.chat_client.complete(
-                messages=messages,
+                messages=request_messages,
                 tools=tools,
                 model=model,
                 stream=self.stream,
@@ -413,7 +419,7 @@ class OpenAICompatibleToolLoopRunner:
                     ),
                 )
             response = self.chat_client.complete(
-                messages=messages,
+                messages=request_messages,
                 tools=tools,
                 model=model,
                 stream=False,
@@ -1529,8 +1535,177 @@ def _parse_tool_arguments(raw_arguments: str | None) -> dict[str, Any]:
     return parsed
 
 
+def _messages_for_model_context(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    request_messages = deepcopy(messages)
+    tool_message_indices = [
+        index
+        for index, message in enumerate(request_messages)
+        if message.get("role") == "tool"
+    ]
+    recent_indices = set(tool_message_indices[-TOOL_RESULT_RECENT_KEEP_COUNT:])
+    for index in tool_message_indices:
+        if index in recent_indices:
+            continue
+        content = request_messages[index].get("content")
+        if not isinstance(content, str):
+            continue
+        if len(content) <= TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS:
+            continue
+        request_messages[index]["content"] = _cleared_tool_message_content(content)
+    return request_messages
+
+
 def _tool_result_content(result: AgentToolResult) -> str:
-    return json.dumps(result.model_dump(mode="json"), ensure_ascii=True)
+    payload = result.model_dump(mode="json")
+    return json.dumps(_compact_tool_result_payload(payload), ensure_ascii=True)
+
+
+def _compact_tool_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compacted = dict(payload)
+    details = compacted.get("details")
+    if isinstance(details, dict):
+        compacted["details"] = _compact_tool_result_details(compacted, details)
+    results = compacted.get("results")
+    if isinstance(results, list):
+        compacted["results"] = [
+            _compact_tool_result_payload(item) if isinstance(item, dict) else item
+            for item in results
+        ]
+    return compacted
+
+
+def _compact_tool_result_details(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    compacted = dict(details)
+    content = compacted.get("content")
+    if not isinstance(content, str):
+        return compacted
+    is_large_report = (
+        len(content) > TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS
+        and _tool_payload_has_report_path(payload, compacted)
+    )
+    if not is_large_report or compacted.get("mode") == "full":
+        return compacted
+
+    preview = _bounded_context_text(content, TOOL_RESULT_PREVIEW_CHARS)
+    compacted.pop("content", None)
+    compacted["content_omitted"] = True
+    compacted["content_omitted_reason"] = "large_report_body"
+    compacted["content_preview"] = preview
+    compacted["content_preview_chars"] = len(preview)
+    compacted["size_chars"] = compacted.get("size_chars", len(content))
+    compacted.setdefault(
+        "refetch_hint",
+        (
+            "Call read_file with mode=\"full\" and an explicit max_chars if this "
+            "report body is required."
+        ),
+    )
+    return compacted
+
+
+def _tool_payload_has_report_path(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> bool:
+    report_paths = payload.get("report_paths")
+    if isinstance(report_paths, list) and report_paths:
+        return True
+    detail_report_paths = details.get("report_paths")
+    if isinstance(detail_report_paths, list) and detail_report_paths:
+        return True
+    for key in ("path", "output_path", "report_path"):
+        value = details.get(key)
+        if isinstance(value, str) and _path_looks_like_report(value):
+            return True
+    return False
+
+
+def _path_looks_like_report(path: str) -> bool:
+    lower = path.replace("\\", "/").lower()
+    return (
+        lower.startswith(".router/reports/")
+        or "test_report" in lower
+        or "failing_trace" in lower
+        or "formal_report" in lower
+        or "counterexample" in lower
+        or "repair_summary" in lower
+        or "gate_report" in lower
+        or "final_report" in lower
+        or "replay_log" in lower
+        or "main_agent_log" in lower
+    )
+
+
+def _cleared_tool_message_content(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+
+    cleared = {
+        "tool": payload.get("tool"),
+        "status": payload.get("status"),
+        "summary": _bounded_context_text(
+            payload.get("summary") or content,
+            TOOL_RESULT_CLEARED_SUMMARY_CHARS,
+        ),
+        "read_paths": _list_from_payload(payload, details, "read_paths"),
+        "written_paths": _list_from_payload(payload, details, "written_paths"),
+        "report_paths": _list_from_payload(payload, details, "report_paths"),
+        "worker_job_id": payload.get("worker_job_id")
+        or details.get("worker_job_id"),
+        "failure_ids": _failure_ids_from_payload(payload, details),
+        "context_cleared": True,
+        "cleared_reason": "old_large_tool_result_exceeded_active_context_budget",
+        "original_chars": len(content),
+    }
+    return json.dumps(cleared, ensure_ascii=True)
+
+
+def _list_from_payload(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+    key: str,
+) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        value = details.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _failure_ids_from_payload(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> list[str]:
+    failure_ids = _list_from_payload(payload, details, "failure_ids")
+    failures = payload.get("failures")
+    if isinstance(failures, list):
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            failure_id = failure.get("failure_id")
+            if failure_id is not None:
+                failure_ids.append(str(failure_id))
+    return list(dict.fromkeys(failure_ids))
+
+
+def _bounded_context_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(limit - 3, 0)]}..."
 
 
 def _episode_summary_from_tool_result(result: AgentToolResult) -> str:

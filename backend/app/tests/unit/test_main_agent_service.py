@@ -13,6 +13,8 @@ from app.agents.main_agent import (
     MainAgentService,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    _messages_for_model_context,
+    _tool_result_content,
     build_state_view,
     build_tool_loop_agent,
     build_tool_loop_run_config,
@@ -23,7 +25,7 @@ from app.agents.output_schema import (
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
 )
-from app.agents.tools import AgentToolContext
+from app.agents.tools import AgentToolContext, AgentToolResult, ToolStatus
 from app.core.errors import RepositoryNotFoundError
 from app.models.db_models import ArtifactRow, Base, EventRow, TaskRow, WorkerJobRow
 from app.models.router_schema import (
@@ -281,6 +283,81 @@ def raw_tool_call(name: str, arguments: str, *, call_id: str) -> dict[str, Any]:
             "arguments": arguments,
         },
     }
+
+
+def test_tool_result_content_omits_large_report_body_for_model_context() -> None:
+    report_body = "validation failed\n" + ("x" * 3_000)
+    result = AgentToolResult(
+        tool="read_file",
+        task_id="task-context-001",
+        status=ToolStatus.APPLIED,
+        summary="Read report.",
+        read_paths=[".router/reports/test_report.json"],
+        report_paths=[".router/reports/test_report.json"],
+        details={
+            "path": ".router/reports/test_report.json",
+            "mode": "auto",
+            "content": report_body,
+            "size_chars": len(report_body),
+        },
+    )
+
+    content = _tool_result_content(result)
+    payload = json.loads(content)
+
+    assert report_body not in content
+    assert "content" not in payload["details"]
+    assert payload["details"]["content_omitted"] is True
+    assert payload["details"]["content_omitted_reason"] == "large_report_body"
+    assert payload["details"]["content_preview"].startswith("validation failed")
+    assert payload["details"]["refetch_hint"]
+
+
+def test_tool_history_clearing_replaces_old_large_tool_results_and_keeps_recent_results() -> None:
+    large_body = "old tool result body " + ("x" * 2_400)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "system"}]
+    for index in range(8):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "content": json.dumps(
+                    {
+                        "tool": "read_file",
+                        "status": "applied",
+                        "summary": f"Read report {index}.",
+                        "read_paths": [f".router/reports/report_{index}.json"],
+                        "report_paths": [f".router/reports/report_{index}.json"],
+                        "worker_job_id": f"worker-{index}",
+                        "failures": [{"failure_id": f"failure-{index}"}],
+                        "details": {"content": large_body},
+                    }
+                ),
+            }
+        )
+
+    request_messages = _messages_for_model_context(messages)
+    tool_contents = [
+        message["content"]
+        for message in request_messages
+        if message.get("role") == "tool"
+    ]
+    cleared = json.loads(tool_contents[0])
+
+    assert cleared["context_cleared"] is True
+    assert cleared["tool"] == "read_file"
+    assert cleared["status"] == "applied"
+    assert cleared["read_paths"] == [".router/reports/report_0.json"]
+    assert cleared["report_paths"] == [".router/reports/report_0.json"]
+    assert cleared["worker_job_id"] == "worker-0"
+    assert cleared["failure_ids"] == ["failure-0"]
+    assert cleared["cleared_reason"] == (
+        "old_large_tool_result_exceeded_active_context_budget"
+    )
+    assert large_body not in tool_contents[0]
+    assert large_body not in tool_contents[1]
+    assert large_body in tool_contents[-1]
+    assert large_body in messages[1]["content"]
 
 
 def create_task(task_service: TaskService) -> str:
@@ -804,6 +881,70 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
         "applied",
     ]
     assert "response_format" not in chat_client.requests[0]
+
+
+def test_main_agent_request_after_large_report_does_not_resend_verbatim_report(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    task = persisted_task(db_session, task_id)
+    workspace = Path(
+        task.workspace.root
+        if task.workspace is not None
+        else task.project_context.workspace_root
+        or tmp_path / "workspace"
+    )
+    report_path = workspace / ".router" / "reports" / "test_report.json"
+    report_path.parent.mkdir(parents=True)
+    sentinel = "VERBATIM_REPORT_TAIL_SHOULD_NOT_REAPPEAR"
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "summary": "Validation failed.",
+                "failed_details": [{"message": ("x" * 2_000) + sentinel}],
+                "metrics": {"failed": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="I will inspect the latest report summary.",
+                tool_calls=[
+                    tool_call(
+                        "read_file",
+                        {
+                            "task_id": task_id,
+                            "path": ".router/reports/test_report.json",
+                        },
+                        call_id="call-read-report",
+                    )
+                ],
+            ),
+            chat_response(content="The report summary shows validation failed."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
+    )
+
+    output = service.run_episode(task_id)
+    second_request = json.dumps(chat_client.requests[1]["messages"])
+
+    assert output.final_task_status == "succeeded"
+    assert sentinel not in second_request
+    assert "content_omitted" in second_request
+    assert "failed_details" in second_request
 
 
 def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(

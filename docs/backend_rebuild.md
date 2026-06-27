@@ -7,7 +7,7 @@
 1. `list_files`：列出 workspace 内文件或目录。
    - 参数：`task_id`、`path`、`recursive`、`max_entries`
 2. `read_file`：读取 workspace 内文本文件，带最大字符数限制。
-   - 参数：`task_id`、`path`、`max_chars`
+   - 参数：`task_id`、`path`、`max_chars`、`mode`
 3. `write_file`：向 workspace 内写入 UTF-8 文本。
    - 参数：`task_id`、`path`、`content`、`create_dirs`
 4. `apply_patch`：在 workspace 内应用 unified patch。
@@ -103,3 +103,43 @@
 - `plc-repair` 可用：`repair_source`、`repair_targets`、`repair_failure_notes`、`compiler_type`、`llm`
 
 后端会把这些直接参数组装为 `WorkerInput.worker_config`。`worker_input_builder` 会为不同 worker 自动生成默认 `worker_config`，调用方显式传入的配置会覆盖默认值；`WorkerInput` 校验会拒绝该 worker 不支持的非空字段。
+
+
+### 当前 agent loop 上下文管理是怎么做的？
+当前上下文不是把整段历史或所有文件正文一次性塞给模型，而是按“结构化状态视图 + 按需工具读取”的方式管理。
+
+每次 `run_episode()` 启动时，后端会重新从数据库读取当前 `TaskState`，调用 `build_state_view()` 生成一个 compact state view，再用 `build_state_view_prompt()` 包成 Chat Completions 的 user message。模型实际初始输入是：
+
+1. system message：`build_orchestration_instructions()` 生成的固定 Orchestration 提示词。
+2. user message：当前 task 的 compact state view。
+
+这个 state view 包含：
+
+- 基础运行信息：`task_id`、`session_id`、`status`、`phase`、`trace`。
+- 用户目标：`user_goal`、`normalized_goal`、`task_type`。
+- 调度判断：difficulty level/score/signals、是否需要 test/formal/repair/clarification。
+- 质量门状态：`gates`。
+- 文件上下文：`current_files`，包含 raw request、requirements、current code、test/formal/repair/gate/final report 等角色路径，以及 `all_paths`。
+- workspace 与执行策略：`workspace`、`execution_policy`。
+- 当前 agent run 记录：`agent_runs`。
+- 当前 open failures：只放 compact failure summary 和 evidence paths。
+- runtime 限制与 worker 状态：repair rounds、worker call limits、active/completed worker jobs。
+- 当前可用工具：按 task 状态和 execution mode 动态裁剪后的 `available_tools`。
+
+文件正文、长日志和大产物内容默认不内联进上下文。模型只拿到 workspace 路径和状态摘要，需要细节时通过 `list_files`、`glob`、`grep`、`read_file`、worker 工具或质量门工具按需读取；工具输出也受 `tool_output_max_chars` 限制。`read_file` 的 `mode` 默认为 `auto`：普通代码和小文件保持 bounded 正文读取；`.router/reports/**`、test/formal/repair/gate/final report、main-agent log 等报告路径默认只返回确定性结构化摘要、最多约 1200 字符 preview、`read_paths`/`report_paths` 和 `refetch_hint`。确需逐字段或原始日志排查时，模型需要显式使用 `mode="full"`，且仍受 `max_chars` 和 `tool_output_max_chars` 限制。
+
+会话上下文由 `build_session_context_view()` 补充。它会读取同一 `session_id` 下除当前 task 之外最近最多 6 个 run，并为每个 run 注入：
+
+- `run_id` / `task_id`
+- `status`
+- 该轮 `user_message`
+- bounded `final_response`，最多约 2000 字符
+- `final_report_path`
+- 最近最多 8 个 workspace file refs，每个只包含 `path` 和 `role`
+- `updated_at`
+
+因此追问不是复用已 terminal 的 task，也不是 replay 全部 SSE/event history；它会创建新的 task/run，并在新 run 的初始 state view 中携带有限的 recent session summary。完整事件仍保存在 session event stream 里供前端展示和审计，但不直接作为全量 prompt 历史注入。
+
+单个 run 内部的 Chat Completions tool loop 会维护临时 message history：system/user 初始消息、assistant 消息、tool call 和 tool result 会在本轮循环内追加，直到模型返回无 tool call 的最终自然语言、task 进入 terminal/waiting 状态，或达到 `max_turns`。这部分 history 只服务当前 run；跨 run 的上下文依赖持久化的 task/session 状态、workspace 文件路径和 bounded session context。
+
+为避免单个 run 内部的大报告 tool result 被多轮重复计费，发送给模型的 tool result 使用 compact serializer：审计事件、SSE `agent.tool_result` 和 replay log 仍保留现有观测 result；Chat Completions active history 默认不携带大报告的完整 `details.content`。每次模型调用前，runtime 还会在请求副本里清理旧的、大于约 2000 字符且不在最近 6 个 tool results 内的 tool message content；清理结果保留 `tool`、`status`、`summary`、`read_paths`、`written_paths`、`report_paths`、`worker_job_id`、`failure_ids` 和 `cleared_reason`，不删除 assistant/tool message，因此保持 tool-call 顺序合法。
