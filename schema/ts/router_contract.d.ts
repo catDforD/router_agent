@@ -148,17 +148,17 @@ export interface Failure {
 
   reproduction?: {
     steps?: string[];
-    input_trace_artifact_id?: string | null;
-    counterexample_artifact_id?: string | null;
+    input_trace_path?: string | null;
+    counterexample_path?: string | null;
   } | null;
 
-  evidence_artifact_ids: string[];
+  evidence_paths: string[];
 
   status: "open" | "resolved" | "waived";
 
   created_by_worker_job_id?: string | null;
   resolved_by_worker_job_id?: string | null;
-  resolved_by_artifact_id?: string | null;
+  resolved_by_path?: string | null;
 
   created_at: ISODateTime;
   resolved_at?: ISODateTime | null;
@@ -270,6 +270,31 @@ export interface CurrentArtifacts {
   all_artifact_ids: string[];
 }
 
+export interface CurrentFiles {
+  raw_user_request?: string | null;
+  requirements?: string | null;
+
+  current_code?: string | null;
+  current_io_contract?: string | null;
+
+  latest_test_cases?: string | null;
+  latest_test_report?: string | null;
+  latest_failing_trace?: string | null;
+
+  latest_formal_properties?: string | null;
+  latest_formal_report?: string | null;
+  latest_counterexample?: string | null;
+
+  latest_patch?: string | null;
+  latest_repair_summary?: string | null;
+
+  latest_gate_report?: string | null;
+  final_report?: string | null;
+  main_agent_log?: string | null;
+
+  all_paths: string[];
+}
+
 export interface WorkerJobRef {
   worker_job_id: string;
   worker_type: WorkerType;
@@ -309,8 +334,8 @@ export interface ProjectContext {
     | "unknown"
     | string;
 
-  coding_style_artifact_id?: string | null;
-  project_memory_artifact_ids?: string[];
+  coding_style_path?: string | null;
+  project_memory_paths?: string[];
   workspace_root?: string | null;
 }
 
@@ -378,7 +403,7 @@ export interface TaskState {
   runtime_limits: RuntimeLimits;
   gates: GateState;
 
-  current_artifacts: CurrentArtifacts;
+  current_files: CurrentFiles;
 
   active_worker_jobs: WorkerJobRef[];
   completed_worker_job_ids: string[];
@@ -440,6 +465,13 @@ export interface ExpectedOutputSpec {
   required: boolean;
   description: string;
   schema_ref?: string | null;
+}
+
+export interface ExpectedFileSpec {
+  path: string;
+  required: boolean;
+  description?: string | null;
+  mime_type?: string | null;
 }
 
 export interface WorkerBudget {
@@ -536,13 +568,16 @@ export interface WorkerInput {
 
   objective: string;
 
-  input_artifacts: ArtifactRef[];
+  workspace_root: string;
+  current_directory: string;
+  input_paths: string[];
+  output_paths: string[];
 
   context: WorkerContext;
 
   constraints: WorkerConstraint[];
 
-  expected_outputs: ExpectedOutputSpec[];
+  expected_outputs: ExpectedFileSpec[];
 
   budget: WorkerBudget;
 
@@ -598,25 +633,26 @@ export interface Diagnostic {
   message: string;
 
   location?: {
-    artifact_id?: string | null;
     file_path?: string | null;
     line_start?: number | null;
     line_end?: number | null;
     symbol?: string | null;
   } | null;
 
-  related_artifact_ids?: string[];
+  related_file_paths?: string[];
   related_requirement_ids?: string[];
+}
+
+export interface TokenUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
 }
 
 export interface WorkerMetrics {
   duration_ms?: number | null;
 
-  token_usage?: {
-    input_tokens?: number | null;
-    output_tokens?: number | null;
-    total_tokens?: number | null;
-  } | null;
+  token_usage?: TokenUsage | null;
 
   test_metrics?: {
     total?: number | null;
@@ -667,7 +703,9 @@ export interface WorkerResult {
 
   summary: string;
 
-  produced_artifacts: ArtifactRef[];
+  read_paths: string[];
+  written_paths: string[];
+  report_paths: string[];
 
   diagnostics: Diagnostic[];
 
@@ -739,6 +777,9 @@ export interface ArtifactMetadata {
   target_platform?: string | null;
 
   module_name?: string | null;
+  workspace_path?: string | null;
+  file_role?: string | null;
+  source_task_id?: string | null;
   requirement_ids?: string[];
 
   code_metadata?: {
@@ -968,6 +1009,23 @@ export interface RouterEvent {
   payload: Record<string, JsonValue>;
 
   created_at: ISODateTime;
+}
+
+export interface MainAgentCompletedPayload {
+  task_id: string;
+  main_agent_run_id?: string | null;
+  final_task_status: string;
+  summary?: string | null;
+  final_report_path?: string | null;
+  main_agent_log_path?: string | null;
+  decision_count?: number | null;
+  plan_step_count?: number | null;
+  next_recommended_action?: string | null;
+  /**
+   * Main Agent provider token usage for this answer only. Worker/MCP usage is not included.
+   */
+  token_usage?: TokenUsage | null;
+  token_usage_scope?: "main_agent" | null;
 }
 
 /**

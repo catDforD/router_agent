@@ -4,18 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.models.router_schema import (
-    Artifact,
     EventCorrelation,
     RouterEvent,
     WorkerResult,
 )
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.event_repo import EventRepository
 from app.repositories.gate_repo import GateResultRecord, GateResultRepository
 from app.repositories.task_repo import TaskRepository
@@ -42,25 +41,11 @@ class TraceEventSummary(TraceSummaryModel):
     created_at: datetime
 
 
-class TraceArtifactSummary(TraceSummaryModel):
-    artifact_id: str
-    type: str
-    version: int
-    status: str
-    visibility: str
-    uri: str
-    content_hash: str | None = None
+class TraceFileSummary(TraceSummaryModel):
+    path: str
+    exists: bool | None = None
     size_bytes: int | None = None
-    summary: str
-    parent_artifact_ids: list[str]
-    derived_from_worker_job_id: str | None = None
-    derived_from_artifact_ids: list[str] | None = None
-    created_by_type: str
-    created_by_id: str | None = None
-    created_by_worker_job_id: str | None = None
-    created_by_main_agent_run_id: str | None = None
-    created_at: datetime
-    updated_at: datetime
+    mime_type: str | None = None
 
 
 class TraceWorkerJobSummary(TraceSummaryModel):
@@ -71,8 +56,10 @@ class TraceWorkerJobSummary(TraceSummaryModel):
     openai_trace_id: str | None = None
     main_agent_run_id: str | None = None
     mcp_request_id: str | None = None
-    input_artifact_ids: list[str]
-    produced_artifact_ids: list[str]
+    input_paths: list[str]
+    read_paths: list[str]
+    written_paths: list[str]
+    report_paths: list[str]
     failure_ids: list[str]
     execution_status: str | None = None
     outcome_status: str | None = None
@@ -88,7 +75,7 @@ class TraceGateResultSummary(TraceSummaryModel):
     gate_type: str
     status: str
     blocking: bool
-    evidence_artifact_ids: list[str]
+    evidence_paths: list[str]
     created_at: datetime
 
 
@@ -102,8 +89,8 @@ class TraceMainAgentRunSummary(TraceSummaryModel):
     completed_seq: int | None = None
     completed_at: datetime | None = None
     error_event_ids: list[str]
-    final_report_artifact_id: str | None = None
-    replay_log_artifact_id: str | None = None
+    final_report_path: str | None = None
+    replay_log_path: str | None = None
 
 
 class TaskTraceSummary(TraceSummaryModel):
@@ -115,7 +102,7 @@ class TaskTraceSummary(TraceSummaryModel):
     terminal_event_type: str | None = None
     main_agent_runs: list[TraceMainAgentRunSummary]
     worker_jobs: list[TraceWorkerJobSummary]
-    artifacts: list[TraceArtifactSummary]
+    files: list[TraceFileSummary]
     gate_results: list[TraceGateResultSummary]
     events: list[TraceEventSummary]
 
@@ -127,18 +114,15 @@ class TraceSummaryService:
         self.task_repository = TaskRepository(session)
         self.event_repository = EventRepository(session)
         self.worker_job_repository = WorkerJobRepository(session)
-        self.artifact_repository = ArtifactRepository(session)
         self.gate_result_repository = GateResultRepository(session)
 
     def get_task_trace_summary(self, task_id: str) -> TaskTraceSummary:
         task = self.task_repository.get_task(task_id)
         events = self.event_repository.list_events(task_id)
         worker_jobs = self.worker_job_repository.list_task_jobs(task_id)
-        artifacts = self.artifact_repository.list_task_artifacts(task_id)
         gate_results = self.gate_result_repository.list_results(task_id)
 
         event_summaries = [_event_summary(event) for event in events]
-        artifact_summaries = [_artifact_summary(artifact) for artifact in artifacts]
         worker_summaries = [_worker_job_summary(job) for job in worker_jobs]
         gate_summaries = [_gate_result_summary(result) for result in gate_results]
         terminal_event = _terminal_event(events)
@@ -154,10 +138,9 @@ class TraceSummaryService:
                 run_ids=task.trace.main_agent_run_ids,
                 openai_trace_id=task.trace.openai_trace_id,
                 events=events,
-                artifacts=artifacts,
             ),
             worker_jobs=worker_summaries,
-            artifacts=artifact_summaries,
+            files=_file_summaries(task),
             gate_results=gate_summaries,
             events=event_summaries,
         )
@@ -181,33 +164,6 @@ def _event_summary(event: RouterEvent) -> TraceEventSummary:
     )
 
 
-def _artifact_summary(artifact: Artifact) -> TraceArtifactSummary:
-    return TraceArtifactSummary(
-        artifact_id=artifact.artifact_id,
-        type=_value(artifact.type),
-        version=artifact.version,
-        status=_value(artifact.status),
-        visibility=_value(artifact.visibility),
-        uri=artifact.storage.uri,
-        content_hash=artifact.storage.content_hash,
-        size_bytes=artifact.storage.size_bytes,
-        summary=artifact.summary,
-        parent_artifact_ids=list(artifact.parent_artifact_ids),
-        derived_from_worker_job_id=artifact.derived_from_worker_job_id,
-        derived_from_artifact_ids=(
-            list(artifact.derived_from_artifact_ids)
-            if artifact.derived_from_artifact_ids is not None
-            else None
-        ),
-        created_by_type=_value(artifact.created_by.type),
-        created_by_id=artifact.created_by.id,
-        created_by_worker_job_id=artifact.created_by.worker_job_id,
-        created_by_main_agent_run_id=artifact.created_by.main_agent_run_id,
-        created_at=artifact.created_at,
-        updated_at=artifact.updated_at,
-    )
-
-
 def _worker_job_summary(job: WorkerJobRecord) -> TraceWorkerJobSummary:
     result = job.result
     trace_context = (
@@ -221,10 +177,10 @@ def _worker_job_summary(job: WorkerJobRecord) -> TraceWorkerJobSummary:
         openai_trace_id=trace_context.openai_trace_id,
         main_agent_run_id=trace_context.main_agent_run_id,
         mcp_request_id=trace_context.mcp_request_id,
-        input_artifact_ids=[
-            artifact.artifact_id for artifact in job.input.input_artifacts
-        ],
-        produced_artifact_ids=_produced_artifact_ids(result),
+        input_paths=list(job.input.input_paths),
+        read_paths=list(result.read_paths) if result is not None else [],
+        written_paths=list(result.written_paths) if result is not None else [],
+        report_paths=list(result.report_paths) if result is not None else [],
         failure_ids=_failure_ids(result),
         execution_status=(
             _value(result.execution_status) if result is not None else None
@@ -239,12 +195,13 @@ def _worker_job_summary(job: WorkerJobRecord) -> TraceWorkerJobSummary:
 
 
 def _gate_result_summary(result: GateResultRecord) -> TraceGateResultSummary:
+    result_payload = result.result if isinstance(result.result, dict) else {}
     return TraceGateResultSummary(
         gate_result_id=result.id,
         gate_type=result.gate_type,
         status=result.status,
         blocking=result.blocking,
-        evidence_artifact_ids=list(result.evidence_artifact_ids),
+        evidence_paths=list(result_payload.get("evidence_paths") or []),
         created_at=result.created_at,
     )
 
@@ -254,7 +211,6 @@ def _main_agent_run_summaries(
     run_ids: list[str],
     openai_trace_id: str | None,
     events: list[RouterEvent],
-    artifacts: list[Artifact],
 ) -> list[TraceMainAgentRunSummary]:
     summaries: list[TraceMainAgentRunSummary] = []
     for run_id in run_ids:
@@ -279,20 +235,12 @@ def _main_agent_run_summaries(
             if _value(event.severity) == "error"
             or event.payload.get("error_code") is not None
         ]
-        run_artifacts = [
-            artifact
-            for artifact in artifacts
-            if artifact.created_by.main_agent_run_id == run_id
-            or artifact.created_by.id == run_id
-        ]
-        final_report = _first_artifact(run_artifacts, "final_report")
-        replay_log = _first_artifact(run_artifacts, "main_agent_log")
         if completed is not None:
-            final_report_id = completed.payload.get("final_report_artifact_id")
-            replay_log_id = completed.payload.get("main_agent_log_artifact_id")
+            final_report_path = completed.payload.get("final_report_path")
+            replay_log_path = completed.payload.get("main_agent_log_path")
         else:
-            final_report_id = None
-            replay_log_id = None
+            final_report_path = None
+            replay_log_path = None
         summaries.append(
             TraceMainAgentRunSummary(
                 main_agent_run_id=run_id,
@@ -304,16 +252,12 @@ def _main_agent_run_summaries(
                 completed_seq=completed.seq if completed else None,
                 completed_at=completed.created_at if completed else None,
                 error_event_ids=error_events,
-                final_report_artifact_id=(
-                    str(final_report_id)
-                    if final_report_id is not None
-                    else final_report.artifact_id if final_report else None
-                ),
-                replay_log_artifact_id=(
-                    str(replay_log_id)
-                    if replay_log_id is not None
-                    else replay_log.artifact_id if replay_log else None
-                ),
+                final_report_path=str(final_report_path)
+                if final_report_path is not None
+                else None,
+                replay_log_path=str(replay_log_path)
+                if replay_log_path is not None
+                else None,
             )
         )
     return summaries
@@ -323,13 +267,6 @@ def _first_event(events: list[RouterEvent], event_type: str) -> RouterEvent | No
     for event in events:
         if _value(event.type) == event_type:
             return event
-    return None
-
-
-def _first_artifact(artifacts: list[Artifact], artifact_type: str) -> Artifact | None:
-    for artifact in artifacts:
-        if _value(artifact.type) == artifact_type:
-            return artifact
     return None
 
 
@@ -346,16 +283,59 @@ def _terminal_event(events: list[RouterEvent]) -> RouterEvent | None:
     return None
 
 
-def _produced_artifact_ids(result: WorkerResult | None) -> list[str]:
-    if result is None:
-        return []
-    return [artifact.artifact_id for artifact in result.produced_artifacts]
-
-
 def _failure_ids(result: WorkerResult | None) -> list[str]:
     if result is None:
         return []
     return [failure.failure_id for failure in result.failures]
+
+
+def _file_summaries(task: Any) -> list[TraceFileSummary]:
+    root = _workspace_root(task)
+    summaries: list[TraceFileSummary] = []
+    for path in task.current_files.all_paths:
+        summaries.append(_file_summary(path, root))
+    return summaries
+
+
+def _file_summary(path: str, root: Path | None) -> TraceFileSummary:
+    if root is None:
+        return TraceFileSummary(path=path)
+
+    try:
+        target = (root / path).resolve()
+        target.relative_to(root)
+    except ValueError:
+        return TraceFileSummary(path=path, exists=False)
+
+    if not target.exists():
+        return TraceFileSummary(path=path, exists=False)
+    if not target.is_file():
+        return TraceFileSummary(path=path, exists=True)
+    return TraceFileSummary(
+        path=path,
+        exists=True,
+        size_bytes=target.stat().st_size,
+        mime_type=_mime_type_for_path(path),
+    )
+
+
+def _workspace_root(task: Any) -> Path | None:
+    if task.workspace is not None and task.workspace.root:
+        return Path(task.workspace.root).expanduser().resolve()
+    if task.project_context.workspace_root:
+        return Path(task.project_context.workspace_root).expanduser().resolve()
+    return None
+
+
+def _mime_type_for_path(path: str) -> str | None:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".json":
+        return "application/json"
+    if suffix in {".md", ".markdown"}:
+        return "text/markdown"
+    if suffix in {".st", ".scl", ".txt", ".diff", ".patch"}:
+        return "text/plain"
+    return None
 
 
 def _optional_value(value: Any) -> str | None:

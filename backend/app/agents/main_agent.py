@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from enum import Enum
 import json
@@ -47,8 +48,6 @@ from app.core.time import utc_now
 from app.mcp.mock_worker import DEFAULT_MOCK_SCENARIO
 from app.models.router_schema import (
     AgentRunState,
-    ArtifactRef,
-    CurrentArtifacts,
     DEFAULT_SCHEMA_VERSION,
     DifficultyLevel,
     ExecutionPolicy,
@@ -65,6 +64,7 @@ from app.models.router_schema import (
     TaskStatus,
     TaskTrace,
     TaskType,
+    TokenUsage,
     WorkspaceContext,
 )
 from app.repositories.task_repo import TaskRepository
@@ -74,6 +74,10 @@ from app.services.scheduler_guard import SchedulerGuardViolation
 
 DEFAULT_MAIN_AGENT_MAX_TURNS = 20
 MAX_STOP_BLOCKS = 2
+TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS = 2_000
+TOOL_RESULT_RECENT_KEEP_COUNT = 6
+TOOL_RESULT_PREVIEW_CHARS = 1_200
+TOOL_RESULT_CLEARED_SUMMARY_CHARS = 500
 LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -90,17 +94,19 @@ TERMINAL_EVENT_BY_STATUS = {
 MAIN_AGENT_TOOL_NAMES = get_main_agent_tool_names()
 EVIDENCE_TOOL_NAMES = {
     "list_files",
+    "glob",
+    "grep",
     "read_file",
     "write_file",
     "apply_patch",
     "exec_command",
     "git_status",
-    "read_artifact",
-    "write_artifact",
     "plc_dev",
     "plc_test",
     "plc_formal",
     "plc_repair",
+    "run_quality_gate",
+    "record_validation_report",
 }
 EXECUTION_REQUEST_KEYWORDS = (
     "plc",
@@ -194,6 +200,7 @@ class _ChatToolCall:
 class _AssistantTurn:
     content: str | None
     tool_calls: list[_ChatToolCall]
+    token_usage: TokenUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +259,8 @@ class OpenAICompatibleToolLoopRunner:
                 model=model,
                 recorder=recorder,
             )
+            if recorder is not None:
+                recorder.add_token_usage(assistant_turn.token_usage)
             assistant_message = _assistant_message_for_history(assistant_turn)
             messages.append(assistant_message)
 
@@ -390,9 +399,10 @@ class OpenAICompatibleToolLoopRunner:
         model: str,
         recorder: MainAgentObservabilityRecorder | None,
     ) -> _AssistantTurn:
+        request_messages = _messages_for_model_context(messages)
         try:
             response = self.chat_client.complete(
-                messages=messages,
+                messages=request_messages,
                 tools=tools,
                 model=model,
                 stream=self.stream,
@@ -409,7 +419,7 @@ class OpenAICompatibleToolLoopRunner:
                     ),
                 )
             response = self.chat_client.complete(
-                messages=messages,
+                messages=request_messages,
                 tools=tools,
                 model=model,
                 stream=False,
@@ -490,7 +500,7 @@ class MainAgentService:
             session=self.session,
             artifact_root=self.artifact_root,
             workspace_root=_workspace_root_for_task(started, self.workspace_root),
-            execution_mode=self.execution_mode,
+            execution_mode=_effective_execution_mode(started, self.execution_mode),
             command_timeout_seconds=self.command_timeout_seconds,
             tool_output_max_chars=self.tool_output_max_chars,
             mcp_mode=self.mcp_mode,
@@ -580,17 +590,18 @@ class MainAgentService:
         openai_trace_id = task.trace.openai_trace_id or gen_trace_id()
         main_agent_run_id = new_main_agent_run_id()
         workspace_root = _workspace_root_for_task(task, self.workspace_root)
+        execution_mode = _effective_execution_mode(task, self.execution_mode)
         workspace = (
             WorkspaceContext(
                 root=str(workspace_root),
                 current_directory=str(workspace_root),
-                writable=self.execution_mode == "local_full_access",
+                writable=execution_mode == "local_full_access",
             )
             if workspace_root is not None
             else task.workspace
         )
         execution_policy = ExecutionPolicy(
-            mode=self.execution_mode,
+            mode=execution_mode,
             command_timeout_seconds=self.command_timeout_seconds,
             tool_output_max_chars=self.tool_output_max_chars,
         )
@@ -972,7 +983,7 @@ def build_state_view(task: TaskState) -> dict[str, Any]:
             "need_clarification": task.difficulty.need_clarification,
         },
         "gates": task.gates.model_dump(mode="json"),
-        "current_artifacts": _current_artifact_view(task.current_artifacts),
+        "current_files": _current_file_view(task),
         "workspace": (
             task.workspace.model_dump(mode="json")
             if task.workspace is not None
@@ -1046,11 +1057,12 @@ def build_session_context_view(
                 "status": _value(task.status),
                 "user_message": task.raw_user_request,
                 "final_response": _bounded_session_text(final_response),
-                "final_report_artifact_id": (
-                    completed.payload.get("final_report_artifact_id")
+                "final_report_path": (
+                    completed.payload.get("final_report_path")
                     if completed is not None
                     else None
                 ),
+                "workspace_files": _workspace_file_refs_for_task(task),
                 "updated_at": task.updated_at.isoformat(),
             }
         )
@@ -1071,12 +1083,35 @@ def _bounded_session_text(value: str | None, *, limit: int = 2000) -> str | None
     return f"{compact[: limit - 3]}..."
 
 
+def _workspace_file_refs_for_task(
+    task: TaskState,
+    *,
+    max_files: int = 8,
+) -> list[dict[str, Any]]:
+    paths = list(dict.fromkeys(task.current_files.all_paths))[-max_files:]
+    return [
+        {
+            "path": path,
+            "role": _current_file_role(task, path),
+        }
+        for path in paths
+    ]
+
+
 def _workspace_root_for_task(task: TaskState, fallback: Path | None) -> Path | None:
     if task.workspace is not None:
         return Path(task.workspace.root)
     if task.project_context.workspace_root:
         return Path(task.project_context.workspace_root)
     return fallback
+
+
+def _effective_execution_mode(task: TaskState, configured: str) -> str:
+    if configured != "disabled":
+        return configured
+    if task.workspace is None:
+        return configured
+    return "local_full_access" if task.workspace.writable else "local_read_only"
 
 
 def _agent_run_status_from_final_status(status: str) -> str:
@@ -1116,7 +1151,7 @@ def episode_output_from_task(
         ),
         phase=_value(task.phase),
         decisions=decisions or [],
-        artifact_refs=artifact_refs or _all_artifact_refs(task.current_artifacts),
+        artifact_refs=artifact_refs or [],
         gate_summary=MainAgentGateSummary.model_validate(
             task.gates.model_dump(mode="json")
         ),
@@ -1140,17 +1175,7 @@ def _evaluate_stop_request(
     task = TaskRepository(context.session).get_task(task_id)
     if _is_terminal(task):
         return _StopDecision(allowed=True, reason="Task is already terminal.")
-    if not _task_requires_tool_evidence(task):
-        return _StopDecision(allowed=True, reason="Task can be answered directly.")
-    if _has_tool_evidence(context, task):
-        return _StopDecision(allowed=True, reason="Required execution evidence exists.")
-    return _StopDecision(
-        allowed=False,
-        reason=(
-            "This task appears to require workspace, code, command, artifact, or "
-            "domain-tool evidence before a final answer."
-        ),
-    )
+    return _StopDecision(allowed=True, reason="Assistant provided a final response.")
 
 
 def _task_requires_tool_evidence(task: TaskState) -> bool:
@@ -1173,6 +1198,11 @@ def _task_requires_tool_evidence(task: TaskState) -> bool:
         return True
     request = f"{task.raw_user_request}\n{task.normalized_goal or ''}".lower()
     return any(keyword in request for keyword in EXECUTION_REQUEST_KEYWORDS)
+
+
+def _task_requires_quality_gate(task: TaskState) -> bool:
+    _ = task
+    return False
 
 
 def _has_tool_evidence(context: AgentToolContext, task: TaskState) -> bool:
@@ -1210,7 +1240,42 @@ def _events_have_tool_evidence(context: AgentToolContext, task_id: str) -> bool:
     )
 
 
+def _has_quality_gate_result(context: AgentToolContext, task: TaskState) -> bool:
+    if task.current_files.latest_gate_report is not None:
+        return True
+    latest_run_id = task.trace.latest_main_agent_run_id
+    latest_run = next(
+        (
+            run
+            for run in reversed(task.agent_runs)
+            if run.agent_run_id == latest_run_id
+        ),
+        None,
+    )
+    if latest_run is not None and any(
+        call.tool_name == "run_quality_gate" and _value(call.status) != "rejected"
+        for call in latest_run.tool_calls
+    ):
+        return True
+    return any(
+        event.type == EventType.MAIN_AGENT_TOOL_RESULT
+        and str(event.payload.get("tool_name") or "") == "run_quality_gate"
+        and str(event.payload.get("status") or "") != "rejected"
+        for event in EventService(context.session).list_visible_events(task.task_id)
+    )
+
+
+def _has_open_blocking_failure(task: TaskState) -> bool:
+    return any(
+        _value(failure.status) == "open"
+        and _value(failure.severity) == "blocking"
+        for failure in task.failures
+    )
+
+
 def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
+    if _has_open_blocking_failure(task):
+        return TaskStatus.FAILED.value
     latest_run_id = task.trace.latest_main_agent_run_id
     latest_run = next(
         (
@@ -1239,14 +1304,6 @@ def _final_status_for_stop(context: AgentToolContext, task: TaskState) -> str:
                 if str(event.payload.get("status") or "") == "failed"
                 else TaskStatus.SUCCEEDED.value
             )
-    if task.failures:
-        open_blocking = any(
-            _value(failure.status) == "open"
-            and _value(failure.severity) == "blocking"
-            for failure in task.failures
-        )
-        if open_blocking:
-            return TaskStatus.FAILED.value
     return TaskStatus.SUCCEEDED.value
 
 
@@ -1478,8 +1535,177 @@ def _parse_tool_arguments(raw_arguments: str | None) -> dict[str, Any]:
     return parsed
 
 
+def _messages_for_model_context(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    request_messages = deepcopy(messages)
+    tool_message_indices = [
+        index
+        for index, message in enumerate(request_messages)
+        if message.get("role") == "tool"
+    ]
+    recent_indices = set(tool_message_indices[-TOOL_RESULT_RECENT_KEEP_COUNT:])
+    for index in tool_message_indices:
+        if index in recent_indices:
+            continue
+        content = request_messages[index].get("content")
+        if not isinstance(content, str):
+            continue
+        if len(content) <= TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS:
+            continue
+        request_messages[index]["content"] = _cleared_tool_message_content(content)
+    return request_messages
+
+
 def _tool_result_content(result: AgentToolResult) -> str:
-    return json.dumps(result.model_dump(mode="json"), ensure_ascii=True)
+    payload = result.model_dump(mode="json")
+    return json.dumps(_compact_tool_result_payload(payload), ensure_ascii=True)
+
+
+def _compact_tool_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compacted = dict(payload)
+    details = compacted.get("details")
+    if isinstance(details, dict):
+        compacted["details"] = _compact_tool_result_details(compacted, details)
+    results = compacted.get("results")
+    if isinstance(results, list):
+        compacted["results"] = [
+            _compact_tool_result_payload(item) if isinstance(item, dict) else item
+            for item in results
+        ]
+    return compacted
+
+
+def _compact_tool_result_details(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    compacted = dict(details)
+    content = compacted.get("content")
+    if not isinstance(content, str):
+        return compacted
+    is_large_report = (
+        len(content) > TOOL_RESULT_ACTIVE_CONTEXT_MAX_CHARS
+        and _tool_payload_has_report_path(payload, compacted)
+    )
+    if not is_large_report or compacted.get("mode") == "full":
+        return compacted
+
+    preview = _bounded_context_text(content, TOOL_RESULT_PREVIEW_CHARS)
+    compacted.pop("content", None)
+    compacted["content_omitted"] = True
+    compacted["content_omitted_reason"] = "large_report_body"
+    compacted["content_preview"] = preview
+    compacted["content_preview_chars"] = len(preview)
+    compacted["size_chars"] = compacted.get("size_chars", len(content))
+    compacted.setdefault(
+        "refetch_hint",
+        (
+            "Call read_file with mode=\"full\" and an explicit max_chars if this "
+            "report body is required."
+        ),
+    )
+    return compacted
+
+
+def _tool_payload_has_report_path(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> bool:
+    report_paths = payload.get("report_paths")
+    if isinstance(report_paths, list) and report_paths:
+        return True
+    detail_report_paths = details.get("report_paths")
+    if isinstance(detail_report_paths, list) and detail_report_paths:
+        return True
+    for key in ("path", "output_path", "report_path"):
+        value = details.get(key)
+        if isinstance(value, str) and _path_looks_like_report(value):
+            return True
+    return False
+
+
+def _path_looks_like_report(path: str) -> bool:
+    lower = path.replace("\\", "/").lower()
+    return (
+        lower.startswith(".router/reports/")
+        or "test_report" in lower
+        or "failing_trace" in lower
+        or "formal_report" in lower
+        or "counterexample" in lower
+        or "repair_summary" in lower
+        or "gate_report" in lower
+        or "final_report" in lower
+        or "replay_log" in lower
+        or "main_agent_log" in lower
+    )
+
+
+def _cleared_tool_message_content(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+
+    cleared = {
+        "tool": payload.get("tool"),
+        "status": payload.get("status"),
+        "summary": _bounded_context_text(
+            payload.get("summary") or content,
+            TOOL_RESULT_CLEARED_SUMMARY_CHARS,
+        ),
+        "read_paths": _list_from_payload(payload, details, "read_paths"),
+        "written_paths": _list_from_payload(payload, details, "written_paths"),
+        "report_paths": _list_from_payload(payload, details, "report_paths"),
+        "worker_job_id": payload.get("worker_job_id")
+        or details.get("worker_job_id"),
+        "failure_ids": _failure_ids_from_payload(payload, details),
+        "context_cleared": True,
+        "cleared_reason": "old_large_tool_result_exceeded_active_context_budget",
+        "original_chars": len(content),
+    }
+    return json.dumps(cleared, ensure_ascii=True)
+
+
+def _list_from_payload(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+    key: str,
+) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        value = details.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _failure_ids_from_payload(
+    payload: dict[str, Any],
+    details: dict[str, Any],
+) -> list[str]:
+    failure_ids = _list_from_payload(payload, details, "failure_ids")
+    failures = payload.get("failures")
+    if isinstance(failures, list):
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            failure_id = failure.get("failure_id")
+            if failure_id is not None:
+                failure_ids.append(str(failure_id))
+    return list(dict.fromkeys(failure_ids))
+
+
+def _bounded_context_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(limit - 3, 0)]}..."
 
 
 def _episode_summary_from_tool_result(result: AgentToolResult) -> str:
@@ -1490,7 +1716,8 @@ def _episode_summary_from_tool_result(result: AgentToolResult) -> str:
 
 def _assistant_turn_from_response(response: Any) -> _AssistantTurn:
     if _has_choices(response):
-        return _assistant_turn_from_message(_first_choice_message(response))
+        turn = _assistant_turn_from_message(_first_choice_message(response))
+        return replace(turn, token_usage=_token_usage_from_response(response))
     return _assistant_turn_from_stream(response)
 
 
@@ -1507,7 +1734,11 @@ def _assistant_turn_from_message(message: Any) -> _AssistantTurn:
 def _assistant_turn_from_stream(chunks: Any) -> _AssistantTurn:
     content_parts: list[str] = []
     tool_call_parts: dict[int, dict[str, str]] = {}
+    token_usage: TokenUsage | None = None
     for chunk in chunks:
+        chunk_usage = _token_usage_from_response(chunk)
+        if chunk_usage is not None:
+            token_usage = chunk_usage
         if not _has_choices(chunk):
             continue
         choice = _first_choice(chunk)
@@ -1545,6 +1776,7 @@ def _assistant_turn_from_stream(chunks: Any) -> _AssistantTurn:
             )
             for _, part in sorted(tool_call_parts.items())
         ],
+        token_usage=token_usage,
     )
 
 
@@ -1595,6 +1827,63 @@ def _content_to_text(content: Any) -> str | None:
                     parts.append(str(text))
         return "".join(parts).strip() or None
     return str(content).strip() or None
+
+
+def _token_usage_from_response(response: Any) -> TokenUsage | None:
+    usage = _get_value(response, "usage")
+    if usage is None:
+        return None
+
+    input_tokens = _first_token_count(
+        usage,
+        "input_tokens",
+        "prompt_tokens",
+    )
+    output_tokens = _first_token_count(
+        usage,
+        "output_tokens",
+        "completion_tokens",
+    )
+    total_tokens = _first_token_count(usage, "total_tokens")
+    if total_tokens is None:
+        parts = [
+            value
+            for value in (input_tokens, output_tokens)
+            if value is not None
+        ]
+        total_tokens = sum(parts) if parts else None
+
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+    ):
+        return None
+    return TokenUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _first_token_count(usage: Any, *field_names: str) -> int | None:
+    for field_name in field_names:
+        count = _token_count_value(_get_value(usage, field_name))
+        if count is not None:
+            return count
+    return None
+
+
+def _token_count_value(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def build_main_agent_event(
@@ -1671,39 +1960,23 @@ def new_main_agent_run_id() -> str:
     return prefixed_id("main-agent-run")
 
 
-def _current_artifact_view(current_artifacts: CurrentArtifacts) -> dict[str, Any]:
-    view: dict[str, Any] = {
-        "all_artifact_ids": list(current_artifacts.all_artifact_ids)
-    }
-    for field_name, value in current_artifacts:
-        if field_name == "all_artifact_ids" or value is None:
+def _current_file_view(task: TaskState) -> dict[str, Any]:
+    current_files = task.current_files
+    view: dict[str, Any] = {"all_paths": list(current_files.all_paths)}
+    for field_name, value in current_files:
+        if field_name == "all_paths" or value is None:
             continue
-        view[field_name] = _artifact_ref_view(value)
+        view[field_name] = value
     return view
 
 
-def _all_artifact_refs(current_artifacts: CurrentArtifacts) -> list[MainAgentArtifactReference]:
-    refs: list[MainAgentArtifactReference] = []
-    seen: set[str] = set()
-    for field_name, value in current_artifacts:
-        if field_name == "all_artifact_ids" or value is None:
+def _current_file_role(task: TaskState, path: str) -> str | None:
+    for field_name, value in task.current_files:
+        if field_name == "all_paths":
             continue
-        if value.artifact_id in seen:
-            continue
-        refs.append(MainAgentArtifactReference(**_artifact_ref_view(value)))
-        seen.add(value.artifact_id)
-    return refs
-
-
-def _artifact_ref_view(artifact: ArtifactRef) -> dict[str, Any]:
-    return {
-        "artifact_id": artifact.artifact_id,
-        "type": _value(artifact.type),
-        "version": artifact.version,
-        "uri": artifact.uri,
-        "summary": artifact.summary,
-        "content_hash": artifact.content_hash,
-    }
+        if value == path:
+            return field_name
+    return None
 
 
 def _failure_summaries(failures: list[Failure]) -> list[dict[str, Any]]:
@@ -1714,7 +1987,7 @@ def _failure_summaries(failures: list[Failure]) -> list[dict[str, Any]]:
             "severity": _value(failure.severity),
             "status": _value(failure.status),
             "title": failure.title,
-            "evidence_artifact_ids": list(failure.evidence_artifact_ids),
+            "evidence_paths": list(failure.evidence_paths),
         }
         for failure in failures
         if _value(failure.status) == "open"
@@ -1726,7 +1999,26 @@ def _available_tools(task: TaskState) -> list[str]:
         return []
     if _value(task.status) == TaskStatus.WAITING_USER.value:
         return []
-    return list(MAIN_AGENT_TOOL_NAMES)
+    mode = (
+        _value(task.execution_policy.mode)
+        if task.execution_policy is not None
+        else "disabled"
+    )
+    read_tools = {"list_files", "glob", "grep", "read_file", "git_status"}
+    write_tools = {"write_file", "apply_patch", "exec_command"}
+    if mode == "local_full_access":
+        return list(MAIN_AGENT_TOOL_NAMES)
+    if mode == "local_read_only":
+        return [
+            name
+            for name in MAIN_AGENT_TOOL_NAMES
+            if name not in write_tools
+        ]
+    return [
+        name
+        for name in MAIN_AGENT_TOOL_NAMES
+        if name not in read_tools | write_tools
+    ]
 
 
 def _default_runner(

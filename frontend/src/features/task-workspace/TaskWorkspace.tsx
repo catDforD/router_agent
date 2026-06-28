@@ -1,40 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, Bot, FolderTree } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 import { getTaskTrace } from "../../api/router/trace";
 import type { TaskState, TaskTraceSummary } from "../../api/router/types";
 import { AgentCards } from "./AgentCards";
-import { ArtifactPanel } from "./ArtifactPanel";
-import { ChatPanel, type TaskListItem } from "./ChatPanel";
-import { FinalReportView } from "./FinalReportView";
+import { ChatPanel, type RailView } from "./ChatPanel";
+import { ExecutionTimeline } from "./ExecutionTimeline";
 import { SseConsole } from "./SseConsole";
 import { TraceView } from "./TraceView";
-import { useTaskArtifacts } from "./hooks/useTaskArtifacts";
+import { WorkspacePanel } from "./WorkspacePanel";
 import { useTaskEvents } from "./hooks/useTaskEvents";
+import { useSubagentStatus } from "./hooks/useSubagentStatus";
 import { readableError, useTaskState } from "./hooks/useTaskState";
 import {
-  buildGateSummaries,
   buildWorkerCards,
-  findFinalReportArtifact,
-  getRepairSummary,
-  shouldRefreshArtifacts,
+  shouldRefreshWorkspace,
   shouldRefreshTask,
   shouldRefreshTrace,
 } from "./selectors";
 
+type DockTab = "overview" | "workspace" | "trace";
+
 export function TaskWorkspace() {
   const taskState = useTaskState();
+  const [eventReconnectSignal, setEventReconnectSignal] = useState(0);
   const eventStreamId = taskState.sessionId ?? taskState.taskId;
   const eventState = useTaskEvents(
     eventStreamId,
     Boolean(eventStreamId),
     taskState.sessionId ? "session" : "task",
+    eventReconnectSignal,
   );
-  const artifactState = useTaskArtifacts(taskState.taskId);
+  const subagentStatus = useSubagentStatus();
   const [trace, setTrace] = useState<TaskTraceSummary | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | undefined>();
-  const [debugOpen, setDebugOpen] = useState(false);
-  const [taskItems, setTaskItems] = useState<TaskListItem[]>([]);
+  const [activeDockTab, setActiveDockTab] = useState<DockTab>("overview");
+  const [activeRailView, setActiveRailView] = useState<RailView>("playground");
+  const [draftMessage, setDraftMessage] = useState("");
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  const [composerResetSignal, setComposerResetSignal] = useState(0);
   const processedSeqRef = useRef(0);
 
   const loadTrace = async () => {
@@ -57,7 +63,6 @@ export function TaskWorkspace() {
 
   useEffect(() => {
     if (taskState.taskId) {
-      void artifactState.refreshArtifacts();
       void loadTrace();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,62 +87,43 @@ export function TaskWorkspace() {
     if (pendingEvents.some(shouldRefreshTask)) {
       void taskState.refreshTask();
     }
-    if (pendingEvents.some(shouldRefreshArtifacts)) {
-      void artifactState.refreshArtifacts();
-    }
-    if (pendingEvents.some(shouldRefreshTrace)) {
+    if (pendingEvents.some(shouldRefreshWorkspace) || pendingEvents.some(shouldRefreshTrace)) {
       void loadTrace();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventState.events]);
 
-  useEffect(() => {
-    const task = taskState.task;
-    if (!task) {
-      return;
-    }
-    setTaskItems((current) =>
-      upsertTaskItem(current, task, taskState.sessionId ?? undefined),
-    );
-  }, [taskState.task, taskState.sessionId]);
-
-  const finalReportArtifact = findFinalReportArtifact(
-    taskState.task,
-    artifactState.artifacts,
-    eventState.events,
-  );
-  const finalReportArtifactId = finalReportArtifact?.artifact_id;
-
-  useEffect(() => {
-    if (
-      finalReportArtifactId &&
-      artifactState.contentById[finalReportArtifactId] === undefined
-    ) {
-      void artifactState.loadContent(finalReportArtifactId).catch(() => undefined);
-    }
-  }, [finalReportArtifactId, artifactState]);
-
   const workerCards = useMemo(
     () => buildWorkerCards(taskState.task, eventState.events, trace),
     [taskState.task, eventState.events, trace],
   );
-  const gateSummaries = useMemo(
-    () => buildGateSummaries(taskState.task?.gates, trace),
-    [taskState.task?.gates, trace],
-  );
-  const repairSummary = useMemo(
-    () => getRepairSummary(taskState.task),
-    [taskState.task],
-  );
-  const finalReportContent =
-    finalReportArtifactId !== undefined
-      ? artifactState.contentById[finalReportArtifactId]?.response
-      : undefined;
+  const subagentOnlineCount =
+    subagentStatus.payload?.workers.filter((worker) => worker.online === true)
+      .length ?? 0;
+  const dockHeader = dockHeaderForTab({
+    activeDockTab,
+    workspaceCount: workspacePathCount(taskState.task, trace),
+    eventCount: eventState.events.length,
+    phase: taskState.task?.phase ?? "idle",
+    subagentOnlineCount,
+  });
 
   const refreshWorkspace = () => {
     void taskState.refreshTask();
-    void artifactState.refreshArtifacts();
     void loadTrace();
+    void subagentStatus.refresh();
+  };
+
+  const startNewTask = () => {
+    taskState.startBlankTask();
+    setTrace(null);
+    setTraceError(undefined);
+    processedSeqRef.current = 0;
+    setActiveDockTab("overview");
+    setActiveRailView("playground");
+    setDraftMessage("");
+    setComposerResetSignal((value) => value + 1);
+    setComposerFocusSignal((value) => value + 1);
   };
 
   return (
@@ -146,22 +132,54 @@ export function TaskWorkspace() {
         <div className="workspace-grid">
           <ChatPanel
             task={taskState.task}
-            taskItems={taskItems}
+            taskItems={taskState.recentTasks}
             health={taskState.health}
             loading={taskState.loading || taskState.mutation.loading}
             error={taskState.error ?? taskState.mutation.error}
             canAppendMessage={taskState.canAppendMessage}
-            onCreateTask={taskState.createNewTask}
-            onAppendMessage={taskState.appendMessage}
+            activeView={activeRailView}
+            onAppendMessage={async (message) => {
+              setEventReconnectSignal((value) => value + 1);
+              return taskState.appendMessage(message);
+            }}
             onRefreshHealth={taskState.refreshHealth}
             onSelectTask={(taskId) => {
-              const selected = taskItems.find((item) => item.taskId === taskId);
+              const selected = taskState.recentTasks.find(
+                (item) => item.taskId === taskId,
+              );
               if (selected?.sessionId) {
                 taskState.setSessionId(selected.sessionId);
               }
               taskState.setTaskId(taskId);
               void taskState.refreshTask(taskId);
             }}
+            onNewTask={startNewTask}
+            onDeleteTask={async (taskId) => {
+              const selected = taskState.recentTasks.find(
+                (item) => item.taskId === taskId,
+              );
+              const deletingCurrentTask =
+                taskState.taskId === taskId ||
+                Boolean(
+                  selected?.sessionId &&
+                    selected.sessionId === taskState.sessionId,
+                );
+              await taskState.deleteTaskById(taskId);
+              if (deletingCurrentTask) {
+                setTrace(null);
+                setTraceError(undefined);
+                processedSeqRef.current = 0;
+                setActiveDockTab("overview");
+                setDraftMessage("");
+                setComposerResetSignal((value) => value + 1);
+              }
+            }}
+            onViewChange={setActiveRailView}
+            onDraftMessage={(message) => {
+              setDraftMessage(message);
+              setComposerFocusSignal((value) => value + 1);
+            }}
+            onFocusComposer={() => setComposerFocusSignal((value) => value + 1)}
           />
 
           <SseConsole
@@ -173,58 +191,87 @@ export function TaskWorkspace() {
             loading={taskState.loading || taskState.mutation.loading}
             canAppendMessage={taskState.canAppendMessage}
             canCancel={taskState.canCancel}
-            traceOpen={debugOpen}
+            traceOpen={activeDockTab === "trace"}
             onCreateTask={taskState.createNewTask}
-            onAppendMessage={taskState.appendMessage}
-            onRefresh={refreshWorkspace}
-            onToggleTrace={() => setDebugOpen((value) => !value)}
-            onCancel={() => void taskState.cancelCurrentTask()}
-            onArtifactClick={(artifactId) => {
-              void artifactState.loadContent(artifactId).catch(() => undefined);
+            onAppendMessage={async (message) => {
+              setEventReconnectSignal((value) => value + 1);
+              return taskState.appendMessage(message);
             }}
+            onNewTask={startNewTask}
+            onRefresh={refreshWorkspace}
+            onToggleTrace={() =>
+              setActiveDockTab((value) =>
+                value === "trace" ? "overview" : "trace",
+              )
+            }
+            onCancel={() => void taskState.cancelCurrentTask()}
+            draftMessage={draftMessage}
+            focusSignal={composerFocusSignal}
+            resetSignal={composerResetSignal}
+            onDraftConsumed={() => setDraftMessage("")}
           />
 
           <aside className="subagent-dock">
             <div className="dock-header">
               <div>
-                <h2>Subagents</h2>
-                <p>{taskState.task?.phase ?? "idle"}</p>
+                <h2>{dockHeader.title}</h2>
+                <p>{dockHeader.subtitle}</p>
               </div>
-              <span className="pill">{artifactState.artifacts.length} artifacts</span>
+              <span className="pill">{dockHeader.badge}</span>
+            </div>
+            <div className="dock-tabs" role="tablist" aria-label="Run inspector">
+              <DockTabButton
+                active={activeDockTab === "overview"}
+                icon={Bot}
+                label="Subagents"
+                count={subagentOnlineCount}
+                onClick={() => setActiveDockTab("overview")}
+              />
+              <DockTabButton
+                active={activeDockTab === "workspace"}
+                icon={FolderTree}
+                label="Workspace"
+                count={workspacePathCount(taskState.task, trace)}
+                onClick={() => setActiveDockTab("workspace")}
+              />
+              <DockTabButton
+                active={activeDockTab === "trace"}
+                icon={Activity}
+                label="Trace"
+                count={eventState.events.length}
+                onClick={() => setActiveDockTab("trace")}
+              />
             </div>
             <div className="dock-scroll">
-              <AgentCards
-                workers={workerCards}
-                gates={gateSummaries}
-                repair={repairSummary}
-              />
-              <FinalReportView
-                finalReport={finalReportContent}
-                loading={
-                  finalReportArtifactId !== undefined &&
-                  artifactState.contentById[finalReportArtifactId]?.loading === true
-                }
-              />
-              <ArtifactPanel
-                artifacts={artifactState.artifacts}
-                loading={artifactState.loading}
-                error={artifactState.error}
-                selectedArtifactId={artifactState.selectedArtifactId}
-                selectedContent={artifactState.selectedContent}
-                onSelect={(artifactId) => {
-                  void artifactState.loadContent(artifactId).catch(() => undefined);
-                }}
-              />
-              {debugOpen ? (
-                <TraceView
+              {activeDockTab === "overview" ? (
+                <AgentCards
+                  workers={workerCards}
+                  subagentStatus={subagentStatus.payload}
+                  subagentStatusError={subagentStatus.error}
+                  subagentStatusLoading={subagentStatus.loading}
+                />
+              ) : null}
+              {activeDockTab === "workspace" ? (
+                <WorkspacePanel
+                  task={taskState.task}
                   trace={trace}
                   loading={traceLoading}
                   error={traceError}
-                  onRefresh={() => void loadTrace()}
-                  onArtifactClick={(artifactId) => {
-                    void artifactState.loadContent(artifactId).catch(() => undefined);
-                  }}
+                  onRefresh={refreshWorkspace}
                 />
+              ) : null}
+              {activeDockTab === "trace" ? (
+                <>
+                  <ExecutionTimeline
+                    events={eventState.events}
+                  />
+                  <TraceView
+                    trace={trace}
+                    loading={traceLoading}
+                    error={traceError}
+                    onRefresh={() => void loadTrace()}
+                  />
+                </>
               ) : null}
             </div>
           </aside>
@@ -234,27 +281,101 @@ export function TaskWorkspace() {
   );
 }
 
-function upsertTaskItem(
-  current: TaskListItem[],
-  task: TaskState,
-  sessionId?: string,
-): TaskListItem[] {
-  const item: TaskListItem = {
-    taskId: task.task_id,
-    sessionId,
-    title: task.title ?? firstLine(task.normalized_goal ?? task.raw_user_request),
-    status: task.status,
-    phase: task.phase,
-    updatedAt: task.updated_at,
-  };
-  const sameConversation = (existing: TaskListItem) =>
-    sessionId ? existing.sessionId === sessionId : existing.taskId === task.task_id;
-  return [
-    item,
-    ...current.filter((existing) => !sameConversation(existing)),
-  ].slice(0, 8);
+function DockTabButton({
+  active,
+  icon: Icon,
+  label,
+  count,
+  onClick,
+}: {
+  active: boolean;
+  icon: LucideIcon;
+  label: string;
+  count?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-selected={active}
+      className="dock-tab"
+      role="tab"
+      type="button"
+      onClick={onClick}
+    >
+      <Icon size={14} />
+      <span>{label}</span>
+      {count !== undefined ? <small>{count}</small> : null}
+    </button>
+  );
 }
 
-function firstLine(value: string): string {
-  return value.split(/\r?\n/)[0]?.trim() || "Untitled task";
+function dockHeaderForTab({
+  activeDockTab,
+  workspaceCount,
+  eventCount,
+  phase,
+  subagentOnlineCount,
+}: {
+  activeDockTab: DockTab;
+  workspaceCount: number;
+  eventCount: number;
+  phase: string;
+  subagentOnlineCount: number;
+}): {
+  title: string;
+  subtitle: string;
+  badge: string;
+} {
+  if (activeDockTab === "workspace") {
+    return {
+      title: "Workspace",
+      subtitle: workspaceCount ? "Generated task files" : "No generated files yet",
+      badge: `${workspaceCount} paths`,
+    };
+  }
+  if (activeDockTab === "trace") {
+    return {
+      title: "Trace",
+      subtitle: eventCount ? "Execution event stream" : "No events yet",
+      badge: `${eventCount} events`,
+    };
+  }
+  return {
+    title: "Subagents",
+    subtitle: phase,
+    badge: `${subagentOnlineCount}/4 online`,
+  };
+}
+
+function workspacePathCount(
+  task: TaskState | null,
+  trace: TaskTraceSummary | null,
+): number {
+  const paths = new Set<string>();
+  for (const path of task?.current_files.all_paths ?? []) {
+    addWorkspacePath(paths, path);
+  }
+  for (const file of trace?.files ?? []) {
+    addWorkspacePath(paths, file.path);
+  }
+  for (const job of trace?.worker_jobs ?? []) {
+    job.input_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.read_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.written_paths.forEach((path) => addWorkspacePath(paths, path));
+    job.report_paths.forEach((path) => addWorkspacePath(paths, path));
+  }
+  return paths.size;
+}
+
+function addWorkspacePath(paths: Set<string>, path: string): void {
+  if (!isSystemWorkspacePath(path)) {
+    paths.add(path);
+  }
+}
+
+function isSystemWorkspacePath(path: string): boolean {
+  return (
+    (path === ".router" || path.startsWith(".router/")) &&
+    !path.startsWith(".router/reports/")
+  );
 }

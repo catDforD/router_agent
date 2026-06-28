@@ -109,6 +109,42 @@
           "default": null,
           "title": "Module Name"
         },
+        "workspace_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Path"
+        },
+        "file_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File Role"
+        },
+        "source_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Task Id"
+        },
         "requirement_ids": {
           "anyOf": [
             {

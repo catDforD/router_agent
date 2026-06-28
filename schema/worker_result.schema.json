@@ -1,90 +1,5 @@
 {
   "$defs": {
-    "ArtifactRef": {
-      "additionalProperties": false,
-      "properties": {
-        "artifact_id": {
-          "title": "Artifact Id",
-          "type": "string"
-        },
-        "type": {
-          "$ref": "#/$defs/ArtifactType"
-        },
-        "version": {
-          "minimum": 1,
-          "title": "Version",
-          "type": "integer"
-        },
-        "uri": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Uri"
-        },
-        "summary": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Summary"
-        },
-        "content_hash": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Content Hash"
-        }
-      },
-      "required": [
-        "artifact_id",
-        "type",
-        "version"
-      ],
-      "title": "ArtifactRef",
-      "type": "object"
-    },
-    "ArtifactType": {
-      "enum": [
-        "raw_user_request",
-        "requirements_ir",
-        "plc_code",
-        "io_contract",
-        "plc_project_bundle",
-        "test_cases",
-        "test_report",
-        "failing_trace",
-        "formal_properties",
-        "formal_model",
-        "formal_report",
-        "counterexample",
-        "patch",
-        "repair_summary",
-        "gate_report",
-        "final_report",
-        "worker_log",
-        "main_agent_log",
-        "misc"
-      ],
-      "title": "ArtifactType",
-      "type": "string"
-    },
     "Assumption": {
       "additionalProperties": false,
       "properties": {
@@ -272,7 +187,7 @@
           ],
           "default": null
         },
-        "related_artifact_ids": {
+        "related_file_paths": {
           "anyOf": [
             {
               "items": {
@@ -285,7 +200,7 @@
             }
           ],
           "default": null,
-          "title": "Related Artifact Ids"
+          "title": "Related File Paths"
         },
         "related_requirement_ids": {
           "anyOf": [
@@ -315,18 +230,6 @@
     "DiagnosticLocation": {
       "additionalProperties": false,
       "properties": {
-        "artifact_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Artifact Id"
-        },
         "file_path": {
           "anyOf": [
             {
@@ -452,11 +355,11 @@
           ],
           "default": null
         },
-        "evidence_artifact_ids": {
+        "evidence_paths": {
           "items": {
             "type": "string"
           },
-          "title": "Evidence Artifact Ids",
+          "title": "Evidence Paths",
           "type": "array"
         },
         "status": {
@@ -486,7 +389,7 @@
           "default": null,
           "title": "Resolved By Worker Job Id"
         },
-        "resolved_by_artifact_id": {
+        "resolved_by_path": {
           "anyOf": [
             {
               "type": "string"
@@ -496,7 +399,7 @@
             }
           ],
           "default": null,
-          "title": "Resolved By Artifact Id"
+          "title": "Resolved By Path"
         },
         "created_at": {
           "format": "date-time",
@@ -523,7 +426,6 @@
         "severity",
         "title",
         "description",
-        "evidence_artifact_ids",
         "status",
         "created_at"
       ],
@@ -548,7 +450,7 @@
           "default": null,
           "title": "Steps"
         },
-        "input_trace_artifact_id": {
+        "input_trace_path": {
           "anyOf": [
             {
               "type": "string"
@@ -558,9 +460,9 @@
             }
           ],
           "default": null,
-          "title": "Input Trace Artifact Id"
+          "title": "Input Trace Path"
         },
-        "counterexample_artifact_id": {
+        "counterexample_path": {
           "anyOf": [
             {
               "type": "string"
@@ -570,7 +472,7 @@
             }
           ],
           "default": null,
-          "title": "Counterexample Artifact Id"
+          "title": "Counterexample Path"
         }
       },
       "title": "FailureReproduction",
@@ -1139,11 +1041,25 @@
       "title": "Summary",
       "type": "string"
     },
-    "produced_artifacts": {
+    "read_paths": {
       "items": {
-        "$ref": "#/$defs/ArtifactRef"
+        "type": "string"
       },
-      "title": "Produced Artifacts",
+      "title": "Read Paths",
+      "type": "array"
+    },
+    "written_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Written Paths",
+      "type": "array"
+    },
+    "report_paths": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Report Paths",
       "type": "array"
     },
     "diagnostics": {
@@ -1233,7 +1149,6 @@
     "execution_status",
     "outcome",
     "summary",
-    "produced_artifacts",
     "diagnostics",
     "assumptions",
     "failures",

@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
 from app.models.db_models import WorkerJobRow
 from app.models.router_schema import WorkerInput, WorkerJobStatus, WorkerResult
-from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
+from app.repositories._helpers import (
+    dump_model,
+    enum_value,
+    flush_or_raise_conflict,
+    sanitize_legacy_worker_input_payload,
+    sanitize_legacy_worker_result_payload,
+)
 
 
 @dataclass(frozen=True)
@@ -118,9 +124,13 @@ class WorkerJobRepository:
             worker_type=row.worker_type,
             status=row.status,
             idempotency_key=row.idempotency_key,
-            input=WorkerInput.model_validate(row.input_json),
+            input=WorkerInput.model_validate(
+                sanitize_legacy_worker_input_payload(row.input_json)
+            ),
             result=(
-                WorkerResult.model_validate(row.result_json)
+                WorkerResult.model_validate(
+                    sanitize_legacy_worker_result_payload(row.result_json)
+                )
                 if row.result_json is not None
                 else None
             ),

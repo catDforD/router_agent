@@ -1,6 +1,4 @@
 import type {
-  Artifact,
-  ArtifactRef,
   GateState,
   RouterEvent,
   TaskState,
@@ -14,7 +12,10 @@ export interface WorkerCardModel {
   objective?: string;
   startedAt?: string | null;
   completedAt?: string | null;
-  artifactIds: string[];
+  inputPaths: string[];
+  readPaths: string[];
+  writtenPaths: string[];
+  reportPaths: string[];
   failureIds: string[];
   summary?: string | null;
 }
@@ -24,7 +25,7 @@ export interface GateSummaryModel {
   label: string;
   status: "passed" | "failed" | "pending" | "not_required";
   blocking?: boolean;
-  evidenceArtifactIds: string[];
+  evidencePaths: string[];
 }
 
 export interface RepairSummaryModel {
@@ -67,9 +68,21 @@ export function buildWorkerCards(
       objective: active?.objective,
       startedAt: active?.started_at ?? latestTraceJob?.started_at,
       completedAt: active?.completed_at ?? latestTraceJob?.completed_at,
-      artifactIds: unique([
-        ...(latestTraceJob?.produced_artifact_ids ?? []),
-        ...relatedEvents.flatMap((event) => event.correlation.artifact_ids ?? []),
+      inputPaths: unique([
+        ...(latestTraceJob?.input_paths ?? []),
+        ...relatedEvents.flatMap((event) => payloadStringArray(event.payload.input_paths)),
+      ]),
+      readPaths: unique([
+        ...(latestTraceJob?.read_paths ?? []),
+        ...relatedEvents.flatMap((event) => payloadStringArray(event.payload.read_paths)),
+      ]),
+      writtenPaths: unique([
+        ...(latestTraceJob?.written_paths ?? []),
+        ...relatedEvents.flatMap((event) => payloadStringArray(event.payload.written_paths)),
+      ]),
+      reportPaths: unique([
+        ...(latestTraceJob?.report_paths ?? []),
+        ...relatedEvents.flatMap((event) => payloadStringArray(event.payload.report_paths)),
       ]),
       failureIds: unique([
         ...(latestTraceJob?.failure_ids ?? []),
@@ -135,7 +148,7 @@ export function buildGateSummaries(
       ...item,
       status: traced.status === "passed" ? "passed" : "failed",
       blocking: traced.blocking,
-      evidenceArtifactIds: traced.evidence_artifact_ids,
+      evidencePaths: traced.evidence_paths,
     };
   });
 }
@@ -150,34 +163,25 @@ export function getRepairSummary(task: TaskState | null): RepairSummaryModel {
   };
 }
 
-export function findFinalReportArtifact(
+export function findFinalReportPath(
   task: TaskState | null,
-  artifacts: Artifact[],
   events: RouterEvent[],
-): ArtifactRef | Artifact | null {
-  if (task?.current_artifacts.final_report) {
-    return task.current_artifacts.final_report;
-  }
-  const artifact = artifacts.find((item) => item.type === "final_report");
-  if (artifact) {
-    return artifact;
+  trace: TaskTraceSummary | null,
+): string | null {
+  if (task?.current_files.final_report) {
+    return task.current_files.final_report;
   }
   const completed = [...events]
     .reverse()
     .find((event) => event.type === "agent.completed");
-  const artifactId = completed?.payload.final_report_artifact_id;
-  if (typeof artifactId !== "string") {
-    return null;
+  const eventPath = completed ? payloadString(completed, "final_report_path") : undefined;
+  if (eventPath) {
+    return eventPath;
   }
   return (
-    artifacts.find((item) => item.artifact_id === artifactId) ?? {
-      artifact_id: artifactId,
-      type: "final_report",
-      version: 1,
-      summary: "Main Agent final report.",
-      uri: null,
-      content_hash: null,
-    }
+    [...(trace?.main_agent_runs ?? [])]
+      .reverse()
+      .find((run) => run.final_report_path)?.final_report_path ?? null
   );
 }
 
@@ -192,11 +196,12 @@ export function shouldRefreshTask(event: RouterEvent): boolean {
   );
 }
 
-export function shouldRefreshArtifacts(event: RouterEvent): boolean {
+export function shouldRefreshWorkspace(event: RouterEvent): boolean {
   return (
-    event.type.startsWith("artifact.") ||
     event.type === "worker.completed" ||
+    event.type === "worker.progress" ||
     event.type === "agent.completed" ||
+    event.type === "agent.tool_result" ||
     event.type.startsWith("task.")
   );
 }
@@ -240,7 +245,7 @@ function gate(
   key: string,
   label: string,
   status: GateSummaryModel["status"],
-  traceByType: Map<string, { blocking: boolean; evidence_artifact_ids: string[] }>,
+  traceByType: Map<string, { blocking: boolean; evidence_paths: string[] }>,
 ): GateSummaryModel {
   const traced = traceByType.get(key);
   return {
@@ -248,8 +253,20 @@ function gate(
     label,
     status,
     blocking: traced?.blocking,
-    evidenceArtifactIds: traced?.evidence_artifact_ids ?? [],
+    evidencePaths: traced?.evidence_paths ?? [],
   };
+}
+
+function payloadString(event: RouterEvent, key: string): string | undefined {
+  const value = event.payload[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function payloadStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function unique(values: string[]): string[] {

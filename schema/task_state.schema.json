@@ -147,91 +147,6 @@
       "title": "AgentToolCallRecord",
       "type": "object"
     },
-    "ArtifactRef": {
-      "additionalProperties": false,
-      "properties": {
-        "artifact_id": {
-          "title": "Artifact Id",
-          "type": "string"
-        },
-        "type": {
-          "$ref": "#/$defs/ArtifactType"
-        },
-        "version": {
-          "minimum": 1,
-          "title": "Version",
-          "type": "integer"
-        },
-        "uri": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Uri"
-        },
-        "summary": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Summary"
-        },
-        "content_hash": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Content Hash"
-        }
-      },
-      "required": [
-        "artifact_id",
-        "type",
-        "version"
-      ],
-      "title": "ArtifactRef",
-      "type": "object"
-    },
-    "ArtifactType": {
-      "enum": [
-        "raw_user_request",
-        "requirements_ir",
-        "plc_code",
-        "io_contract",
-        "plc_project_bundle",
-        "test_cases",
-        "test_report",
-        "failing_trace",
-        "formal_properties",
-        "formal_model",
-        "formal_report",
-        "counterexample",
-        "patch",
-        "repair_summary",
-        "gate_report",
-        "final_report",
-        "worker_log",
-        "main_agent_log",
-        "misc"
-      ],
-      "title": "ArtifactType",
-      "type": "string"
-    },
     "Assumption": {
       "additionalProperties": false,
       "properties": {
@@ -368,175 +283,198 @@
       "title": "ClarificationStatus",
       "type": "string"
     },
-    "CurrentArtifacts": {
+    "CurrentFiles": {
       "additionalProperties": false,
       "properties": {
         "raw_user_request": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Raw User Request"
         },
-        "requirements_ir": {
+        "requirements": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Requirements"
         },
         "current_code": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Current Code"
         },
         "current_io_contract": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Current Io Contract"
         },
         "latest_test_cases": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Test Cases"
         },
         "latest_test_report": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Test Report"
         },
         "latest_failing_trace": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Failing Trace"
         },
         "latest_formal_properties": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Formal Properties"
         },
         "latest_formal_report": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Formal Report"
         },
         "latest_counterexample": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Counterexample"
         },
         "latest_patch": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Patch"
         },
         "latest_repair_summary": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Repair Summary"
         },
         "latest_gate_report": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Latest Gate Report"
         },
         "final_report": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ArtifactRef"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Final Report"
         },
-        "all_artifact_ids": {
+        "main_agent_log": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Main Agent Log"
+        },
+        "all_paths": {
           "items": {
             "type": "string"
           },
-          "title": "All Artifact Ids",
+          "title": "All Paths",
           "type": "array"
         }
       },
-      "required": [
-        "all_artifact_ids"
-      ],
-      "title": "CurrentArtifacts",
+      "title": "CurrentFiles",
       "type": "object"
     },
     "DifficultyLevel": {
@@ -799,11 +737,11 @@
           ],
           "default": null
         },
-        "evidence_artifact_ids": {
+        "evidence_paths": {
           "items": {
             "type": "string"
           },
-          "title": "Evidence Artifact Ids",
+          "title": "Evidence Paths",
           "type": "array"
         },
         "status": {
@@ -833,7 +771,7 @@
           "default": null,
           "title": "Resolved By Worker Job Id"
         },
-        "resolved_by_artifact_id": {
+        "resolved_by_path": {
           "anyOf": [
             {
               "type": "string"
@@ -843,7 +781,7 @@
             }
           ],
           "default": null,
-          "title": "Resolved By Artifact Id"
+          "title": "Resolved By Path"
         },
         "created_at": {
           "format": "date-time",
@@ -870,7 +808,6 @@
         "severity",
         "title",
         "description",
-        "evidence_artifact_ids",
         "status",
         "created_at"
       ],
@@ -895,7 +832,7 @@
           "default": null,
           "title": "Steps"
         },
-        "input_trace_artifact_id": {
+        "input_trace_path": {
           "anyOf": [
             {
               "type": "string"
@@ -905,9 +842,9 @@
             }
           ],
           "default": null,
-          "title": "Input Trace Artifact Id"
+          "title": "Input Trace Path"
         },
-        "counterexample_artifact_id": {
+        "counterexample_path": {
           "anyOf": [
             {
               "type": "string"
@@ -917,7 +854,7 @@
             }
           ],
           "default": null,
-          "title": "Counterexample Artifact Id"
+          "title": "Counterexample Path"
         }
       },
       "title": "FailureReproduction",
@@ -1060,7 +997,7 @@
           "description": "Known values include Codesys, Siemens, Beckhoff, Mitsubishi, Omron, Rockwell, and unknown; arbitrary platform strings are allowed.",
           "title": "Target Platform"
         },
-        "coding_style_artifact_id": {
+        "coding_style_path": {
           "anyOf": [
             {
               "type": "string"
@@ -1070,9 +1007,9 @@
             }
           ],
           "default": null,
-          "title": "Coding Style Artifact Id"
+          "title": "Coding Style Path"
         },
-        "project_memory_artifact_ids": {
+        "project_memory_paths": {
           "anyOf": [
             {
               "items": {
@@ -1085,7 +1022,7 @@
             }
           ],
           "default": null,
-          "title": "Project Memory Artifact Ids"
+          "title": "Project Memory Paths"
         },
         "workspace_root": {
           "anyOf": [
@@ -1523,8 +1460,8 @@
     "gates": {
       "$ref": "#/$defs/GateState"
     },
-    "current_artifacts": {
-      "$ref": "#/$defs/CurrentArtifacts"
+    "current_files": {
+      "$ref": "#/$defs/CurrentFiles"
     },
     "active_worker_jobs": {
       "items": {
@@ -1599,7 +1536,6 @@
     "project_context",
     "runtime_limits",
     "gates",
-    "current_artifacts",
     "active_worker_jobs",
     "completed_worker_job_ids",
     "assumptions",

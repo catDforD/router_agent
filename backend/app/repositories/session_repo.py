@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import RepositoryConflictError, RepositoryNotFoundError
@@ -17,7 +17,12 @@ from app.models.router_schema import (
     EventVisibility,
     RouterEvent,
 )
-from app.repositories._helpers import dump_model, enum_value, flush_or_raise_conflict
+from app.repositories._helpers import (
+    dump_model,
+    enum_value,
+    flush_or_raise_conflict,
+    sanitize_legacy_agent_session_payload,
+)
 
 
 class AgentSessionRepository:
@@ -88,6 +93,21 @@ class AgentSessionRepository:
             f"agent session update conflicts: {agent_session.session_id}",
         )
         return agent_session
+
+    def delete_session(self, session_id: str) -> None:
+        row = self.session.get(AgentSessionRow, session_id)
+        if row is None:
+            raise RepositoryNotFoundError(f"agent session not found: {session_id}")
+        self.session.execute(
+            delete(AgentSessionEventRow).where(
+                AgentSessionEventRow.session_id == session_id
+            )
+        )
+        self.session.execute(
+            delete(AgentRunRow).where(AgentRunRow.session_id == session_id)
+        )
+        self.session.delete(row)
+        self.session.flush()
 
     def create_run(
         self,
@@ -269,7 +289,7 @@ class AgentSessionRepository:
         payload["event_seq"] = row.event_seq
         payload["latest_run_id"] = row.latest_run_id
         payload["latest_task_id"] = row.latest_task_id
-        return AgentSession.model_validate(payload)
+        return AgentSession.model_validate(sanitize_legacy_agent_session_payload(payload))
 
     @staticmethod
     def _apply_session(row: AgentSessionRow, agent_session: AgentSession) -> None:

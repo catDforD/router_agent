@@ -3,6 +3,7 @@ import type {
   AppendUserMessageResponse,
   CreateTaskResponse,
   ProjectContext,
+  TaskListResponse,
   TaskState,
 } from "./types";
 
@@ -23,6 +24,12 @@ export async function getTask(taskId: string): Promise<TaskState> {
   return requestJson<TaskState>(`/api/tasks/${encodeURIComponent(taskId)}`);
 }
 
+export async function listTasks(limit = 20): Promise<TaskListResponse> {
+  return requestJson<TaskListResponse>(
+    `/api/tasks?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
 export async function appendUserMessage(
   taskId: string,
   message: string,
@@ -41,4 +48,10 @@ export async function cancelTask(taskId: string): Promise<TaskState> {
     `/api/tasks/${encodeURIComponent(taskId)}/cancel`,
     { method: "POST" },
   );
+}
+
+export async function deleteTask(taskId: string): Promise<void> {
+  await requestJson<void>(`/api/tasks/${encodeURIComponent(taskId)}`, {
+    method: "DELETE",
+  });
 }

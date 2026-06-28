@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -10,14 +11,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.ids import new_artifact_id, new_event_id
+from app.core.ids import new_event_id
 from app.core.time import utc_now
 from app.models.router_schema import (
-    ArtifactCreator,
-    ArtifactCreatorType,
-    ArtifactRef,
-    ArtifactType,
-    ArtifactVisibility,
     ClarificationStatus,
     EventCorrelation,
     EventSeverity,
@@ -32,7 +28,6 @@ from app.models.router_schema import (
 )
 from app.repositories.gate_repo import GateResultRecord, GateResultRepository
 from app.repositories.task_repo import TaskRepository
-from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
 from app.services.event_service import EventService
 
 
@@ -86,7 +81,7 @@ class GateOutcome:
     status: str
     blocking: bool
     message: str
-    evidence_artifact_ids: tuple[str, ...] = ()
+    evidence_paths: tuple[str, ...] = ()
     details: dict[str, Any] | None = None
 
     @property
@@ -99,7 +94,7 @@ class GateOutcome:
             "status": self.status,
             "blocking": self.blocking,
             "message": self.message,
-            "evidence_artifact_ids": list(self.evidence_artifact_ids),
+            "evidence_paths": list(self.evidence_paths),
             "details": dict(self.details or {}),
         }
 
@@ -113,7 +108,7 @@ class QualityGateAssessment:
     blocking: bool
     message: str
     outcomes: tuple[GateOutcome, ...]
-    evidence_artifact_ids: tuple[str, ...]
+    evidence_paths: tuple[str, ...]
 
     @property
     def passed(self) -> bool:
@@ -131,7 +126,7 @@ class QualityGateAssessment:
             "status": self.status,
             "blocking": self.blocking,
             "message": self.message,
-            "evidence_artifact_ids": list(self.evidence_artifact_ids),
+            "evidence_paths": list(self.evidence_paths),
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
         }
 
@@ -142,7 +137,7 @@ class QualityGateRunResult:
 
     task: TaskState
     assessment: QualityGateAssessment
-    gate_report: ArtifactRef
+    gate_report_path: str
     gate_results: tuple[GateResultRecord, ...]
 
 
@@ -166,17 +161,15 @@ def assess_quality_gate(state: TaskState) -> QualityGateAssessment:
         message = "Quality Gate passed."
 
     return QualityGateAssessment(
-        task_id=state.task_id,
-        status=status,
-        blocking=blocking,
-        message=message,
-        outcomes=outcomes,
-        evidence_artifact_ids=_dedupe(
-            artifact_id
-            for outcome in outcomes
-            for artifact_id in outcome.evidence_artifact_ids
-        ),
-    )
+            task_id=state.task_id,
+            status=status,
+            blocking=blocking,
+            message=message,
+            outcomes=outcomes,
+            evidence_paths=_dedupe(
+                path for outcome in outcomes for path in outcome.evidence_paths
+            ),
+        )
 
 
 class QualityGateService:
@@ -184,7 +177,7 @@ class QualityGateService:
 
     def __init__(self, session: Session, artifact_root: Path) -> None:
         self.task_repository = TaskRepository(session)
-        self.artifact_store = ArtifactStore(session=session, artifact_root=artifact_root)
+        self.artifact_root = artifact_root
         self.event_service = EventService(session)
         self.gate_result_repository = GateResultRepository(session)
 
@@ -207,7 +200,7 @@ class QualityGateService:
 
         task = self.task_repository.get_task(task_id)
         assessment = assess_quality_gate(task)
-        report_artifact = self._write_gate_report(task, assessment, created_at=started_at)
+        report_path = self._write_gate_report(task, assessment, created_at=started_at)
         gate_results = self._persist_gate_results(
             task_id=task_id,
             assessment=assessment,
@@ -243,14 +236,15 @@ class QualityGateService:
                 ),
                 message=assessment.message,
                 created_at=started_at,
-                artifact_ids=[report_artifact.artifact_id],
+                artifact_ids=None,
                 openai_trace_id=task_after_report.trace.openai_trace_id,
                 main_agent_run_id=task_after_report.trace.latest_main_agent_run_id,
                 payload={
                     "task_id": task_id,
                     "status": assessment.status,
                     "blocking": assessment.blocking,
-                    "gate_report_artifact_id": report_artifact.artifact_id,
+                    "gate_report_path": report_path,
+                    "evidence_paths": list(assessment.evidence_paths),
                     "failed_gates": [
                         outcome.gate_type
                         for outcome in assessment.outcomes
@@ -264,7 +258,7 @@ class QualityGateService:
         return QualityGateRunResult(
             task=self.task_repository.get_task(task_id),
             assessment=assessment,
-            gate_report=report_artifact,
+            gate_report_path=report_path,
             gate_results=tuple(gate_results),
         )
 
@@ -274,10 +268,15 @@ class QualityGateService:
         assessment: QualityGateAssessment,
         *,
         created_at: datetime,
-    ) -> ArtifactRef:
-        version = self._next_gate_report_version(task.task_id)
+    ) -> str:
+        workspace_root = _workspace_root(task, self.artifact_root)
+        report_path = (
+            ".router/reports/quality_gate/"
+            f"gate_report_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}.json"
+        )
+        target = _safe_workspace_path(workspace_root, report_path)
         report = {
-            "schema_version": "router.v1",
+            "schema_version": "router.v2",
             "kind": "quality_gate_report",
             "created_at": created_at.isoformat(),
             "task": {
@@ -289,23 +288,27 @@ class QualityGateService:
             },
             "assessment": assessment.to_dict(),
         }
-        artifact = self.artifact_store.write_artifact_content(
-            ArtifactContentWrite(
-                task_id=task.task_id,
-                artifact_type=ArtifactType.GATE_REPORT,
-                version=version,
-                name=f"gate_report_v{version}.json",
-                content=report,
-                summary=assessment.message,
-                visibility=ArtifactVisibility.USER,
-                created_by=ArtifactCreator(type=ArtifactCreatorType.RUNTIME),
-                metadata={"tags": ["quality_gate", assessment.status]},
-                artifact_id=new_artifact_id(),
-                created_at=created_at,
-                mime_type="application/json",
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        current_files = task.current_files.model_copy(deep=True)
+        current_files.latest_gate_report = report_path
+        current_files.all_paths = list(
+            _dedupe([*current_files.all_paths, report_path])
+        )
+        self.task_repository.update_task_state(
+            task.model_copy(
+                deep=True,
+                update={
+                    "current_files": current_files,
+                    "updated_at": created_at,
+                },
             )
-        ).artifact
-        return self.artifact_store.get_artifact_ref(artifact.artifact_id)
+        )
+        return report_path
 
     def _persist_gate_results(
         self,
@@ -322,7 +325,7 @@ class QualityGateService:
                     gate_type=outcome.gate_type,
                     status=outcome.status,
                     blocking=outcome.blocking,
-                    evidence_artifact_ids=list(outcome.evidence_artifact_ids),
+                    evidence_artifact_ids=[],
                     result={
                         "aggregate_status": assessment.status,
                         "aggregate_blocking": assessment.blocking,
@@ -333,31 +336,21 @@ class QualityGateService:
             )
         return records
 
-    def _next_gate_report_version(self, task_id: str) -> int:
-        reports = [
-            artifact
-            for artifact in self.artifact_store.list_task_artifacts(task_id)
-            if _value(artifact.type) == ArtifactType.GATE_REPORT.value
-        ]
-        if not reports:
-            return 1
-        return max(report.version for report in reports) + 1
-
 
 def _assess_requirements_gate(state: TaskState) -> GateOutcome:
-    evidence = _artifact_ids(
-        state.current_artifacts.raw_user_request,
-        state.current_artifacts.requirements_ir,
+    evidence = _paths(
+        state.current_files.raw_user_request,
+        state.current_files.requirements,
     )
     if state.raw_user_request.strip() or evidence:
         return _passed(
             REQUIREMENTS_GATE,
             "Requirement source is available.",
-            evidence_artifact_ids=evidence,
+            evidence_paths=evidence,
         )
     return _failed(
         REQUIREMENTS_GATE,
-        "Quality Gate requires a raw user request or requirements artifact.",
+        "Quality Gate requires a raw user request or requirements file.",
     )
 
 
@@ -365,17 +358,17 @@ def _assess_code_gate(state: TaskState) -> GateOutcome:
     if not _requires_code(state):
         return _passed(CODE_GATE, "Task does not require PLC code evidence.")
 
-    current_code = state.current_artifacts.current_code
+    current_code = state.current_files.current_code
     if current_code is not None:
         return _passed(
             CODE_GATE,
-            "Current PLC code artifact is available.",
-            evidence_artifact_ids=(current_code.artifact_id,),
+            "Current PLC code file is available.",
+            evidence_paths=(current_code,),
         )
 
     return _failed(
         CODE_GATE,
-        "Quality Gate requires a current PLC code artifact before delivery.",
+        "Quality Gate requires a current PLC code file before delivery.",
     )
 
 
@@ -383,19 +376,19 @@ def _assess_test_gate(state: TaskState) -> GateOutcome:
     if not _requires_test(state):
         return _passed(TEST_GATE, "Task does not require test evidence.")
 
-    report = state.current_artifacts.latest_test_report
+    report = state.current_files.latest_test_report
     if report is not None and state.gates.latest_test_passed is True:
         return _passed(
             TEST_GATE,
             "Latest test report passed.",
-            evidence_artifact_ids=(report.artifact_id,),
+            evidence_paths=(report,),
         )
 
-    evidence = _artifact_ids(report)
+    evidence = _paths(report)
     return _failed(
         TEST_GATE,
         "Quality Gate requires a passing latest test report before delivery.",
-        evidence_artifact_ids=evidence,
+        evidence_paths=evidence,
         details={"latest_test_passed": state.gates.latest_test_passed},
     )
 
@@ -404,19 +397,19 @@ def _assess_formal_gate(state: TaskState) -> GateOutcome:
     if not _requires_formal(state):
         return _passed(FORMAL_GATE, "Task does not require formal evidence.")
 
-    report = state.current_artifacts.latest_formal_report
+    report = state.current_files.latest_formal_report
     if report is not None and state.gates.latest_formal_passed is True:
         return _passed(
             FORMAL_GATE,
             "Latest formal verification report passed.",
-            evidence_artifact_ids=(report.artifact_id,),
+            evidence_paths=(report,),
         )
 
-    evidence = _artifact_ids(report, state.current_artifacts.latest_counterexample)
+    evidence = _paths(report, state.current_files.latest_counterexample)
     return _failed(
         FORMAL_GATE,
         "Quality Gate requires a passing latest formal verification report before delivery.",
-        evidence_artifact_ids=evidence,
+        evidence_paths=evidence,
         details={"latest_formal_passed": state.gates.latest_formal_passed},
     )
 
@@ -431,15 +424,15 @@ def _assess_regression_gate(state: TaskState) -> GateOutcome:
     if not blockers:
         return _passed(REGRESSION_GATE, "No pending regression gate flags remain.")
 
-    evidence = _artifact_ids(
-        state.current_artifacts.latest_patch,
-        state.current_artifacts.latest_test_report,
-        state.current_artifacts.latest_formal_report,
+    evidence = _paths(
+        state.current_files.latest_patch,
+        state.current_files.latest_test_report,
+        state.current_files.latest_formal_report,
     )
     return _failed(
         REGRESSION_GATE,
         "Quality Gate requires pending regression work to pass before delivery.",
-        evidence_artifact_ids=evidence,
+        evidence_paths=evidence,
         details={"pending": blockers},
     )
 
@@ -459,9 +452,9 @@ def _assess_final_gate(state: TaskState) -> GateOutcome:
     if open_blocking_failures:
         blockers.append("open_blocking_failure")
         evidence.extend(
-            artifact_id
+            path
             for failure in open_blocking_failures
-            for artifact_id in failure.evidence_artifact_ids
+            for path in failure.evidence_paths
         )
 
     if not blockers:
@@ -470,7 +463,7 @@ def _assess_final_gate(state: TaskState) -> GateOutcome:
     return _failed(
         FINAL_GATE,
         "Quality Gate requires final delivery blockers to be resolved.",
-        evidence_artifact_ids=_dedupe(evidence),
+        evidence_paths=_dedupe(evidence),
         details={"blockers": blockers},
     )
 
@@ -481,7 +474,10 @@ def _requires_code(state: TaskState) -> bool:
 
 def _requires_test(state: TaskState) -> bool:
     return (
-        state.gates.test_required
+        _value(state.task_type) == TaskType.TEST_EXISTING_CODE.value
+        or state.gates.test_required
+        or state.current_files.latest_test_report is not None
+        or state.gates.latest_test_passed is not None
         or state.difficulty.requires_test
         or _difficulty_at_least(state, "L2")
     )
@@ -489,7 +485,8 @@ def _requires_test(state: TaskState) -> bool:
 
 def _requires_formal(state: TaskState) -> bool:
     return (
-        state.gates.formal_required
+        _value(state.task_type) == TaskType.FORMAL_VERIFY_EXISTING_CODE.value
+        or state.gates.formal_required
         or state.difficulty.requires_formal
         or _difficulty_at_least(state, "L3")
         or _has_formal_safety_signal(state)
@@ -527,7 +524,7 @@ def _passed(
     gate_type: str,
     message: str,
     *,
-    evidence_artifact_ids: tuple[str, ...] = (),
+    evidence_paths: tuple[str, ...] = (),
     details: dict[str, Any] | None = None,
 ) -> GateOutcome:
     return GateOutcome(
@@ -535,7 +532,7 @@ def _passed(
         status=PASSED,
         blocking=False,
         message=message,
-        evidence_artifact_ids=_dedupe(evidence_artifact_ids),
+        evidence_paths=_dedupe(evidence_paths),
         details=details,
     )
 
@@ -544,7 +541,7 @@ def _failed(
     gate_type: str,
     message: str,
     *,
-    evidence_artifact_ids: tuple[str, ...] = (),
+    evidence_paths: tuple[str, ...] = (),
     details: dict[str, Any] | None = None,
 ) -> GateOutcome:
     return GateOutcome(
@@ -552,7 +549,7 @@ def _failed(
         status=FAILED,
         blocking=True,
         message=message,
-        evidence_artifact_ids=_dedupe(evidence_artifact_ids),
+        evidence_paths=_dedupe(evidence_paths),
         details=details,
     )
 
@@ -573,7 +570,7 @@ def _build_gate_event(
     from app.models.router_schema import RouterEvent
 
     return RouterEvent(
-        schema_version="router.v1",
+        schema_version="router.v2",
         event_id=new_event_id(),
         task_id=task_id,
         seq=0,
@@ -593,8 +590,25 @@ def _build_gate_event(
     )
 
 
-def _artifact_ids(*refs: ArtifactRef | None) -> tuple[str, ...]:
-    return _dedupe(ref.artifact_id for ref in refs if ref is not None)
+def _paths(*paths: str | None) -> tuple[str, ...]:
+    return _dedupe(path for path in paths if path)
+
+
+def _workspace_root(task: TaskState, artifact_root: Path) -> Path:
+    if task.workspace is not None and task.workspace.root:
+        return Path(task.workspace.root).expanduser().resolve()
+    if task.project_context.workspace_root:
+        return Path(task.project_context.workspace_root).expanduser().resolve()
+    return (artifact_root.parent / "workspaces" / task.task_id).expanduser().resolve()
+
+
+def _safe_workspace_path(workspace_root: Path, relative_path: str) -> Path:
+    path = Path(relative_path)
+    if path.is_absolute():
+        raise ValueError("quality gate report path must be relative to workspace")
+    target = (workspace_root / path).resolve()
+    target.relative_to(workspace_root.resolve())
+    return target
 
 
 def _dedupe(values: Any) -> tuple[str, ...]:

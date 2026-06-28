@@ -154,3 +154,30 @@ def test_managed_port_check_rejects_existing_listener() -> None:
 
         with pytest.raises(RuntimeError, match="frontend.*--no-frontend"):
             launcher.ensure_managed_ports_available(specs)
+
+
+def test_wait_http_retries_transient_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = {"count": 0}
+
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self) -> "ReadyResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def flaky_urlopen(_url: str, timeout: int) -> ReadyResponse:
+        assert timeout == 2
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError("timed out")
+        return ReadyResponse()
+
+    monkeypatch.setattr(launcher, "urlopen", flaky_urlopen)
+    monkeypatch.setattr(launcher.time, "sleep", lambda _seconds: None)
+
+    launcher.wait_http("http://127.0.0.1:8000/api/health", timeout_seconds=5)
+
+    assert attempts["count"] == 2

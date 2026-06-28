@@ -15,6 +15,14 @@ from app.agents.main_agent import (
     MainAgentRunner,
     MainAgentService,
     build_task_event,
+    build_main_agent_event,
+    gen_trace_id,
+    new_main_agent_run_id,
+)
+from app.agents.chat_completions import (
+    MainAgentProviderConfigurationError,
+    MainAgentProviderError,
+    OpenAICompatibleChatClient,
 )
 from app.agents.output_schema import MainAgentEpisodeOutput
 from app.core.config import Settings, get_settings
@@ -24,7 +32,6 @@ from app.core.ids import new_event_id, prefixed_id
 from app.core.time import utc_now
 from app.models.db_models import TaskRow
 from app.models.router_schema import (
-    Artifact,
     ClarificationQuestion,
     ClarificationStatus,
     DEFAULT_SCHEMA_VERSION,
@@ -40,9 +47,7 @@ from app.models.router_schema import (
     TaskStatus,
 )
 from app.repositories._helpers import enum_value
-from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.task_repo import TaskRepository
-from app.services.artifact_store import ArtifactStore
 from app.services.event_service import EventService
 
 
@@ -52,6 +57,7 @@ RUNTIME_STATUS_RUNNING = "running"
 RUNTIME_STATUS_IDLE = "idle"
 RUNTIME_STATUS_ERROR = "error"
 USER_MESSAGE_TAG = "user_message"
+FOLLOWUP_ANSWER_TAG = "followup_answer"
 ANSWER_MAX_CHARS = 2_000
 TERMINAL_STATUSES = {
     TaskStatus.SUCCEEDED.value,
@@ -249,6 +255,174 @@ class RuntimeService:
                     reason=str(exc),
                     episode_id=episode_id,
                 )
+
+    def answer_followup_message(
+        self,
+        task_id: str,
+        message_path: str,
+    ) -> RuntimeRunResult:
+        """Append an explanatory answer for a user follow-up in the same task."""
+
+        with self.session_factory() as session:
+            try:
+                task = TaskRepository(session).get_task(task_id)
+            except RepositoryNotFoundError:
+                return RuntimeRunResult(
+                    task_id=task_id,
+                    status="skipped",
+                    reason="task_not_found",
+                )
+
+            user_message = _read_user_message_from_workspace(task, message_path)
+            if user_message is None:
+                return RuntimeRunResult(
+                    task_id=task_id,
+                    status="skipped",
+                    reason="message_path_not_found",
+                )
+
+            now = utc_now()
+            openai_trace_id = task.trace.openai_trace_id or gen_trace_id()
+            main_agent_run_id = new_main_agent_run_id()
+            task = _ensure_followup_trace(
+                session=session,
+                task=task,
+                openai_trace_id=openai_trace_id,
+                main_agent_run_id=main_agent_run_id,
+                updated_at=now,
+            )
+            EventService(session).append_event(
+                build_main_agent_event(
+                    task_id=task_id,
+                    event_type=EventType.MAIN_AGENT_STARTED,
+                    title="Main Agent follow-up started",
+                    message="Main Agent is answering a user follow-up.",
+                    openai_trace_id=openai_trace_id,
+                    main_agent_run_id=main_agent_run_id,
+                    artifact_ids=None,
+                    payload={
+                        "task_id": task_id,
+                        "main_agent_run_id": main_agent_run_id,
+                        "mode": "followup",
+                        "message_path": message_path,
+                    },
+                    created_at=now,
+                )
+            )
+            session.commit()
+
+            try:
+                answer = self._generate_followup_answer(
+                    session=session,
+                    task=task,
+                    user_message=user_message,
+                )
+                answer_path = _write_followup_answer(task, answer, main_agent_run_id)
+                latest_task = TaskRepository(session).get_task(task_id)
+                all_paths = list(latest_task.current_files.all_paths)
+                if answer_path not in all_paths:
+                    all_paths.append(answer_path)
+                TaskRepository(session).update_task_state(
+                    latest_task.model_copy(
+                        deep=True,
+                        update={
+                            "current_files": latest_task.current_files.model_copy(
+                                update={"all_paths": all_paths}
+                            ),
+                            "updated_at": utc_now(),
+                        },
+                    )
+                )
+                EventService(session).append_event(
+                    build_main_agent_event(
+                        task_id=task_id,
+                        event_type=EventType.MAIN_AGENT_MESSAGE,
+                        title="Main Agent follow-up answer",
+                        message=answer,
+                        openai_trace_id=openai_trace_id,
+                        main_agent_run_id=main_agent_run_id,
+                        artifact_ids=None,
+                        payload={
+                            "task_id": task_id,
+                            "mode": "followup",
+                            "content": answer,
+                            "message_path": message_path,
+                            "answer_path": answer_path,
+                        },
+                        created_at=utc_now(),
+                    )
+                )
+                session.commit()
+                return RuntimeRunResult(
+                    task_id=task_id,
+                    status="answered",
+                    episode_id=main_agent_run_id,
+                )
+            except Exception as exc:
+                session.rollback()
+                self.record_runtime_exception(
+                    task_id=task_id,
+                    episode_id=main_agent_run_id,
+                    exc=exc,
+                )
+                return RuntimeRunResult(
+                    task_id=task_id,
+                    status="error",
+                    reason=str(exc),
+                    episode_id=main_agent_run_id,
+                )
+
+    def _generate_followup_answer(
+        self,
+        *,
+        session: Session,
+        task: TaskState,
+        user_message: str,
+    ) -> str:
+        fallback = _fallback_followup_answer(task=task, user_message=user_message)
+        if not self.model:
+            return fallback
+
+        final_report = _read_final_report_text(
+            session=session,
+            artifact_root=self.artifact_root,
+            task=task,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Router Agent answering a follow-up about an already "
+                    "executed PLC task. Answer in Chinese unless the user asks "
+                    "otherwise. Keep the answer concise, structured, and do not "
+                    "claim new worker execution or validation."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _followup_prompt(
+                    task=task,
+                    final_report=final_report,
+                    user_message=user_message,
+                ),
+            },
+        ]
+        try:
+            response = OpenAICompatibleChatClient.from_settings(
+                self.settings
+            ).complete(
+                messages=messages,
+                tools=None,
+                model=self.model,
+                stream=False,
+            )
+        except (
+            MainAgentProviderConfigurationError,
+            MainAgentProviderError,
+        ):
+            return fallback
+
+        return _content_from_chat_response(response) or fallback
 
     def claim_runtime_episode(
         self,
@@ -521,32 +695,164 @@ def run_runtime_resume_task(task_id: str, settings: Settings | None = None) -> N
     RuntimeService(settings=settings).resume_after_user_message(task_id)
 
 
+def run_runtime_followup_task(
+    task_id: str,
+    message_path: str,
+    settings: Settings | None = None,
+) -> None:
+    """BackgroundTasks entrypoint for answering a same-task follow-up."""
+
+    RuntimeService(settings=settings).answer_followup_message(
+        task_id,
+        message_path,
+    )
+
+
 def latest_user_message_answer_context(
     *,
     session: Session,
     artifact_root: Path,
     task_id: str,
 ) -> str | None:
-    """Return compact answer context from the latest user message artifact."""
+    """Return compact answer context from the latest user message workspace file."""
 
-    artifact = _latest_user_message_artifact(session, task_id)
-    if artifact is None:
+    _ = artifact_root
+    task = TaskRepository(session).get_task(task_id)
+    message_path = _latest_user_message_path(task)
+    if message_path is None:
         return None
 
-    stored = ArtifactStore(session=session, artifact_root=artifact_root).read_artifact_content(
-        artifact.artifact_id
-    )
-    try:
-        payload = json.loads(stored.content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        message = stored.artifact.summary
-    else:
-        message = str(payload.get("message") or stored.artifact.summary)
+    message = _read_user_message_from_workspace(task, message_path)
+    if message is None:
+        return None
 
     compact = " ".join(message.split())
     if len(compact) > ANSWER_MAX_CHARS:
         compact = f"{compact[: ANSWER_MAX_CHARS - 3]}..."
-    return f"{compact}\n\nSource artifact: {artifact.artifact_id}"
+    return f"{compact}\n\nSource file: {message_path}"
+
+
+def _read_user_message_from_workspace(task: TaskState, message_path: str) -> str | None:
+    try:
+        target = _workspace_path(task, message_path)
+        raw = target.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        message = raw
+    else:
+        message = str(payload.get("message") or "")
+    return " ".join(message.split()) or None
+
+
+def _ensure_followup_trace(
+    *,
+    session: Session,
+    task: TaskState,
+    openai_trace_id: str,
+    main_agent_run_id: str,
+    updated_at: datetime,
+) -> TaskState:
+    run_ids = list(task.trace.main_agent_run_ids)
+    if main_agent_run_id not in run_ids:
+        run_ids.append(main_agent_run_id)
+    updated = task.model_copy(
+        deep=True,
+        update={
+            "trace": task.trace.model_copy(
+                update={
+                    "openai_trace_id": openai_trace_id,
+                    "main_agent_run_ids": run_ids,
+                    "latest_main_agent_run_id": main_agent_run_id,
+                }
+            ),
+            "updated_at": updated_at,
+        },
+    )
+    return TaskRepository(session).update_task_state(updated)
+
+
+def _read_final_report_text(
+    *,
+    session: Session,
+    artifact_root: Path,
+    task: TaskState,
+) -> str | None:
+    _ = (session, artifact_root)
+    final_report_path = task.current_files.final_report
+    if final_report_path is None:
+        return None
+    try:
+        return _workspace_path(task, final_report_path).read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _followup_prompt(
+    *,
+    task: TaskState,
+    final_report: str | None,
+    user_message: str,
+) -> str:
+    return "\n\n".join(
+        [
+            "请基于以下已完成任务上下文回答用户追问。",
+            f"原始任务: {task.raw_user_request}",
+            f"任务状态: {enum_value(task.status)} / {enum_value(task.phase)}",
+            f"任务摘要: {task.normalized_goal or task.title or '无'}",
+            f"最终报告或结果上下文:\n{_truncate_context(final_report or '无')}",
+            f"用户追问:\n{user_message}",
+            "要求: 不要创建新任务；不要声称重新测试或重新调用 worker；直接解释、补充或澄清。",
+        ]
+    )
+
+
+def _fallback_followup_answer(*, task: TaskState, user_message: str) -> str:
+    normalized = (user_message or "").strip()
+    wants_reexplain = any(
+        phrase in normalized
+        for phrase in ("再解释", "重新解释", "解释一遍", "看不懂", "说明一下")
+    )
+    heading = "再解释一遍" if wants_reexplain else "补充说明"
+    return (
+        f"## {heading}\n\n"
+        f"这个回答仍然基于当前任务：{task.normalized_goal or task.raw_user_request}\n\n"
+        "可以把结果理解为三层：\n\n"
+        "- 输入层：启动按钮、停止按钮、故障或复位信号负责表达现场操作意图。\n"
+        "- 逻辑层：PLC 程序用自保持、停止优先和故障复位规则决定电机是否允许运行。\n"
+        "- 输出层：运行指示和电机输出只反映最终允许运行的状态。\n\n"
+        "如果你问的是“再解释一遍”，重点是：启动按钮只负责把运行状态置位；"
+        "停止按钮和故障条件要优先切断运行状态；复位只清除故障锁存，不应该绕过停止或安全条件。"
+    )
+
+
+def _content_from_chat_response(response: Any) -> str | None:
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = message.get("content")
+                return str(content).strip() if content else None
+        return None
+
+    choices = getattr(response, "choices", None)
+    if choices:
+        first = choices[0]
+        message = getattr(first, "message", None)
+        content = getattr(message, "content", None)
+        return str(content).strip() if content else None
+    return None
+
+
+def _truncate_context(value: str, limit: int = 6000) -> str:
+    compact = value.strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."
 
 
 def new_runtime_episode_id() -> str:
@@ -565,20 +871,36 @@ def _get_locked_task(session: Session, task_id: str) -> TaskState:
     return TaskState.model_validate(row.state_json)
 
 
-def _latest_user_message_artifact(session: Session, task_id: str) -> Artifact | None:
-    artifacts = ArtifactRepository(session).list_task_artifacts(task_id)
-    user_messages = [
-        artifact
-        for artifact in artifacts
-        if _artifact_has_tag(artifact, USER_MESSAGE_TAG)
+def _latest_user_message_path(task: TaskState) -> str | None:
+    candidates = [
+        path
+        for path in task.current_files.all_paths
+        if path.startswith(".router/requests/") and path.endswith("_user_message.json")
     ]
-    if not user_messages:
-        return None
-    return max(user_messages, key=lambda artifact: artifact.created_at)
+    return candidates[-1] if candidates else None
 
 
-def _artifact_has_tag(artifact: Artifact, tag: str) -> bool:
-    return tag in set(artifact.metadata.tags or [])
+def _workspace_path(task: TaskState, path: str) -> Path:
+    if task.workspace is None:
+        raise RuntimeError("task workspace is required")
+    root = Path(task.workspace.root).resolve()
+    target = (root / path).resolve(strict=False)
+    target.relative_to(root)
+    return target
+
+
+def _write_followup_answer(
+    task: TaskState,
+    answer: str,
+    main_agent_run_id: str,
+) -> str:
+    target = _workspace_path(
+        task,
+        f".router/runs/{task.task_id}/{main_agent_run_id}_followup_answer.md",
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(answer, encoding="utf-8")
+    return target.relative_to(Path(task.workspace.root).resolve()).as_posix()
 
 
 def _runtime_metadata(task: TaskState) -> dict[str, Any]:

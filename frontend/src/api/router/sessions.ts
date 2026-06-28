@@ -42,3 +42,9 @@ export async function appendSessionMessage(
     },
   );
 }
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  await requestJson<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+}

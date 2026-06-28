@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from typing import Iterable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -429,7 +429,11 @@ def wait_http(url: str, timeout_seconds: int = 45) -> None:
             with urlopen(url, timeout=2) as response:  # noqa: S310 - local dev URL
                 if 200 <= response.status < 500:
                     return
-        except URLError:
+        except HTTPError as exc:
+            if 200 <= exc.code < 500:
+                return
+            time.sleep(0.5)
+        except (URLError, TimeoutError, OSError):
             time.sleep(0.5)
     raise RuntimeError(f"service did not become ready: {url}")
 

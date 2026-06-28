@@ -407,8 +407,8 @@ class ClarificationQuestion(RouterBaseModel):
 
 class FailureReproduction(RouterBaseModel):
     steps: list[str] | None = None
-    input_trace_artifact_id: str | None = None
-    counterexample_artifact_id: str | None = None
+    input_trace_path: str | None = None
+    counterexample_path: str | None = None
 
 
 class Failure(RouterBaseModel):
@@ -421,11 +421,11 @@ class Failure(RouterBaseModel):
     expected: str | None = None
     actual: str | None = None
     reproduction: FailureReproduction | None = None
-    evidence_artifact_ids: list[str]
+    evidence_paths: list[str] = Field(default_factory=list)
     status: FailureStatus
     created_by_worker_job_id: str | None = None
     resolved_by_worker_job_id: str | None = None
-    resolved_by_artifact_id: str | None = None
+    resolved_by_path: str | None = None
     created_at: datetime
     resolved_at: datetime | None = None
 
@@ -513,7 +513,26 @@ class CurrentArtifacts(RouterBaseModel):
     latest_repair_summary: ArtifactRef | None = None
     latest_gate_report: ArtifactRef | None = None
     final_report: ArtifactRef | None = None
-    all_artifact_ids: list[str]
+    all_artifact_ids: list[str] = Field(default_factory=list)
+
+
+class CurrentFiles(RouterBaseModel):
+    raw_user_request: str | None = None
+    requirements: str | None = None
+    current_code: str | None = None
+    current_io_contract: str | None = None
+    latest_test_cases: str | None = None
+    latest_test_report: str | None = None
+    latest_failing_trace: str | None = None
+    latest_formal_properties: str | None = None
+    latest_formal_report: str | None = None
+    latest_counterexample: str | None = None
+    latest_patch: str | None = None
+    latest_repair_summary: str | None = None
+    latest_gate_report: str | None = None
+    final_report: str | None = None
+    main_agent_log: str | None = None
+    all_paths: list[str] = Field(default_factory=list)
 
 
 class WorkerJobRef(RouterBaseModel):
@@ -536,8 +555,8 @@ class ProjectContext(RouterBaseModel):
             "Rockwell, and unknown; arbitrary platform strings are allowed."
         ),
     )
-    coding_style_artifact_id: str | None = None
-    project_memory_artifact_ids: list[str] | None = None
+    coding_style_path: str | None = None
+    project_memory_paths: list[str] | None = None
     workspace_root: str | None = None
 
 
@@ -602,7 +621,7 @@ class TaskState(RouterBaseModel):
     agent_runs: list[AgentRunState] = Field(default_factory=list)
     runtime_limits: RuntimeLimits
     gates: GateState
-    current_artifacts: CurrentArtifacts
+    current_files: CurrentFiles = Field(default_factory=CurrentFiles)
     active_worker_jobs: list[WorkerJobRef]
     completed_worker_job_ids: list[str]
     assumptions: list[Assumption]
@@ -620,13 +639,13 @@ class TaskState(RouterBaseModel):
 
         if (
             self.phase in {TaskPhase.TESTING.value, TaskPhase.FORMAL_VERIFYING.value}
-            and self.current_artifacts.current_code is None
+            and self.current_files.current_code is None
         ):
-            raise ValueError("testing/formal_verifying phases require current_code")
+            raise ValueError("testing/formal_verifying phases require current_code path")
 
         if self.phase == TaskPhase.REPAIRING.value:
-            if self.current_artifacts.current_code is None:
-                raise ValueError("repairing phase requires current_code")
+            if self.current_files.current_code is None:
+                raise ValueError("repairing phase requires current_code path")
             has_open_blocking_failure = any(
                 failure.status == FailureStatus.OPEN.value
                 and failure.severity == Severity.BLOCKING.value
@@ -660,6 +679,13 @@ class ExpectedOutputSpec(RouterBaseModel):
     required: bool
     description: str
     schema_ref: str | None = None
+
+
+class ExpectedFileSpec(RouterBaseModel):
+    path: str
+    required: bool = True
+    description: str | None = None
+    mime_type: str | None = None
 
 
 class WorkerBudget(RouterBaseModel):
@@ -750,10 +776,13 @@ class WorkerInput(RouterBaseModel):
     mcp_tool: McpToolName
     mode: WorkerMode
     objective: str
-    input_artifacts: list[ArtifactRef]
+    workspace_root: str
+    current_directory: str
+    input_paths: list[str] = Field(default_factory=list)
+    output_paths: list[str] = Field(default_factory=list)
     context: WorkerContext
     constraints: list[WorkerConstraint]
-    expected_outputs: list[ExpectedOutputSpec]
+    expected_outputs: list[ExpectedFileSpec] = Field(default_factory=list)
     budget: WorkerBudget
     trace_context: TraceContext
     idempotency_key: str
@@ -763,7 +792,7 @@ class WorkerInput(RouterBaseModel):
 
     @model_validator(mode="after")
     def validate_worker_input_rules(self) -> WorkerInput:
-        # 不同 worker 有不同的最小输入要求，这里提前拦截错误调用。
+        # 不同 worker 有不同的最小文件输入要求，这里提前拦截错误调用。
         expected_tool = WORKER_TOOL_BY_TYPE[self.worker_type]
         if self.mcp_tool != expected_tool:
             raise ValueError(
@@ -771,37 +800,21 @@ class WorkerInput(RouterBaseModel):
                 f"{self.worker_type!r}"
             )
 
-        artifact_types = {artifact.type for artifact in self.input_artifacts}
+        input_paths = set(self.input_paths)
         if self.worker_type == WorkerType.PLC_DEV.value:
-            if not {
-                ArtifactType.RAW_USER_REQUEST.value,
-                ArtifactType.REQUIREMENTS_IR.value,
-            } & artifact_types:
-                raise ValueError(
-                    "plc-dev requires raw_user_request or requirements_ir artifact"
-                )
+            if not self.objective.strip() and not input_paths:
+                raise ValueError("plc-dev requires an objective or input file path")
         elif self.worker_type in {
             WorkerType.PLC_TEST.value,
             WorkerType.PLC_FORMAL.value,
         }:
-            required = {ArtifactType.REQUIREMENTS_IR.value, ArtifactType.PLC_CODE.value}
-            if not required <= artifact_types:
-                raise ValueError(
-                    f"{self.worker_type} requires requirements_ir and plc_code artifacts"
-                )
+            if not _has_code_path(input_paths):
+                raise ValueError(f"{self.worker_type} requires a PLC code input path")
         elif self.worker_type == WorkerType.PLC_REPAIR.value:
-            evidence_types = {
-                ArtifactType.TEST_REPORT.value,
-                ArtifactType.FAILING_TRACE.value,
-                ArtifactType.FORMAL_REPORT.value,
-                ArtifactType.COUNTEREXAMPLE.value,
-            }
-            if ArtifactType.PLC_CODE.value not in artifact_types:
-                raise ValueError("plc-repair requires a plc_code artifact")
-            if not evidence_types & artifact_types:
-                raise ValueError(
-                    "plc-repair requires failure evidence from test/formal artifacts"
-                )
+            if not _has_code_path(input_paths):
+                raise ValueError("plc-repair requires a PLC code input path")
+            if len(input_paths) < 2:
+                raise ValueError("plc-repair requires at least one failure evidence path")
 
         if self.worker_config is not None:
             _validate_worker_config_for_worker(self.worker_type, self.worker_config)
@@ -863,6 +876,10 @@ def _validate_worker_config_for_worker(
         )
 
 
+def _has_code_path(paths: set[str]) -> bool:
+    return any(path.lower().endswith((".st", ".scl", ".fbd", ".xml")) for path in paths)
+
+
 # ---------------------------------------------------------------------------
 # 3. WorkerResult
 #
@@ -879,7 +896,6 @@ class WorkerOutcome(RouterBaseModel):
 
 
 class DiagnosticLocation(RouterBaseModel):
-    artifact_id: str | None = None
     file_path: str | None = None
     line_start: int | None = Field(default=None, ge=1)
     line_end: int | None = Field(default=None, ge=1)
@@ -892,7 +908,7 @@ class Diagnostic(RouterBaseModel):
     code: str
     message: str
     location: DiagnosticLocation | None = None
-    related_artifact_ids: list[str] | None = None
+    related_file_paths: list[str] | None = None
     related_requirement_ids: list[str] | None = None
 
 
@@ -952,7 +968,9 @@ class WorkerResult(RouterBaseModel):
     execution_status: WorkerExecutionStatus
     outcome: WorkerOutcome
     summary: str
-    produced_artifacts: list[ArtifactRef]
+    read_paths: list[str] = Field(default_factory=list)
+    written_paths: list[str] = Field(default_factory=list)
+    report_paths: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic]
     assumptions: list[Assumption]
     failures: list[Failure]
@@ -1037,6 +1055,9 @@ class ArtifactMetadata(RouterBaseModel):
     target_plc_language: str | None = None
     target_platform: str | None = None
     module_name: str | None = None
+    workspace_path: str | None = None
+    file_role: str | None = None
+    source_task_id: str | None = None
     requirement_ids: list[str] | None = None
     code_metadata: CodeMetadata | None = None
     test_metadata: TestArtifactMetadata | None = None

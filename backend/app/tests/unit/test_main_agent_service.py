@@ -13,6 +13,8 @@ from app.agents.main_agent import (
     MainAgentService,
     MaxTurnsExceeded,
     ModelBehaviorError,
+    _messages_for_model_context,
+    _tool_result_content,
     build_state_view,
     build_tool_loop_agent,
     build_tool_loop_run_config,
@@ -23,13 +25,14 @@ from app.agents.output_schema import (
     MainAgentEpisodeOutput,
     MainAgentGateSummary,
 )
-from app.agents.tools import AgentToolContext
+from app.agents.tools import AgentToolContext, AgentToolResult, ToolStatus
 from app.core.errors import RepositoryNotFoundError
 from app.models.db_models import ArtifactRow, Base, EventRow, TaskRow, WorkerJobRow
 from app.models.router_schema import (
     ArtifactCreator,
     ArtifactCreatorType,
     ArtifactType,
+    ExecutionPolicy,
     Failure,
     FailureReproduction,
     GateState,
@@ -38,6 +41,7 @@ from app.models.router_schema import (
     TaskPhase,
     TaskStatus,
     TaskState,
+    WorkspaceContext,
 )
 from app.repositories.task_repo import TaskRepository
 from app.services.artifact_store import ArtifactContentWrite, ArtifactStore
@@ -214,8 +218,9 @@ def chat_response(
     *,
     content: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    response = {
         "choices": [
             {
                 "message": {
@@ -226,12 +231,16 @@ def chat_response(
             }
         ]
     }
+    if usage is not None:
+        response["usage"] = usage
+    return response
 
 
 def streamed_chat_chunks(
     *,
     content: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     delta: dict[str, Any] = {}
     if content is not None:
@@ -248,7 +257,10 @@ def streamed_chat_chunks(
             }
             for index, call in enumerate(tool_calls)
         ]
-    return [{"choices": [{"delta": delta}]}]
+    chunks = [{"choices": [{"delta": delta}]}]
+    if usage is not None:
+        chunks.append({"choices": [], "usage": usage})
+    return chunks
 
 
 def tool_call(name: str, arguments: dict[str, Any], *, call_id: str) -> dict[str, Any]:
@@ -271,6 +283,81 @@ def raw_tool_call(name: str, arguments: str, *, call_id: str) -> dict[str, Any]:
             "arguments": arguments,
         },
     }
+
+
+def test_tool_result_content_omits_large_report_body_for_model_context() -> None:
+    report_body = "validation failed\n" + ("x" * 3_000)
+    result = AgentToolResult(
+        tool="read_file",
+        task_id="task-context-001",
+        status=ToolStatus.APPLIED,
+        summary="Read report.",
+        read_paths=[".router/reports/test_report.json"],
+        report_paths=[".router/reports/test_report.json"],
+        details={
+            "path": ".router/reports/test_report.json",
+            "mode": "auto",
+            "content": report_body,
+            "size_chars": len(report_body),
+        },
+    )
+
+    content = _tool_result_content(result)
+    payload = json.loads(content)
+
+    assert report_body not in content
+    assert "content" not in payload["details"]
+    assert payload["details"]["content_omitted"] is True
+    assert payload["details"]["content_omitted_reason"] == "large_report_body"
+    assert payload["details"]["content_preview"].startswith("validation failed")
+    assert payload["details"]["refetch_hint"]
+
+
+def test_tool_history_clearing_replaces_old_large_tool_results_and_keeps_recent_results() -> None:
+    large_body = "old tool result body " + ("x" * 2_400)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "system"}]
+    for index in range(8):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "content": json.dumps(
+                    {
+                        "tool": "read_file",
+                        "status": "applied",
+                        "summary": f"Read report {index}.",
+                        "read_paths": [f".router/reports/report_{index}.json"],
+                        "report_paths": [f".router/reports/report_{index}.json"],
+                        "worker_job_id": f"worker-{index}",
+                        "failures": [{"failure_id": f"failure-{index}"}],
+                        "details": {"content": large_body},
+                    }
+                ),
+            }
+        )
+
+    request_messages = _messages_for_model_context(messages)
+    tool_contents = [
+        message["content"]
+        for message in request_messages
+        if message.get("role") == "tool"
+    ]
+    cleared = json.loads(tool_contents[0])
+
+    assert cleared["context_cleared"] is True
+    assert cleared["tool"] == "read_file"
+    assert cleared["status"] == "applied"
+    assert cleared["read_paths"] == [".router/reports/report_0.json"]
+    assert cleared["report_paths"] == [".router/reports/report_0.json"]
+    assert cleared["worker_job_id"] == "worker-0"
+    assert cleared["failure_ids"] == ["failure-0"]
+    assert cleared["cleared_reason"] == (
+        "old_large_tool_result_exceeded_active_context_budget"
+    )
+    assert large_body not in tool_contents[0]
+    assert large_body not in tool_contents[1]
+    assert large_body in tool_contents[-1]
+    assert large_body in messages[1]["content"]
 
 
 def create_task(task_service: TaskService) -> str:
@@ -475,6 +562,55 @@ def test_state_view_excludes_large_artifact_content(
     assert "content_hash" in view_json
 
 
+def test_state_view_available_tools_follow_execution_mode(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    task = persisted_task(db_session, task_id)
+    workspace = WorkspaceContext(
+        root=str(tmp_path / "workspace"),
+        current_directory=str(tmp_path / "workspace"),
+        writable=True,
+    )
+
+    disabled = task.model_copy(
+        deep=True,
+        update={
+            "workspace": workspace.model_copy(update={"writable": False}),
+            "execution_policy": ExecutionPolicy(mode="disabled"),
+        },
+    )
+    read_only = task.model_copy(
+        deep=True,
+        update={
+            "workspace": workspace.model_copy(update={"writable": False}),
+            "execution_policy": ExecutionPolicy(mode="local_read_only"),
+        },
+    )
+    full_access = task.model_copy(
+        deep=True,
+        update={
+            "workspace": workspace,
+            "execution_policy": ExecutionPolicy(mode="local_full_access"),
+        },
+    )
+
+    disabled_tools = build_state_view(disabled)["available_tools"]
+    read_only_tools = build_state_view(read_only)["available_tools"]
+    full_access_tools = build_state_view(full_access)["available_tools"]
+
+    assert "read_file" not in disabled_tools
+    assert "register_workspace_file" not in disabled_tools
+    assert "run_quality_gate" in disabled_tools
+    assert "read_file" in read_only_tools
+    assert "register_workspace_file" in read_only_tools
+    assert "write_file" not in read_only_tools
+    assert "exec_command" not in read_only_tools
+    assert full_access_tools == list(MAIN_AGENT_TOOL_NAMES)
+
+
 def test_start_main_agent_run_persists_trace_and_started_event(
     db_session: Session,
     task_service: TaskService,
@@ -607,6 +743,11 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
         [
             chat_response(
                 content="I will inspect the workspace first.",
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": 3,
+                    "total_tokens": 13,
+                },
                 tool_calls=[
                     tool_call(
                         "list_files",
@@ -620,6 +761,11 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
             ),
             chat_response(
                 content="I will write a small deliverable.",
+                usage={
+                    "input_tokens": 20,
+                    "output_tokens": 4,
+                    "total_tokens": 24,
+                },
                 tool_calls=[
                     tool_call(
                         "write_file",
@@ -634,7 +780,28 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
                 ],
             ),
             chat_response(
+                content="I will run the quality gate before final delivery.",
+                usage={
+                    "input_tokens": 25,
+                    "output_tokens": 5,
+                    "total_tokens": 30,
+                },
+                tool_calls=[
+                    tool_call(
+                        "run_quality_gate",
+                        {
+                            "task_id": task_id,
+                        },
+                        call_id="call-gate",
+                    )
+                ],
+            ),
+            chat_response(
                 content="Created `notes/result.txt` with the requested deliverable.",
+                usage={
+                    "prompt_tokens": 30,
+                    "completion_tokens": 5,
+                },
             ),
         ]
     )
@@ -655,7 +822,9 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
 
     assert output.final_task_status == "succeeded"
     assert task.status == "succeeded"
-    assert (workspace / "notes/result.txt").read_text(encoding="utf-8") == "done\n"
+    assert task.workspace is not None
+    actual_workspace = Path(task.workspace.root)
+    assert (actual_workspace / "notes/result.txt").read_text(encoding="utf-8") == "done\n"
     assert "agent.message" in types
     assert "agent.final_response" in types
     assert "agent.tool_called" in types
@@ -670,19 +839,26 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     final_response = next(
         event for event in events if event.type == "agent.final_response"
     )
+    completed = next(event for event in events if event.type == "agent.completed")
     assert progress_messages == [
         "I will inspect the workspace first.",
         "I will write a small deliverable.",
+        "I will run the quality gate before final delivery.",
     ]
     assert final_response.payload["content"] == (
         "Created `notes/result.txt` with the requested deliverable."
     )
+    assert completed.payload["token_usage"] == {
+        "input_tokens": 85,
+        "output_tokens": 17,
+        "total_tokens": 102,
+    }
+    assert completed.payload["token_usage_scope"] == "main_agent"
     assert row_count(db_session, WorkerJobRow) == 0
     assert chat_client.requests[0]["model"] == "fake-main-agent"
     assert chat_client.requests[0]["messages"][0]["role"] == "system"
     assert chat_client.requests[0]["tools"][0]["type"] == "function"
-    assert task.workspace is not None
-    assert task.workspace.root == str(workspace)
+    assert task.workspace.root == str(actual_workspace)
     assert task.workspace.writable is True
     assert task.execution_policy is not None
     assert task.execution_policy.mode == "local_full_access"
@@ -691,18 +867,84 @@ def test_tool_loop_runner_executes_workspace_tools_without_intake(
     assert latest_run.status == "succeeded"
     assert latest_run.completed_at is not None
     assert latest_run.workspace is not None
-    assert latest_run.workspace.root == str(workspace)
+    assert latest_run.workspace.root == str(actual_workspace)
     assert latest_run.execution_policy is not None
     assert latest_run.execution_policy.mode == "local_full_access"
     assert [call.tool_name for call in latest_run.tool_calls] == [
         "list_files",
         "write_file",
+        "run_quality_gate",
     ]
     assert [call.status for call in latest_run.tool_calls] == [
         "applied",
         "applied",
+        "applied",
     ]
     assert "response_format" not in chat_client.requests[0]
+
+
+def test_main_agent_request_after_large_report_does_not_resend_verbatim_report(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    task = persisted_task(db_session, task_id)
+    workspace = Path(
+        task.workspace.root
+        if task.workspace is not None
+        else task.project_context.workspace_root
+        or tmp_path / "workspace"
+    )
+    report_path = workspace / ".router" / "reports" / "test_report.json"
+    report_path.parent.mkdir(parents=True)
+    sentinel = "VERBATIM_REPORT_TAIL_SHOULD_NOT_REAPPEAR"
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "summary": "Validation failed.",
+                "failed_details": [{"message": ("x" * 2_000) + sentinel}],
+                "metrics": {"failed": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="I will inspect the latest report summary.",
+                tool_calls=[
+                    tool_call(
+                        "read_file",
+                        {
+                            "task_id": task_id,
+                            "path": ".router/reports/test_report.json",
+                        },
+                        call_id="call-read-report",
+                    )
+                ],
+            ),
+            chat_response(content="The report summary shows validation failed."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+        workspace_root=workspace,
+        execution_mode="local_full_access",
+    )
+
+    output = service.run_episode(task_id)
+    second_request = json.dumps(chat_client.requests[1]["messages"])
+
+    assert output.final_task_status == "succeeded"
+    assert sentinel not in second_request
+    assert "content_omitted" in second_request
+    assert "failed_details" in second_request
 
 
 def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
@@ -729,7 +971,24 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
                 ],
             ),
             streamed_chat_chunks(
+                content="I will run the quality gate.",
+                tool_calls=[
+                    tool_call(
+                        "run_quality_gate",
+                        {
+                            "task_id": task_id,
+                        },
+                        call_id="call-stream-gate",
+                    )
+                ],
+            ),
+            streamed_chat_chunks(
                 content="Workspace inspected. No files were present.",
+                usage={
+                    "prompt_tokens": 21,
+                    "completion_tokens": 7,
+                    "total_tokens": 28,
+                },
             ),
         ]
     )
@@ -746,10 +1005,17 @@ def test_tool_loop_streaming_chunks_reconstruct_message_and_tool_call(
     output = service.run_episode(task_id)
     events = EventService(db_session).list_visible_events(task_id)
     message_event = next(event for event in events if event.type == "agent.message")
+    completed = next(event for event in events if event.type == "agent.completed")
 
     assert output.final_task_status == "succeeded"
     assert chat_client.requests[0]["stream"] is True
     assert message_event.payload["content"] == "I will inspect the workspace."
+    assert completed.payload["token_usage"] == {
+        "input_tokens": 21,
+        "output_tokens": 7,
+        "total_tokens": 28,
+    }
+    assert completed.payload["token_usage_scope"] == "main_agent"
     assert "agent.final_response" in [event.type for event in events]
     assert "agent.completed" in [event.type for event in events]
 
@@ -778,16 +1044,96 @@ def test_tool_loop_runner_finalizes_from_content_only_stop(
 
     output = service.run_episode(task_id)
     task = persisted_task(db_session, task_id)
+    events = EventService(db_session).list_visible_events(task_id)
     types = event_types(db_session, task_id)
+    completed = next(event for event in events if event.type == "agent.completed")
 
     assert output.final_task_status == "succeeded"
     assert task.status == "succeeded"
     assert task.current_artifacts.final_report is not None
+    assert "token_usage" not in completed.payload
+    assert "token_usage_scope" not in completed.payload
     assert types.index("agent.final_response") < types.index("agent.completed")
     assert types.index("agent.completed") < types.index("task.succeeded")
     assert "finish_task" not in [
         tool["function"]["name"] for tool in chat_client.requests[0]["tools"]
     ]
+
+
+def test_tool_loop_final_after_failed_gate_is_partial_failed_not_succeeded(
+    db_session: Session,
+    tmp_path: Path,
+    task_service: TaskService,
+) -> None:
+    task_id = create_task(task_service)
+    write_artifact(
+        db_session,
+        tmp_path,
+        task_id=task_id,
+        artifact_type=ArtifactType.PLC_CODE,
+        content="FUNCTION_BLOCK FB_Motor\nEND_FUNCTION_BLOCK\n",
+        summary="Existing PLC code.",
+    )
+    write_artifact(
+        db_session,
+        tmp_path,
+        task_id=task_id,
+        artifact_type=ArtifactType.TEST_REPORT,
+        content={"status": "failed"},
+        summary="Latest test report failed.",
+    )
+    task = persisted_task(db_session, task_id)
+    TaskRepository(db_session).update_task_state(
+        task.model_copy(
+            deep=True,
+            update={
+                "status": TaskStatus.RUNNING.value,
+                "phase": TaskPhase.PLANNING.value,
+                "task_type": "test_existing_code",
+                "gates": task.gates.model_copy(
+                    update={
+                        "test_required": True,
+                        "latest_test_passed": False,
+                        "can_finish_as_success": False,
+                    }
+                ),
+            },
+        )
+    )
+    chat_client = ScriptedChatClient(
+        [
+            chat_response(
+                content="I will run the quality gate.",
+                tool_calls=[
+                    tool_call(
+                        "run_quality_gate",
+                        {
+                            "task_id": task_id,
+                        },
+                        call_id="call-failed-gate",
+                    )
+                ],
+            ),
+            chat_response(content="The latest PLC test report is still failing."),
+        ]
+    )
+    service = MainAgentService(
+        session=db_session,
+        artifact_root=tmp_path / "artifacts",
+        model="fake-main-agent",
+        chat_client=chat_client,
+        stream=False,
+    )
+
+    output = service.run_episode(task_id)
+    updated = persisted_task(db_session, task_id)
+    types = event_types(db_session, task_id)
+
+    assert output.final_task_status == "partial_failed"
+    assert updated.status == "partial_failed"
+    assert updated.gates.can_finish_as_success is False
+    assert "gate.failed" in types
+    assert "task.succeeded" not in types
 
 
 def test_tool_loop_blocks_stop_without_execution_evidence_then_continues(
@@ -811,6 +1157,18 @@ def test_tool_loop_blocks_stop_without_execution_evidence_then_continues(
                             "path": ".",
                         },
                         call_id="call-list-after-block",
+                    )
+                ],
+            ),
+            chat_response(
+                content="I will run the quality gate before stopping.",
+                tool_calls=[
+                    tool_call(
+                        "run_quality_gate",
+                        {
+                            "task_id": task_id,
+                        },
+                        call_id="call-gate-after-list",
                     )
                 ],
             ),
@@ -902,7 +1260,19 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
                 ],
             ),
             chat_response(
-                content="Stopped after invalid tool arguments.",
+                content="I will run the quality gate after the failed tool call.",
+                tool_calls=[
+                    tool_call(
+                        "run_quality_gate",
+                        {
+                            "task_id": task_id,
+                        },
+                        call_id="call-gate-after-bad-args",
+                    )
+                ],
+            ),
+            chat_response(
+                content="Stopped after recording invalid tool arguments.",
             ),
         ]
     )
@@ -923,13 +1293,13 @@ def test_tool_loop_records_malformed_tool_arguments_and_continues(
         and event.payload["tool_name"] == "read_file"
     )
 
-    assert output.final_task_status == "failed"
+    assert output.final_task_status == "succeeded"
     assert "agent.final_response" in [event.type for event in events]
     assert failed_tool_result.payload["status"] == "failed"
     assert failed_tool_result.payload["details"]["error"]["error_code"] == (
         "invalid_tool_arguments"
     )
-    assert "task.succeeded" not in [event.type for event in events]
+    assert "task.succeeded" in [event.type for event in events]
 
 
 def test_tool_loop_runner_max_turns_records_failure_without_success(

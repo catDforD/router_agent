@@ -2,13 +2,13 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowUp,
-  Box,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   CircleDot,
   FileText,
   Loader2,
+  Plus,
   RefreshCw,
   Sparkles,
   SquareTerminal,
@@ -20,6 +20,7 @@ import type {
   ProjectContext,
   RouterEvent,
   TaskState,
+  TokenUsage,
 } from "../../api/router/types";
 import type { StreamState } from "../../api/router/events";
 import { MarkdownText } from "./MarkdownText";
@@ -39,7 +40,11 @@ interface SseConsoleProps {
   onRefresh: () => void;
   onToggleTrace: () => void;
   onCancel: () => void;
-  onArtifactClick: (artifactId: string) => void;
+  onNewTask: () => void;
+  draftMessage?: string;
+  focusSignal: number;
+  resetSignal: number;
+  onDraftConsumed: () => void;
 }
 
 type TranscriptItem =
@@ -67,7 +72,8 @@ interface TranscriptRunView {
   processItems: ProcessTranscriptItem[];
   finalAnswer?: AgentTranscriptItem;
   terminalStatus?: StatusTranscriptItem;
-  finalReportArtifactId?: string;
+  finalReportPath?: string;
+  tokenUsage?: TokenUsage;
   isTerminal: boolean;
   latestSeq: number;
   createdAt?: string;
@@ -91,7 +97,8 @@ interface AgentTranscriptItem extends BaseTranscriptItem {
   kind: "agent";
   content: string;
   label?: string;
-  finalReportArtifactId?: string;
+  finalReportPath?: string;
+  tokenUsage?: TokenUsage;
 }
 
 interface PlanTranscriptItem extends BaseTranscriptItem {
@@ -108,7 +115,10 @@ interface ToolTranscriptItem extends BaseTranscriptItem {
   status: "running" | "applied" | "rejected" | "failed" | "no-op" | "observed";
   rationale?: string;
   summary?: string;
-  artifactIds: string[];
+  inputPaths: string[];
+  readPaths: string[];
+  writtenPaths: string[];
+  reportPaths: string[];
   failureIds: string[];
   workerJobId?: string;
   workerType?: string;
@@ -142,12 +152,20 @@ export function SseConsole({
   onRefresh,
   onToggleTrace,
   onCancel,
-  onArtifactClick,
+  onNewTask,
+  draftMessage,
+  focusSignal,
+  resetSignal,
+  onDraftConsumed,
 }: SseConsoleProps) {
   const [message, setMessage] = useState("");
+  const [followupPendingAfterSeq, setFollowupPendingAfterSeq] = useState<number | null>(
+    null,
+  );
   const [processOpenByRun, setProcessOpenByRun] = useState<Record<string, boolean>>({});
   const [processTouchedByRun, setProcessTouchedByRun] = useState<Record<string, boolean>>({});
   const endRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const transcriptView = useMemo(() => buildTranscriptView(task, events), [task, events]);
   const transcriptContentCount = transcriptView.runs.reduce(
     (count, run) =>
@@ -158,6 +176,7 @@ export function SseConsole({
     0,
   );
   const latestRun = transcriptView.runs.at(-1);
+  const latestTokenUsageLabel = formatTokenUsage(latestRun?.tokenUsage);
   const latestEventAt =
     latestRun?.latestAt ?? events.at(-1)?.created_at ?? task?.updated_at ?? task?.created_at;
   const elapsedLabel = formatElapsed(latestRun?.createdAt ?? task?.created_at, latestEventAt);
@@ -166,8 +185,40 @@ export function SseConsole({
     () => task?.unresolved_questions.filter((question) => question.status === "open") ?? [],
     [task?.unresolved_questions],
   );
+  const terminal = isTerminalTask(task);
+  const running = Boolean(
+    task &&
+      !terminal &&
+      (loading ||
+        task.status === "created" ||
+        task.status === "running" ||
+        task.status === "waiting_user" ||
+        streamState === "connecting" ||
+        streamState === "connected" ||
+        streamState === "reconnecting"),
+  );
   const canSubmit =
-    message.trim().length > 0 && !loading && (!task || canAppendMessage);
+    message.trim().length > 0 &&
+    !loading &&
+    followupPendingAfterSeq === null &&
+    (!task || canAppendMessage || terminal);
+
+  useEffect(() => {
+    if (followupPendingAfterSeq === null) {
+      return;
+    }
+    if (
+      events.some(
+        (event) =>
+          event.seq > followupPendingAfterSeq &&
+          (event.type === "agent.message" ||
+            event.type === "agent.final_response" ||
+            event.type === "agent.completed"),
+      )
+    ) {
+      setFollowupPendingAfterSeq(null);
+    }
+  }, [events, followupPendingAfterSeq]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -179,18 +230,46 @@ export function SseConsole({
     setProcessTouchedByRun((current) => pruneRunState(current, activeRunIds));
   }, [runKey, transcriptView.runs]);
 
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, [focusSignal]);
+
+  useEffect(() => {
+    setMessage("");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [resetSignal]);
+
+  useEffect(() => {
+    if (!draftMessage) {
+      return;
+    }
+    setMessage(draftMessage);
+    onDraftConsumed();
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [draftMessage, onDraftConsumed]);
+
   const submitMessage = async (event: FormEvent) => {
     event.preventDefault();
     const trimmed = message.trim();
-    if (!trimmed || loading) {
+    if (!trimmed || loading || followupPendingAfterSeq !== null) {
       return;
     }
 
     if (task) {
-      if (!canAppendMessage) {
+      if (!canAppendMessage && !terminal) {
         return;
       }
-      await onAppendMessage(trimmed);
+      if (terminal) {
+        setFollowupPendingAfterSeq(latestSeq);
+      }
+      try {
+        await onAppendMessage(trimmed);
+      } catch (error) {
+        if (terminal) {
+          setFollowupPendingAfterSeq(null);
+        }
+        throw error;
+      }
     } else {
       await onCreateTask(trimmed, {
         target_plc_language: "ST",
@@ -211,6 +290,12 @@ export function SseConsole({
             <span>SSE {streamState}</span>
             <span aria-hidden="true">·</span>
             <span>seq {latestSeq}</span>
+            {latestTokenUsageLabel ? (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{latestTokenUsageLabel}</span>
+              </>
+            ) : null}
             {task?.task_id ? (
               <>
                 <span aria-hidden="true">·</span>
@@ -220,6 +305,15 @@ export function SseConsole({
           </h1>
         </div>
         <div className="stage-actions">
+          <button
+            className="ghost-button"
+            type="button"
+            title="新任务"
+            aria-label="新任务"
+            onClick={onNewTask}
+          >
+            <Plus size={15} />
+          </button>
           <button
             className="ghost-button"
             type="button"
@@ -286,17 +380,12 @@ export function SseConsole({
               return (
                 <div className="transcript-run" key={run.id}>
                   {run.userMessage ? (
-                    <TranscriptRow
-                      item={run.userMessage}
-                      onArtifactClick={onArtifactClick}
-                    />
+                    <TranscriptRow item={run.userMessage} />
                   ) : null}
                   {run.processItems.length ? (
                     <ExecutionProcessPanel
                       elapsedLabel={formatElapsed(run.createdAt, run.latestAt)}
                       items={run.processItems}
-                      latestSeq={run.latestSeq}
-                      onArtifactClick={onArtifactClick}
                       onToggle={() => {
                         setProcessTouchedByRun((current) => ({
                           ...current,
@@ -312,14 +401,11 @@ export function SseConsole({
                         }));
                       }}
                       open={processOpen}
-                      streamState={streamState}
-                      terminalStatus={run.terminalStatus}
                     />
                   ) : null}
                   {run.finalAnswer ? (
                     <FinalAnswer
                       item={run.finalAnswer}
-                      onArtifactClick={onArtifactClick}
                     />
                   ) : null}
                 </div>
@@ -329,16 +415,6 @@ export function SseConsole({
           </div>
         ) : null}
 
-        {events.length ? (
-          <details className="raw-stream-details">
-            <summary>Raw SSE events · {events.length}</summary>
-            <div className="raw-event-list">
-              {events.slice(-16).map((event) => (
-                <EventPayload event={event} key={event.event_id} />
-              ))}
-            </div>
-          </details>
-        ) : null}
       </div>
 
       {openQuestions.length ? (
@@ -354,25 +430,61 @@ export function SseConsole({
 
       <form className="prompt-card" onSubmit={submitMessage}>
         <textarea
+          ref={textareaRef}
           aria-label="Message"
           value={message}
           onChange={(event) => setMessage(event.target.value)}
-          placeholder={task ? "继续补充任务要求..." : "随心输入"}
+          onKeyDown={(event) => {
+            if (
+              event.key !== "Enter" ||
+              event.shiftKey ||
+              event.nativeEvent.isComposing
+            ) {
+              return;
+            }
+            event.preventDefault();
+            if (canSubmit) {
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder={
+            task && terminal
+              ? "继续追问当前任务..."
+              : task
+                ? "继续补充任务要求..."
+                : "描述新的 PLC 任务目标..."
+          }
         />
         <div className="prompt-footer">
-          <div className="prompt-context">
-            <span>{task ? "append" : "new task"}</span>
-            <span>SSE {streamState}</span>
-            <span>{task?.phase ?? "idle"}</span>
-          </div>
           <button
             className="send-button"
+            data-running={running || followupPendingAfterSeq !== null}
             type="submit"
             disabled={!canSubmit}
-            aria-label={task ? "Send message" : "Create task"}
-            title={task ? "Send message" : "Create task"}
+            aria-label={
+              followupPendingAfterSeq !== null
+                ? "Answering follow-up"
+                : task && terminal
+                  ? "Send follow-up"
+                  : task
+                    ? "Send message"
+                    : "Create task"
+            }
+            title={
+              followupPendingAfterSeq !== null
+                ? "正在回答"
+                : task && terminal
+                  ? "继续追问当前任务"
+                  : task
+                    ? "Send message"
+                    : "Create task"
+            }
           >
-            <ArrowUp size={18} />
+            {running || followupPendingAfterSeq !== null ? (
+              <Loader2 size={18} />
+            ) : (
+              <ArrowUp size={18} />
+            )}
           </button>
         </div>
       </form>
@@ -382,16 +494,13 @@ export function SseConsole({
 
 function TranscriptRow({
   item,
-  onArtifactClick,
 }: {
   item: TranscriptItem;
-  onArtifactClick: (artifactId: string) => void;
 }) {
   if (item.kind === "user") {
     return (
-      <article className="transcript-entry transcript-message user-message">
-        <div className="message-avatar">U</div>
-        <div className="message-body">
+      <article className="transcript-entry user-message">
+        <div className="user-message-bubble">
           <MarkdownText content={item.content} variant="message" />
         </div>
       </article>
@@ -407,16 +516,6 @@ function TranscriptRow({
         <div className="message-body">
           {item.label ? <span className="message-label">{item.label}</span> : null}
           <MarkdownText content={item.content} variant="message" />
-          {item.finalReportArtifactId ? (
-            <button
-              className="artifact-chip"
-              type="button"
-              onClick={() => onArtifactClick(item.finalReportArtifactId!)}
-            >
-              <FileText size={13} />
-              final_report
-            </button>
-          ) : null}
         </div>
       </article>
     );
@@ -482,22 +581,42 @@ function TranscriptRow({
             {item.workerJobId ? (
               <span className="mini-pill">{shortId(item.workerJobId)}</span>
             ) : null}
-            {item.artifactIds.map((artifactId) => (
-              <button
-                className="artifact-chip"
-                key={artifactId}
-                type="button"
-                onClick={() => onArtifactClick(artifactId)}
-              >
-                <Box size={13} />
-                {shortId(artifactId)}
-              </button>
-            ))}
-            {item.failureIds.map((failureId) => (
-              <span data-tone="bad" className="status-pill" key={failureId}>
-                {shortId(failureId)}
+            {item.inputPaths.map((path) => (
+              <span className="file-chip" key={`input:${path}`}>
+                <FileText size={13} />
+                input {truncateMiddle(path, 48)}
               </span>
             ))}
+            {item.readPaths.map((path) => (
+              <span className="file-chip" key={`read:${path}`}>
+                <FileText size={13} />
+                read {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.writtenPaths.map((path) => (
+              <span className="file-chip" key={`written:${path}`}>
+                <FileText size={13} />
+                wrote {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.reportPaths.map((path) => (
+              <span className="file-chip" key={`report:${path}`}>
+                <FileText size={13} />
+                report {truncateMiddle(path, 48)}
+              </span>
+            ))}
+            {item.failureIds.map((failureId) => {
+              const tone = failureChipTone(item);
+              return (
+                <span
+                  data-tone={tone}
+                  className={tone ? "status-pill" : "mini-pill"}
+                  key={failureId}
+                >
+                  related {shortId(failureId)}
+                </span>
+              );
+            })}
           </div>
           {item.argumentsPayload || item.details ? (
             <details className="payload-details compact-payload">
@@ -534,24 +653,14 @@ function TranscriptRow({
 function ExecutionProcessPanel({
   elapsedLabel,
   items,
-  latestSeq,
-  onArtifactClick,
   onToggle,
   open,
-  streamState,
-  terminalStatus,
 }: {
   elapsedLabel: string;
   items: ProcessTranscriptItem[];
-  latestSeq: number;
-  onArtifactClick: (artifactId: string) => void;
   onToggle: () => void;
   open: boolean;
-  streamState: StreamState;
-  terminalStatus?: StatusTranscriptItem;
 }) {
-  const statusLabel = terminalStatus?.title ?? `SSE ${streamState}`;
-
   return (
     <section className="execution-process" data-open={open}>
       <button
@@ -564,11 +673,6 @@ function ExecutionProcessPanel({
           <span>{elapsedLabel}</span>
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
-        <span className="process-header-meta">
-          <span>{statusLabel}</span>
-          <span>seq {latestSeq}</span>
-          <span>{items.length} events</span>
-        </span>
       </button>
       {open ? (
         <div className="process-items">
@@ -576,7 +680,6 @@ function ExecutionProcessPanel({
             <TranscriptRow
               item={item}
               key={item.id}
-              onArtifactClick={onArtifactClick}
             />
           ))}
         </div>
@@ -587,39 +690,19 @@ function ExecutionProcessPanel({
 
 function FinalAnswer({
   item,
-  onArtifactClick,
 }: {
   item: AgentTranscriptItem;
-  onArtifactClick: (artifactId: string) => void;
 }) {
+  const tokenUsageLabel = formatTokenUsage(item.tokenUsage);
   return (
     <article className="final-answer">
       <div className="final-answer-body">
-        {item.label ? <span className="message-label">{item.label}</span> : null}
         <MarkdownText content={item.content} variant="message" />
-        {item.finalReportArtifactId ? (
-          <button
-            className="artifact-chip"
-            type="button"
-            onClick={() => onArtifactClick(item.finalReportArtifactId!)}
-          >
-            <FileText size={13} />
-            final_report
-          </button>
+        {tokenUsageLabel ? (
+          <span className="usage-chip">{tokenUsageLabel}</span>
         ) : null}
       </div>
     </article>
-  );
-}
-
-function EventPayload({ event }: { event: RouterEvent }) {
-  return (
-    <details className="payload-details raw-payload">
-      <summary>
-        #{event.seq} · {event.type}
-      </summary>
-      <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-    </details>
   );
 }
 
@@ -636,8 +719,14 @@ function buildTranscriptView(
       const userMessage = runItems.find(
         (item): item is UserTranscriptItem => item.kind === "user",
       );
-      const finalReportArtifactId = latestFinalReportArtifactId(runEvents);
-      const finalAnswer = pickFinalAnswer(runItems, runEvents, finalReportArtifactId);
+      const finalReportPath = latestFinalReportPath(runEvents);
+      const tokenUsage = latestCompletedTokenUsage(runEvents);
+      const finalAnswer = pickFinalAnswer(
+        runItems,
+        runEvents,
+        finalReportPath,
+        tokenUsage,
+      );
       const isTerminal = isTerminalRun(task, runEvents, runId);
       const terminalStatus = isTerminal
         ? [...runItems]
@@ -681,7 +770,8 @@ function buildTranscriptView(
         processItems,
         finalAnswer,
         terminalStatus,
-        finalReportArtifactId,
+        finalReportPath,
+        tokenUsage,
         isTerminal,
         latestSeq,
         createdAt,
@@ -732,8 +822,10 @@ function eventRunId(event: RouterEvent): string {
 function pickFinalAnswer(
   items: TranscriptItem[],
   events: RouterEvent[],
-  finalReportArtifactId?: string,
+  finalReportPath?: string,
+  tokenUsage?: TokenUsage,
 ): AgentTranscriptItem | undefined {
+  void items;
   const finalResponseEvent = [...events]
     .reverse()
     .find((event) => event.type === "agent.final_response");
@@ -748,21 +840,8 @@ function pickFinalAnswer(
       createdAt: finalResponseEvent.created_at,
       label: payloadString(finalResponseEvent, "final_status"),
       content: finalResponse,
-      finalReportArtifactId,
-    };
-  }
-
-  const latestAgentMessage = [...items]
-    .reverse()
-    .find(
-      (item): item is AgentTranscriptItem =>
-        item.kind === "agent" && !item.label && Boolean(item.content),
-    );
-  if (latestAgentMessage) {
-    return {
-      ...latestAgentMessage,
-      finalReportArtifactId:
-        finalReportArtifactId ?? latestAgentMessage.finalReportArtifactId,
+      finalReportPath,
+      tokenUsage,
     };
   }
 
@@ -780,7 +859,8 @@ function pickFinalAnswer(
       createdAt: completedEvent.created_at,
       label: payloadString(completedEvent, "final_task_status") ?? "completed",
       content: completedSummary,
-      finalReportArtifactId,
+      finalReportPath,
+      tokenUsage,
     };
   }
 
@@ -798,7 +878,8 @@ function pickFinalAnswer(
       createdAt: terminalEvent.created_at,
       label: terminalEvent.title,
       content: terminalSummary,
-      finalReportArtifactId,
+      finalReportPath,
+      tokenUsage,
     };
   }
 
@@ -891,7 +972,10 @@ function buildTranscript(
         turnIndex,
         status: "running",
         rationale: payloadString(event, "rationale_summary") ?? event.message ?? undefined,
-        artifactIds: payloadStringArray(event.payload.input_artifact_ids),
+        inputPaths: payloadStringArray(event.payload.input_paths),
+        readPaths: [],
+        writtenPaths: [],
+        reportPaths: [],
         failureIds: [],
         parameterChips: toolParameterPreview(toolName, event.payload.arguments),
         argumentsPayload: event.payload.arguments,
@@ -908,7 +992,9 @@ function buildTranscript(
       const key = toolKey(toolName, turnIndex);
       const matched = (pendingTools.get(key) ?? []).find((item) => !item.resultSeq);
       const status = normalizeToolStatus(payloadString(event, "status"));
-      const artifactIds = payloadStringArray(event.payload.artifact_ids);
+      const readPaths = payloadStringArray(event.payload.read_paths);
+      const writtenPaths = payloadStringArray(event.payload.written_paths);
+      const reportPaths = payloadStringArray(event.payload.report_paths);
       const failureIds = payloadStringArray(event.payload.failure_ids);
 
       if (matched) {
@@ -916,7 +1002,9 @@ function buildTranscript(
         matched.resultSeq = event.seq;
         matched.resultCreatedAt = event.created_at;
         matched.summary = payloadString(event, "summary") ?? event.message ?? undefined;
-        matched.artifactIds = unique([...matched.artifactIds, ...artifactIds]);
+        matched.readPaths = unique([...matched.readPaths, ...readPaths]);
+        matched.writtenPaths = unique([...matched.writtenPaths, ...writtenPaths]);
+        matched.reportPaths = unique([...matched.reportPaths, ...reportPaths]);
         matched.failureIds = unique([...matched.failureIds, ...failureIds]);
         matched.workerJobId = payloadString(event, "worker_job_id");
         matched.workerType = payloadString(event, "worker_type");
@@ -946,7 +1034,10 @@ function buildTranscript(
           turnIndex,
           status,
           summary: payloadString(event, "summary") ?? event.message ?? undefined,
-          artifactIds,
+          inputPaths: [],
+          readPaths,
+          writtenPaths,
+          reportPaths,
           failureIds,
           workerJobId: payloadString(event, "worker_job_id"),
           workerType: payloadString(event, "worker_type"),
@@ -969,7 +1060,8 @@ function buildTranscript(
         createdAt: event.created_at,
         label: payloadString(event, "final_task_status") ?? "completed",
         content: payloadString(event, "summary") ?? event.message ?? "Main Agent completed.",
-        finalReportArtifactId: payloadString(event, "final_report_artifact_id"),
+        finalReportPath: payloadString(event, "final_report_path"),
+        tokenUsage: tokenUsageFromPayload(event.payload.token_usage),
       });
       continue;
     }
@@ -1001,12 +1093,21 @@ function buildTranscript(
   return items.sort((left, right) => left.seq - right.seq);
 }
 
-function latestFinalReportArtifactId(events: RouterEvent[]): string | undefined {
+function latestFinalReportPath(events: RouterEvent[]): string | undefined {
   const completedEvent = [...events]
     .reverse()
     .find((event) => event.type === "agent.completed");
   return completedEvent
-    ? payloadString(completedEvent, "final_report_artifact_id")
+    ? payloadString(completedEvent, "final_report_path")
+    : undefined;
+}
+
+function latestCompletedTokenUsage(events: RouterEvent[]): TokenUsage | undefined {
+  const completedEvent = [...events]
+    .reverse()
+    .find((event) => event.type === "agent.completed");
+  return completedEvent
+    ? tokenUsageFromPayload(completedEvent.payload.token_usage)
     : undefined;
 }
 
@@ -1083,10 +1184,6 @@ function toolParameterPreview(toolName: string, value: unknown): string[] {
     addString("cwd");
   } else if (toolName === "call_mcp_tool") {
     addString("tool_name", "tool");
-  } else if (toolName === "read_artifact") {
-    addString("artifact_id", "artifact");
-  } else if (toolName === "write_artifact") {
-    addString("name");
   } else if (toolName === "git_status") {
     addString("cwd");
   }
@@ -1101,6 +1198,89 @@ function payloadString(event: RouterEvent, key: string): string | undefined {
 function payloadNumber(event: RouterEvent, key: string): number | undefined {
   const value = event.payload[key];
   return typeof value === "number" ? value : undefined;
+}
+
+function tokenUsageFromPayload(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const inputTokens = tokenCount(record.input_tokens);
+  const outputTokens = tokenCount(record.output_tokens);
+  const totalTokens = tokenCount(record.total_tokens);
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens:
+      totalTokens ?? sumTokenParts(inputTokens, outputTokens),
+  };
+}
+
+function formatTokenUsage(usage: TokenUsage | undefined): string | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const inputTokens = tokenCount(usage.input_tokens);
+  const outputTokens = tokenCount(usage.output_tokens);
+  const totalTokens =
+    tokenCount(usage.total_tokens) ?? sumTokenParts(inputTokens, outputTokens);
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return [
+    `input_tokens ${formatTokenCount(inputTokens)}`,
+    `output_tokens ${formatTokenCount(outputTokens)}`,
+    `total_tokens ${formatTokenCount(totalTokens)}`,
+  ].join(" · ");
+}
+
+function failureChipTone(item: ToolTranscriptItem): "bad" | undefined {
+  if (item.status === "failed") {
+    return "bad";
+  }
+  const details = item.details;
+  if (
+    details &&
+    typeof details === "object" &&
+    "blocking" in details &&
+    (details as { blocking?: unknown }).blocking === true
+  ) {
+    return "bad";
+  }
+  return undefined;
+}
+
+function formatTokenCount(value: number | undefined): string {
+  return value === undefined
+    ? "-"
+    : new Intl.NumberFormat("en-US").format(value);
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function sumTokenParts(
+  inputTokens: number | undefined,
+  outputTokens: number | undefined,
+): number | undefined {
+  const parts = [inputTokens, outputTokens].filter(
+    (value): value is number => value !== undefined,
+  );
+  return parts.length ? parts.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -1138,13 +1318,11 @@ function toolTitle(toolName: string): string {
     apply_patch: "应用补丁",
     exec_command: "执行命令",
     git_status: "Git 状态",
-    write_artifact: "写入 Artifact",
     call_mcp_tool: "调用 MCP 工具",
     call_plc_dev: "调用 plc-dev",
     call_plc_test: "调用 plc-test",
     call_plc_formal: "调用 plc-formal",
     call_plc_repair: "调用 plc-repair",
-    read_artifact: "读取 Artifact",
   };
   return labels[toolName] ?? toolName;
 }
@@ -1160,8 +1338,6 @@ function toolIcon(toolName: string, status: ToolTranscriptItem["status"]) {
     return <CheckCircle2 size={15} />;
   }
   if (
-    toolName === "write_artifact" ||
-    toolName === "read_artifact" ||
     toolName === "read_file" ||
     toolName === "write_file" ||
     toolName === "apply_patch"
@@ -1192,6 +1368,16 @@ function statusFromEvent(type: string): string {
     return "rejected";
   }
   return "observed";
+}
+
+function isTerminalTask(task: TaskState | null): boolean {
+  return Boolean(
+    task &&
+      (task.status === "succeeded" ||
+        task.status === "partial_failed" ||
+        task.status === "failed" ||
+        task.status === "cancelled"),
+  );
 }
 
 function formatTime(value?: string): string {
