@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 from app.agents.chat_completions import (
+    MainAgentProviderError,
     MainAgentProviderConfigurationError,
     OpenAICompatibleChatClient,
 )
@@ -92,6 +93,7 @@ def test_openai_compatible_client_loads_main_agent_settings_before_fallback() ->
         main_agent_api_key="main-agent-key",
         main_agent_base_url="https://provider.example/v1",
         main_agent_timeout_seconds=45,
+        main_agent_http_backend="curl",
     )
 
     client = OpenAICompatibleChatClient.from_settings(settings)
@@ -99,3 +101,77 @@ def test_openai_compatible_client_loads_main_agent_settings_before_fallback() ->
     assert client.api_key == "main-agent-key"
     assert client.base_url == "https://provider.example/v1"
     assert client.timeout_seconds == 45
+    assert client.http_backend == "curl"
+
+
+def test_openai_compatible_client_curl_backend_returns_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_command: list[str] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        captured_command.extend(command)
+        config_path = command[-1]
+        response_path = None
+        for line in open(config_path, encoding="utf-8"):
+            if line.startswith("output = "):
+                response_path = line.split(" = ", 1)[1].strip().strip('"')
+        assert response_path is not None
+        with open(response_path, "w", encoding="utf-8") as handle:
+            handle.write('{"choices":[{"message":{"content":"ok"}}]}')
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr("app.agents.chat_completions.subprocess.run", fake_run)
+    client = OpenAICompatibleChatClient(
+        api_key="main-agent-key",
+        base_url="https://provider.example/v1",
+        http_backend="curl",
+    )
+
+    response = client.complete(
+        model="provider-model",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        stream=False,
+    )
+
+    assert response["choices"][0]["message"]["content"] == "ok"
+    assert captured_command[:2] == ["curl", "--config"]
+    assert client.captured_requests[0]["model"] == "provider-model"
+
+
+def test_openai_compatible_client_curl_backend_rejects_streaming() -> None:
+    client = OpenAICompatibleChatClient(
+        api_key="main-agent-key",
+        base_url="https://provider.example/v1",
+        http_backend="curl",
+    )
+
+    with pytest.raises(MainAgentProviderConfigurationError, match="streaming"):
+        client.complete(model="provider-model", messages=[], tools=None, stream=True)
+
+
+def test_openai_compatible_client_curl_backend_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **kwargs: Any) -> Any:
+        class Completed:
+            returncode = 22
+            stderr = "request failed"
+
+        return Completed()
+
+    monkeypatch.setattr("app.agents.chat_completions.subprocess.run", fake_run)
+    client = OpenAICompatibleChatClient(
+        api_key="main-agent-key",
+        base_url="https://provider.example/v1",
+        http_backend="curl",
+    )
+
+    with pytest.raises(MainAgentProviderError, match="curl request failed"):
+        client.complete(model="provider-model", messages=[], tools=None, stream=False)

@@ -112,12 +112,19 @@ class RuntimeService:
         self.artifact_root = artifact_root or app_settings.artifact_root
         self.mcp_mode = mcp_mode or app_settings.mcp_mode
         self.mock_scenario = mock_scenario or app_settings.mock_scenario
+        self.plc_dev_mode = app_settings.plc_dev_mode
+        self.plc_test_mode = app_settings.plc_test_mode
+        self.plc_formal_mode = app_settings.plc_formal_mode
+        self.plc_repair_mode = app_settings.plc_repair_mode
         self.model = model if model is not None else app_settings.main_agent_model
         self.max_turns = max_turns or app_settings.main_agent_max_turns
         self.agent_workspace_root = app_settings.agent_workspace_root
         self.agent_execution_mode = app_settings.agent_execution_mode
         self.agent_command_timeout_seconds = app_settings.agent_command_timeout_seconds
         self.agent_tool_output_max_chars = app_settings.agent_tool_output_max_chars
+        self.main_agent_capture_provider_transcript = (
+            app_settings.main_agent_capture_provider_transcript
+        )
         self.runner = runner
         self.lease_seconds = lease_seconds
         self.lease_owner = lease_owner
@@ -594,6 +601,10 @@ class RuntimeService:
             artifact_root=self.artifact_root,
             mcp_mode=self.mcp_mode,
             mock_scenario=self.mock_scenario,
+            plc_dev_mode=self.plc_dev_mode,
+            plc_test_mode=self.plc_test_mode,
+            plc_formal_mode=self.plc_formal_mode,
+            plc_repair_mode=self.plc_repair_mode,
             model=self.model,
             max_turns=self.max_turns,
             provider=self.settings.main_agent_provider,
@@ -602,6 +613,7 @@ class RuntimeService:
             execution_mode=self.agent_execution_mode,
             command_timeout_seconds=self.agent_command_timeout_seconds,
             tool_output_max_chars=self.agent_tool_output_max_chars,
+            capture_provider_transcript=self.main_agent_capture_provider_transcript,
             runner=self.runner,
             checkpoint=lambda: self._checkpoint_session(session),
         )

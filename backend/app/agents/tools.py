@@ -131,8 +131,13 @@ class AgentToolContext:
     tool_output_max_chars: int = DEFAULT_AGENT_TOOL_OUTPUT_MAX_CHARS
     mcp_mode: str = "mock"
     mock_scenario: str = DEFAULT_MOCK_SCENARIO
+    plc_dev_mode: str | None = None
+    plc_test_mode: str | None = None
+    plc_formal_mode: str | None = None
+    plc_repair_mode: str | None = None
     read_artifact_max_chars: int = DEFAULT_READ_ARTIFACT_MAX_CHARS
     report_first_finalization: bool = False
+    capture_provider_transcript: bool = False
     checkpoint: CheckpointCallback | None = None
     observability_recorder: Any | None = None
 
@@ -2334,6 +2339,22 @@ class AgentToolService:
                 artifact_root=self.context.artifact_root,
                 mcp_mode=self.context.mcp_mode,
                 mock_scenario=self.context.mock_scenario,
+                plc_dev_mode=_effective_context_worker_mode(
+                    self.context,
+                    "plc_dev_mode",
+                ),
+                plc_test_mode=_effective_context_worker_mode(
+                    self.context,
+                    "plc_test_mode",
+                ),
+                plc_formal_mode=_effective_context_worker_mode(
+                    self.context,
+                    "plc_formal_mode",
+                ),
+                plc_repair_mode=_effective_context_worker_mode(
+                    self.context,
+                    "plc_repair_mode",
+                ),
                 checkpoint=self.context.checkpoint,
             ).call_worker(worker_input)
             handled = handle_worker_result(result, session=self.context.session)
@@ -4736,6 +4757,18 @@ def _trace_context_for_task(task: TaskState) -> TraceContext:
         openai_trace_id=task.trace.openai_trace_id,
         main_agent_run_id=task.trace.latest_main_agent_run_id,
     )
+
+
+def _effective_context_worker_mode(
+    context: AgentToolContext,
+    field_name: str,
+) -> str | None:
+    configured = getattr(context, field_name)
+    if configured is not None:
+        return configured
+    if context.mcp_mode in {"mock", "real", "subagent"}:
+        return context.mcp_mode
+    return None
 
 
 def _build_terminal_task_event(

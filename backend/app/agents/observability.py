@@ -49,6 +49,7 @@ class MainAgentObservabilityRecorder:
     openai_trace_id: str | None = None
     checkpoint: Callable[[], None] | None = None
     entries: list[dict[str, Any]] = field(default_factory=list)
+    provider_transcript: list[dict[str, Any]] = field(default_factory=list)
     turn_index: int = 0
     token_usage: TokenUsage = field(default_factory=TokenUsage)
 
@@ -265,6 +266,38 @@ class MainAgentObservabilityRecorder:
             },
         )
 
+    def record_provider_turn(
+        self,
+        *,
+        turn_index: int | None,
+        request: dict[str, Any],
+        response: Any | None = None,
+        assistant_turn: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        """Store opt-in raw provider traffic for eval transcript review."""
+
+        index = turn_index or self.turn_index or None
+        self.provider_transcript.append(
+            {
+                "record_type": "provider_turn",
+                "task_id": self.task_id,
+                "main_agent_run_id": self.main_agent_run_id,
+                "turn_index": index,
+                "captured_at": utc_now().isoformat(),
+                "request": _json_safe_provider_payload(request),
+                "response": _json_safe_provider_payload(response)
+                if response is not None
+                else None,
+                "assistant_turn": _json_safe_provider_payload(assistant_turn)
+                if assistant_turn is not None
+                else None,
+                "error": _json_safe_provider_payload(error)
+                if error is not None
+                else None,
+            }
+        )
+
     def write_final_report(self, output: MainAgentEpisodeOutput) -> str:
         created_at = utc_now()
         content = build_final_report_payload(
@@ -292,6 +325,7 @@ class MainAgentObservabilityRecorder:
             "task_id": self.task_id,
             "main_agent_run_id": self.main_agent_run_id,
             "entries": [_sanitize_value(entry) for entry in self.entries],
+            "provider_transcript": list(self.provider_transcript),
             "final_output": (
                 final_output.model_dump(mode="json") if final_output is not None else None
             ),
@@ -551,6 +585,44 @@ def _sanitize_value(value: Any) -> Any:
                 sanitized[key_text] = _sanitize_value(item)
         return sanitized
     return value
+
+
+def _json_safe_provider_payload(value: Any) -> Any:
+    value = _jsonable_provider_payload(value)
+    if isinstance(value, list):
+        return [_json_safe_provider_payload(item) for item in value]
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_sensitive_key(key_text):
+                safe[key_text] = "[redacted]"
+            else:
+                safe[key_text] = _json_safe_provider_payload(item)
+        return safe
+    return value
+
+
+def _jsonable_provider_payload(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return str(value)
 
 
 def _jsonable(value: Any) -> Any:

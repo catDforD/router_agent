@@ -234,3 +234,47 @@ def test_recorder_writes_report_log_and_completed_event(
     assert completed.payload["main_agent_log_path"] == replay_log
     assert completed.correlation.artifact_ids is None
     assert restored.current_files.final_report == final_report
+
+
+def test_provider_transcript_preserves_messages_and_redacts_sensitive_keys(
+    db_session: Session,
+    tmp_path: Path,
+    task: TaskState,
+) -> None:
+    observed = recorder(db_session, tmp_path, task)
+    long_message = "现场想看完整 provider request。" * 200
+
+    observed.start_turn()
+    observed.record_provider_turn(
+        turn_index=1,
+        request={
+            "model": "provider-model",
+            "messages": [{"role": "user", "content": long_message}],
+            "api_key": "secret-value",
+        },
+        response={
+            "choices": [
+                {
+                    "message": {
+                        "content": "ok",
+                        "tool_calls": [],
+                    }
+                }
+            ]
+        },
+        assistant_turn={"content": "ok", "tool_calls": [], "token_usage": None},
+    )
+    replay_log = observed.write_replay_log()
+    restored = TaskRepository(db_session).get_task(task.task_id)
+    workspace_root = (
+        Path(restored.workspace.root)
+        if restored.workspace
+        else tmp_path / "workspaces" / task.task_id
+    )
+
+    payload = json.loads((workspace_root / replay_log).read_text(encoding="utf-8"))
+    provider_turn = payload["provider_transcript"][0]
+
+    assert provider_turn["request"]["messages"][0]["content"] == long_message
+    assert provider_turn["request"]["api_key"] == "[redacted]"
+    assert provider_turn["assistant_turn"]["content"] == "ok"

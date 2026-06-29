@@ -258,6 +258,8 @@ class OpenAICompatibleToolLoopRunner:
                 tools=tools,
                 model=model,
                 recorder=recorder,
+                capture_provider_transcript=context.capture_provider_transcript,
+                turn_index=turn_index,
             )
             if recorder is not None:
                 recorder.add_token_usage(assistant_turn.token_usage)
@@ -398,8 +400,20 @@ class OpenAICompatibleToolLoopRunner:
         tools: list[dict[str, Any]],
         model: str,
         recorder: MainAgentObservabilityRecorder | None,
+        capture_provider_transcript: bool = False,
+        turn_index: int | None = None,
     ) -> _AssistantTurn:
         request_messages = _messages_for_model_context(messages)
+        request_payload: dict[str, Any] = {
+            "model": model,
+            "messages": request_messages,
+            "stream": bool(self.stream),
+        }
+        if tools:
+            request_payload["tools"] = tools
+            request_payload["tool_choice"] = "auto"
+        if self.stream:
+            request_payload["stream_options"] = {"include_usage": True}
         try:
             response = self.chat_client.complete(
                 messages=request_messages,
@@ -418,14 +432,42 @@ class OpenAICompatibleToolLoopRunner:
                         "turn without streaming."
                     ),
                 )
+            fallback_request_payload = {
+                **request_payload,
+                "stream": False,
+            }
+            fallback_request_payload.pop("stream_options", None)
             response = self.chat_client.complete(
                 messages=request_messages,
                 tools=tools,
                 model=model,
                 stream=False,
             )
+            assistant_turn, response_for_log = _assistant_turn_and_log_payload(
+                response,
+                capture_provider_transcript=capture_provider_transcript,
+            )
+            if capture_provider_transcript and recorder is not None:
+                recorder.record_provider_turn(
+                    turn_index=turn_index,
+                    request=fallback_request_payload,
+                    response=response_for_log,
+                    assistant_turn=_assistant_turn_payload(assistant_turn),
+                )
+            return assistant_turn
 
-        return _assistant_turn_from_response(response)
+        assistant_turn, response_for_log = _assistant_turn_and_log_payload(
+            response,
+            capture_provider_transcript=capture_provider_transcript,
+        )
+        if capture_provider_transcript and recorder is not None:
+            recorder.record_provider_turn(
+                turn_index=turn_index,
+                request=request_payload,
+                response=response_for_log,
+                assistant_turn=_assistant_turn_payload(assistant_turn),
+            )
+        return assistant_turn
 
 
 class MainAgentService:
@@ -438,6 +480,10 @@ class MainAgentService:
         artifact_root: Path,
         mcp_mode: str = "mock",
         mock_scenario: str = DEFAULT_MOCK_SCENARIO,
+        plc_dev_mode: str | None = None,
+        plc_test_mode: str | None = None,
+        plc_formal_mode: str | None = None,
+        plc_repair_mode: str | None = None,
         model: str | None = None,
         max_turns: int = DEFAULT_MAIN_AGENT_MAX_TURNS,
         provider: str = "openai_compatible",
@@ -449,11 +495,16 @@ class MainAgentService:
         chat_client: MainAgentChatClient | None = None,
         runner: MainAgentRunner | None = None,
         checkpoint: Callable[[], None] | None = None,
+        capture_provider_transcript: bool = False,
     ) -> None:
         self.session = session
         self.artifact_root = artifact_root
         self.mcp_mode = mcp_mode
         self.mock_scenario = mock_scenario
+        self.plc_dev_mode = plc_dev_mode
+        self.plc_test_mode = plc_test_mode
+        self.plc_formal_mode = plc_formal_mode
+        self.plc_repair_mode = plc_repair_mode
         self.model = model
         self.max_turns = max_turns
         self.provider = provider
@@ -462,6 +513,7 @@ class MainAgentService:
         self.execution_mode = execution_mode
         self.command_timeout_seconds = command_timeout_seconds
         self.tool_output_max_chars = tool_output_max_chars
+        self.capture_provider_transcript = capture_provider_transcript
         self.runner = runner or _default_runner(
             provider=provider,
             stream=stream,
@@ -505,7 +557,12 @@ class MainAgentService:
             tool_output_max_chars=self.tool_output_max_chars,
             mcp_mode=self.mcp_mode,
             mock_scenario=self.mock_scenario,
+            plc_dev_mode=self.plc_dev_mode,
+            plc_test_mode=self.plc_test_mode,
+            plc_formal_mode=self.plc_formal_mode,
+            plc_repair_mode=self.plc_repair_mode,
             report_first_finalization=True,
+            capture_provider_transcript=self.capture_provider_transcript,
             checkpoint=self.checkpoint,
         )
         recorder = MainAgentObservabilityRecorder(
@@ -561,24 +618,28 @@ class MainAgentService:
                 error_code="MAIN_AGENT_MAX_TURNS_EXCEEDED",
                 message=str(exc),
                 terminal_status=TaskStatus.FAILED.value,
+                recorder=recorder,
             )
         except ModelBehaviorError as exc:
             return self._record_agent_error(
                 task_id=task_id,
                 error_code="MAIN_AGENT_MODEL_BEHAVIOR_ERROR",
                 message=str(exc),
+                recorder=recorder,
             )
         except MainAgentProviderConfigurationError as exc:
             return self._record_agent_error(
                 task_id=task_id,
                 error_code="MAIN_AGENT_PROVIDER_CONFIGURATION_ERROR",
                 message=str(exc),
+                recorder=recorder,
             )
         except MainAgentProviderError as exc:
             return self._record_agent_error(
                 task_id=task_id,
                 error_code="MAIN_AGENT_PROVIDER_ERROR",
                 message=str(exc),
+                recorder=recorder,
             )
 
     def start_main_agent_run(self, task_id: str) -> TaskState:
@@ -799,6 +860,7 @@ class MainAgentService:
         error_code: str,
         message: str,
         terminal_status: str | None = None,
+        recorder: MainAgentObservabilityRecorder | None = None,
     ) -> MainAgentEpisodeOutput:
         task = self._fresh_task(task_id)
         if _is_terminal(task):
@@ -860,13 +922,17 @@ class MainAgentService:
                 error_code=error_code,
                 error_message=message,
             )
-            recorder = MainAgentObservabilityRecorder(
+            recorder = recorder or MainAgentObservabilityRecorder(
                 session=self.session,
                 artifact_root=self.artifact_root,
                 task_id=task_id,
                 openai_trace_id=task.trace.openai_trace_id,
                 main_agent_run_id=task.trace.latest_main_agent_run_id,
                 checkpoint=self.checkpoint,
+            )
+            recorder.record_error(
+                error_code=error_code,
+                message=message,
             )
             final_report = recorder.write_final_report(output)
             replay_log = recorder.write_replay_log(
@@ -1401,6 +1467,25 @@ def _assistant_message_for_history(turn: _AssistantTurn) -> dict[str, Any]:
     return message
 
 
+def _assistant_turn_payload(turn: _AssistantTurn) -> dict[str, Any]:
+    return {
+        "content": turn.content,
+        "tool_calls": [
+            {
+                "tool_call_id": tool_call.tool_call_id,
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+            }
+            for tool_call in turn.tool_calls
+        ],
+        "token_usage": (
+            turn.token_usage.model_dump(mode="json")
+            if turn.token_usage is not None
+            else None
+        ),
+    }
+
+
 def _execute_tool_call(
     *,
     context: AgentToolContext,
@@ -1719,6 +1804,19 @@ def _assistant_turn_from_response(response: Any) -> _AssistantTurn:
         turn = _assistant_turn_from_message(_first_choice_message(response))
         return replace(turn, token_usage=_token_usage_from_response(response))
     return _assistant_turn_from_stream(response)
+
+
+def _assistant_turn_and_log_payload(
+    response: Any,
+    *,
+    capture_provider_transcript: bool,
+) -> tuple[_AssistantTurn, Any]:
+    if _has_choices(response):
+        return _assistant_turn_from_response(response), response
+    if capture_provider_transcript:
+        chunks = list(response)
+        return _assistant_turn_from_stream(chunks), chunks
+    return _assistant_turn_from_response(response), None
 
 
 def _assistant_turn_from_message(message: Any) -> _AssistantTurn:
