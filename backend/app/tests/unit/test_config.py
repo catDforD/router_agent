@@ -18,7 +18,9 @@ ENV_KEYS = (
     "MAIN_AGENT_MODEL",
     "MAIN_AGENT_MAX_TURNS",
     "MAIN_AGENT_TIMEOUT_SECONDS",
+    "MAIN_AGENT_HTTP_BACKEND",
     "MAIN_AGENT_STREAM",
+    "MAIN_AGENT_CAPTURE_PROVIDER_TRANSCRIPT",
     "AGENT_EXECUTION_MODE",
     "AGENT_WORKSPACE_ROOT",
     "AGENT_COMMAND_TIMEOUT_SECONDS",
@@ -71,7 +73,9 @@ def test_settings_defaults_support_local_startup(monkeypatch: pytest.MonkeyPatch
     assert settings.main_agent_model is None
     assert settings.main_agent_max_turns == 20
     assert settings.main_agent_timeout_seconds == 120
+    assert settings.main_agent_http_backend == "openai_sdk"
     assert settings.main_agent_stream is True
+    assert settings.main_agent_capture_provider_transcript is False
     assert settings.agent_execution_mode == "disabled"
     assert settings.agent_workspace_root == Path(".")
     assert settings.agent_command_timeout_seconds == 120
@@ -109,7 +113,9 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("MAIN_AGENT_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("MAIN_AGENT_MAX_TURNS", "12")
     monkeypatch.setenv("MAIN_AGENT_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("MAIN_AGENT_HTTP_BACKEND", "CURL")
     monkeypatch.setenv("MAIN_AGENT_STREAM", "false")
+    monkeypatch.setenv("MAIN_AGENT_CAPTURE_PROVIDER_TRANSCRIPT", "true")
     monkeypatch.setenv("AGENT_EXECUTION_MODE", "LOCAL_FULL_ACCESS")
     monkeypatch.setenv("AGENT_WORKSPACE_ROOT", "/tmp/router-agent-workspace")
     monkeypatch.setenv("AGENT_COMMAND_TIMEOUT_SECONDS", "30")
@@ -147,7 +153,9 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     assert settings.main_agent_model == "gpt-4.1-mini"
     assert settings.main_agent_max_turns == 12
     assert settings.main_agent_timeout_seconds == 90
+    assert settings.main_agent_http_backend == "curl"
     assert settings.main_agent_stream is False
+    assert settings.main_agent_capture_provider_transcript is True
     assert settings.agent_execution_mode == "local_full_access"
     assert settings.agent_workspace_root == Path("/tmp/router-agent-workspace")
     assert settings.agent_command_timeout_seconds == 30
@@ -192,6 +200,11 @@ def test_invalid_modes_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="main_agent_provider"):
         Settings()
 
+    monkeypatch.setenv("MAIN_AGENT_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("MAIN_AGENT_HTTP_BACKEND", "unsupported")
+    with pytest.raises(ValueError, match="main_agent_http_backend"):
+        Settings()
+
 
 def test_subagent_modes_are_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ENV_KEYS:
@@ -223,6 +236,7 @@ def test_redacted_diagnostics_do_not_expose_secrets() -> None:
     assert diagnostics["deepseek_api_key"] == "deep...alue"
     assert diagnostics["subagent_api_token"] == "suba...alue"
     assert diagnostics["session_workspace_root"] == "data/workspaces"
+    assert diagnostics["main_agent_capture_provider_transcript"] is False
     assert diagnostics["agent_execution_mode"] == "disabled"
     assert diagnostics["agent_workspace_root"] == "."
     assert diagnostics["agent_tool_output_max_chars"] == 12_000

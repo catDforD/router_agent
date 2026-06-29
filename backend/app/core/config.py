@@ -53,9 +53,17 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias="MAIN_AGENT_TIMEOUT_SECONDS",
     )
+    main_agent_http_backend: str = Field(
+        default="openai_sdk",
+        validation_alias="MAIN_AGENT_HTTP_BACKEND",
+    )
     main_agent_stream: bool = Field(
         default=True,
         validation_alias="MAIN_AGENT_STREAM",
+    )
+    main_agent_capture_provider_transcript: bool = Field(
+        default=False,
+        validation_alias="MAIN_AGENT_CAPTURE_PROVIDER_TRANSCRIPT",
     )
     agent_execution_mode: str = Field(
         default="disabled",
@@ -167,6 +175,16 @@ class Settings(BaseSettings):
             raise ValueError("main_agent_provider must be 'openai_compatible'")
         return normalized
 
+    @field_validator("main_agent_http_backend")
+    @classmethod
+    def normalize_main_agent_http_backend(cls, value: str) -> str:
+        normalized = value.lower().replace("-", "_")
+        if normalized not in {"auto", "openai_sdk", "curl"}:
+            raise ValueError(
+                "main_agent_http_backend must be 'auto', 'openai_sdk', or 'curl'"
+            )
+        return normalized
+
     @field_validator("agent_execution_mode")
     @classmethod
     def normalize_agent_execution_mode(cls, value: str) -> str:
@@ -223,7 +241,11 @@ class Settings(BaseSettings):
             "main_agent_model": self.main_agent_model,
             "main_agent_timeout_seconds": self.main_agent_timeout_seconds,
             "main_agent_max_turns": self.main_agent_max_turns,
+            "main_agent_http_backend": self.main_agent_http_backend,
             "main_agent_stream": self.main_agent_stream,
+            "main_agent_capture_provider_transcript": (
+                self.main_agent_capture_provider_transcript
+            ),
             "main_agent_api_key": _redacted(self.main_agent_api_key),
             "agent_execution_mode": self.agent_execution_mode,
             "agent_workspace_root": str(self.agent_workspace_root),

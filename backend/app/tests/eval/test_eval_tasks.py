@@ -202,7 +202,9 @@ class EvalScriptedRunner:
             output = output.model_copy(
                 update={
                     "final_task_status": final_status,
-                    "phase": "completed" if final_status in TERMINAL_STATUSES else task.phase,
+                    "phase": "completed"
+                    if final_status in TERMINAL_STATUSES
+                    else task.phase,
                     "next_recommended_action": "none",
                 }
             )
