@@ -3768,6 +3768,35 @@ GENERIC_MAIN_AGENT_TOOL_REGISTRY = (
         executor_method="git_status",
     ),
     MainAgentToolDefinition(
+        name="request_clarification",
+        description="Persist required user clarification questions and pause the task.",
+        properties={
+            "task_id": {"type": "string"},
+            "questions": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "required": {"type": "boolean"},
+                            },
+                            "required": ["question"],
+                            "additionalProperties": False,
+                        },
+                    ],
+                },
+            },
+            "rationale_summary": {"type": "string"},
+        },
+        required=("task_id", "questions"),
+        sdk_tool=request_clarification,
+        executor_method="request_clarification",
+    ),
+    MainAgentToolDefinition(
         name="plc_dev",
         description="Generate or update PLC workspace files with direct worker controls.",
         properties=_direct_worker_tool_properties(WorkerType.PLC_DEV.value),

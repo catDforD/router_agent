@@ -5,19 +5,19 @@ from typing import Any
 import httpx
 import pytest
 
-from app.mcp.draft import McpInputArtifactSnapshot, validate_worker_draft_output
+from app.mcp.draft import McpInputFileSnapshot, validate_worker_draft_output
 from app.mcp.subagent_client import (
     SubagentConnectionError,
     SubagentExecutionError,
+    SubagentInvalidResponseError,
     SubagentWorkerClient,
     build_subagent_request,
     draft_from_subagent_events,
     parse_sse_events,
 )
 from app.models.router_schema import (
-    ArtifactRef,
     ArtifactType,
-    ExpectedOutputSpec,
+    ExpectedFileSpec,
     TraceContext,
     WORKER_TOOL_BY_TYPE,
     WorkerBudget,
@@ -26,6 +26,14 @@ from app.models.router_schema import (
     WorkerMode,
     WorkerType,
 )
+
+
+FORMAL_PROPERTIES = [
+    {
+        "property_description": "Output must remain safe.",
+        "property": {"job_req": "assertion"},
+    }
+]
 
 
 def test_parse_sse_events_reads_json_data_and_ignores_keepalive() -> None:
@@ -99,15 +107,13 @@ def test_parse_sse_events_reads_json_data_and_ignores_keepalive() -> None:
             WorkerType.PLC_FORMAL,
             {
                 "compiler_type": "rusty",
-                "properties": [{"property": "G(Output)"}],
+                "properties": FORMAL_PROPERTIES,
                 "natural_language_requirements": "Output must remain safe.",
                 "llm": {"temperature": 0},
             },
             "formal_validation_agent",
             {
                 "compiler_type": "rusty",
-                "properties": [{"property": "G(Output)"}],
-                "natural_language_requirements": "Output must remain safe.",
                 "llm": {"temperature": 0.0},
             },
         ),
@@ -145,8 +151,60 @@ def test_build_subagent_request_maps_worker_config_to_context(
 
     assert request["agent_id"] == expected_agent
     assert request["context"] == expected_context
-    assert "Run" in request["message"]
-    assert "Input artifacts:" in request["message"]
+    if worker_type == WorkerType.PLC_FORMAL:
+        message = json.loads(request["message"])
+        assert message == {
+            "st_code": sample_code(),
+            "properties": FORMAL_PROPERTIES,
+        }
+        assert "Input files:" not in request["message"]
+    elif worker_type == WorkerType.PLC_TEST:
+        assert request["message"] == sample_code()
+        assert "Input files:" not in request["message"]
+    else:
+        assert "Run" in request["message"]
+        assert "Input files:" in request["message"]
+
+
+def test_formal_subagent_request_requires_properties() -> None:
+    with pytest.raises(SubagentInvalidResponseError, match="worker_config.properties"):
+        build_subagent_request(
+            worker_input(WorkerType.PLC_FORMAL),
+            snapshots(WorkerType.PLC_FORMAL),
+        )
+
+
+def test_formal_subagent_request_rejects_truncated_code() -> None:
+    input_files = [
+        snapshot.model_copy(update={"content_truncated": True})
+        if snapshot.type == ArtifactType.PLC_CODE.value
+        else snapshot
+        for snapshot in snapshots(WorkerType.PLC_FORMAL)
+    ]
+
+    with pytest.raises(SubagentInvalidResponseError, match="complete PLC code"):
+        build_subagent_request(
+            worker_input(
+                WorkerType.PLC_FORMAL,
+                worker_config={"properties": FORMAL_PROPERTIES},
+            ),
+            input_files,
+        )
+
+
+def test_test_subagent_request_rejects_truncated_code() -> None:
+    input_files = [
+        snapshot.model_copy(update={"content_truncated": True})
+        if snapshot.type == ArtifactType.PLC_CODE.value
+        else snapshot
+        for snapshot in snapshots(WorkerType.PLC_TEST)
+    ]
+
+    with pytest.raises(SubagentInvalidResponseError, match="complete PLC code"):
+        build_subagent_request(
+            worker_input(WorkerType.PLC_TEST),
+            input_files,
+        )
 
 
 def test_dev_structured_code_converts_to_passed_draft() -> None:
@@ -237,6 +295,50 @@ def test_formal_structured_report_converts_to_passed_draft() -> None:
     assert draft.outcome.status == "passed"
     assert draft.metrics.formal_metrics is not None
     assert draft.metrics.formal_metrics.failed_properties == 0
+
+
+def test_formal_not_checked_report_converts_to_failed_draft_with_failure() -> None:
+    payload = worker_input(WorkerType.PLC_FORMAL)
+    events = parse_sse_events(
+        [
+            "data: "
+            + json.dumps(
+                {
+                    "type": "formal_report_json",
+                    "content": {
+                        "all_satisfied": False,
+                        "property_count": 1,
+                        "passed": 0,
+                        "failed": 0,
+                        "not_checked": 1,
+                        "properties": [
+                            {
+                                "property_index": 1,
+                                "status": "NOT_CHECKED",
+                                "property_description": "Motor must stop.",
+                                "fallback_reason": "no_suitable_files",
+                                "not_checked_reason": "timeout",
+                            }
+                        ],
+                    },
+                }
+            ),
+            "",
+        ]
+    )
+
+    draft = draft_from_subagent_events(payload, snapshots(WorkerType.PLC_FORMAL), events)
+
+    validate_worker_draft_output(draft, payload)
+    assert draft.outcome.status == "failed"
+    assert draft.next_recommended_action == "repair"
+    assert draft.metrics.formal_metrics is not None
+    assert draft.metrics.formal_metrics.failed_properties == 0
+    assert draft.metrics.formal_metrics.unknown_properties == 1
+    assert len(draft.failures) == 1
+    assert draft.failures[0].source == "formal"
+    assert "NOT_CHECKED" in draft.failures[0].description
+    assert "timeout" in draft.failures[0].description
 
 
 def test_repair_structured_report_and_code_convert_to_passed_draft() -> None:
@@ -405,8 +507,9 @@ def worker_input(
     worker_config: dict[str, Any] | None = None,
 ) -> WorkerInput:
     worker = worker_type.value
+    input_files = snapshots(worker_type)
     return WorkerInput(
-        schema_version="router.v1",
+        schema_version="router.v2",
         task_id="task-subagent-001",
         worker_job_id=f"worker-job-{worker}",
         worker_type=worker,
@@ -418,7 +521,10 @@ def worker_input(
             WorkerType.PLC_REPAIR: WorkerMode.REPAIR,
         }[worker_type],
         objective=f"Run {worker}.",
-        input_artifacts=artifact_refs(worker_type),
+        workspace_root="/tmp/router-subagent-test",
+        current_directory="/tmp/router-subagent-test",
+        input_paths=[snapshot.path for snapshot in input_files],
+        output_paths=output_paths(worker_type),
         context=WorkerContext(
             user_goal="Build and validate motor control logic.",
             task_type="new_plc_development",
@@ -438,22 +544,9 @@ def worker_input(
     )
 
 
-def artifact_refs(worker_type: WorkerType) -> list[ArtifactRef]:
-    return [
-        ArtifactRef(
-            artifact_id=snapshot.artifact_id,
-            type=snapshot.type,
-            version=snapshot.version,
-            uri=f"local://artifacts/{snapshot.artifact_id}",
-            summary=snapshot.summary,
-        )
-        for snapshot in snapshots(worker_type)
-    ]
-
-
-def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
-    raw = McpInputArtifactSnapshot(
-        artifact_id="artifact-raw",
+def snapshots(worker_type: WorkerType) -> list[McpInputFileSnapshot]:
+    raw = McpInputFileSnapshot(
+        path=".router/raw_request.txt",
         type=ArtifactType.RAW_USER_REQUEST,
         version=1,
         summary="Raw request.",
@@ -461,8 +554,8 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
         content_chars=38,
         mime_type="text/plain",
     )
-    requirements = McpInputArtifactSnapshot(
-        artifact_id="artifact-req",
+    requirements = McpInputFileSnapshot(
+        path=".router/requirements.json",
         type=ArtifactType.REQUIREMENTS_IR,
         version=1,
         summary="Requirements.",
@@ -470,8 +563,8 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
         content_chars=48,
         mime_type="application/json",
     )
-    code = McpInputArtifactSnapshot(
-        artifact_id="artifact-code",
+    code = McpInputFileSnapshot(
+        path="src/plc_code.st",
         type=ArtifactType.PLC_CODE,
         version=1,
         summary="PLC code.",
@@ -479,8 +572,8 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
         content_chars=len(sample_code()),
         mime_type="text/plain",
     )
-    report = McpInputArtifactSnapshot(
-        artifact_id="artifact-report",
+    report = McpInputFileSnapshot(
+        path=".router/reports/test_report.json",
         type=ArtifactType.TEST_REPORT,
         version=1,
         summary="Failed test report.",
@@ -495,29 +588,36 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
     return [code, report]
 
 
-def expected_outputs(worker_type: WorkerType) -> list[ExpectedOutputSpec]:
-    outputs = {
+def output_paths(worker_type: WorkerType) -> list[str]:
+    return {
         WorkerType.PLC_DEV: [
-            ArtifactType.REQUIREMENTS_IR,
-            ArtifactType.PLC_CODE,
-            ArtifactType.IO_CONTRACT,
+            "src/plc_code.st",
+            ".router/reports/worker-job/requirements.json",
+            ".router/reports/worker-job/io_contract.json",
         ],
-        WorkerType.PLC_TEST: [ArtifactType.TEST_REPORT],
-        WorkerType.PLC_FORMAL: [ArtifactType.FORMAL_REPORT],
+        WorkerType.PLC_TEST: [".router/reports/worker-job/test_report.json"],
+        WorkerType.PLC_FORMAL: [".router/reports/worker-job/formal_report.json"],
         WorkerType.PLC_REPAIR: [
-            ArtifactType.PATCH,
-            ArtifactType.PLC_CODE,
-            ArtifactType.REPAIR_SUMMARY,
+            "src/plc_code.st",
+            ".router/reports/worker-job/patch.diff",
+            ".router/reports/worker-job/repair_summary.json",
         ],
     }[worker_type]
+
+
+def expected_outputs(worker_type: WorkerType) -> list[ExpectedFileSpec]:
     return [
-        ExpectedOutputSpec(
-            artifact_type=artifact_type,
+        ExpectedFileSpec(
+            path=path,
             required=True,
-            description=f"Expected {artifact_type.value}.",
+            description=f"Expected {path}.",
         )
-        for artifact_type in outputs
+        for path in output_paths(worker_type)
     ]
+
+
+def formal_properties() -> list[dict[str, Any]]:
+    return FORMAL_PROPERTIES
 
 
 def sample_code() -> str:

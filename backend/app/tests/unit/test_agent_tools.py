@@ -317,18 +317,51 @@ def test_sdk_tool_list_exposes_expected_names() -> None:
         "apply_patch",
         "exec_command",
         "git_status",
-        "read_artifact",
-        "write_artifact",
-        "register_workspace_file",
+        "request_clarification",
         "plc_dev",
         "plc_test",
         "plc_formal",
         "plc_repair",
         "run_quality_gate",
+        "record_validation_report",
     ]
     assert [spec["function"]["name"] for spec in get_main_agent_tool_specs()] == [
         tool.name for tool in tools
     ]
+
+
+def test_request_clarification_is_exposed_and_pauses_task(
+    db_session: Session,
+    service: AgentToolService,
+) -> None:
+    task = classified_task(db_session, qa=True)
+
+    result = service.request_clarification(
+        task.task_id,
+        questions=[
+            {
+                "question": "Should the alarm latch until Reset?",
+                "reason": "Latch behavior changes PLC implementation and tests.",
+                "required": True,
+            }
+        ],
+        rationale_summary="Alarm reset semantics are missing.",
+    )
+    updated = TaskRepository(db_session).get_task(task.task_id)
+    spec = next(
+        spec
+        for spec in get_main_agent_tool_specs()
+        if spec["function"]["name"] == "request_clarification"
+    )
+
+    assert result.status == "applied"
+    assert result.next_recommended_action == "ask_user"
+    assert updated.status == "waiting_user"
+    assert updated.phase == "clarifying"
+    assert updated.difficulty.need_clarification is True
+    assert len(updated.unresolved_questions) == 1
+    assert updated.unresolved_questions[0].question == "Should the alarm latch until Reset?"
+    assert spec["function"]["parameters"]["required"] == ["task_id", "questions"]
 
 
 def test_finish_task_is_not_exposed_to_main_agent_model() -> None:

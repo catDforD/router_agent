@@ -541,7 +541,7 @@
   },
   {
     "id": "analog_scaling_alarm_test_only_generic",
-    "message": "代码现在是这样的：\n```text\nRawAI 0-4095 映射到 0-10.0 bar\n8.0 bar 以上置高压\n0.2 bar 以下置异常\n```\n上次测试里，RawAI 已经到满量程了，PressureBar 却跑到了 10.3 bar。",
+    "message": "请只对下面已有模拟量缩放逻辑做测试评估：\n```text\nRawAI 0-4095 映射到 0-10.0 bar\n8.0 bar 以上置高压\n0.2 bar 以下置异常\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：RawAI 到满量程时，PressureBar 是否会跑到 10.3 bar。",
     "topic_family": "analog_scaling_alarm",
     "route_hint": "模拟量缩放 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -550,7 +550,7 @@
   },
   {
     "id": "comm_diagnostics_test_only_generic",
-    "message": "代码现在是这样的：\n```text\n3 秒没收到心跳就置通信故障\n通讯恢复后还要 Reset 才能清\n故障挂着时压住自动启动许可\n```\n上次测试里，心跳已经回来，但故障还是一直挂着。",
+    "message": "请只对下面已有通讯诊断逻辑做测试评估：\n```text\n3 秒没收到心跳就置通信故障\n通讯恢复后还要 Reset 才能清\n故障挂着时压住自动启动许可\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：心跳恢复后，故障是否仍然一直挂着。",
     "topic_family": "comm_diagnostics",
     "route_hint": "通讯诊断 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -559,7 +559,7 @@
   },
   {
     "id": "conveyor_sequence_test_only_st",
-    "message": "代码现在是这样的：\n```st\nIF InfeedReady THEN Conv1Cmd := TRUE; END_IF;\nIF Conv1Ready THEN Conv2Cmd := TRUE; END_IF;\nIF Fault THEN Conv2Cmd := FALSE; Conv1Cmd := FALSE; END_IF;\n```\n上次测试里，`Conv2Cmd` 先亮了，`Conv1Cmd` 还没真正稳定。",
+    "message": "请只对下面已有输送线顺控 ST 代码做测试评估：\n```st\nIF InfeedReady THEN Conv1Cmd := TRUE; END_IF;\nIF Conv1Ready THEN Conv2Cmd := TRUE; END_IF;\nIF Fault THEN Conv2Cmd := FALSE; Conv1Cmd := FALSE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`Conv2Cmd` 是否会在 `Conv1Cmd` 未稳定前先亮。",
     "topic_family": "conveyor_sequence",
     "route_hint": "输送线顺控 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -568,7 +568,7 @@
   },
   {
     "id": "counter_batch_test_only_st",
-    "message": "代码现在是这样的：\n```st\nR_TRIG1(CLK := PhotoEye);\nIF R_TRIG1.Q THEN BatchCnt := BatchCnt + 1; END_IF;\nIF BatchCnt >= 12 THEN BatchDone := TRUE; END_IF;\n```\n上次测试里，`PhotoEye` 抖了一下，`BatchCnt` 被加了两次。",
+    "message": "请只对下面已有批量计数 ST 代码做测试评估：\n```st\nR_TRIG1(CLK := PhotoEye);\nIF R_TRIG1.Q THEN BatchCnt := BatchCnt + 1; END_IF;\nIF BatchCnt >= 12 THEN BatchDone := TRUE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`PhotoEye` 抖动一下时，`BatchCnt` 是否会被加两次。",
     "topic_family": "counter_batch",
     "route_hint": "批量计数 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -577,7 +577,7 @@
   },
   {
     "id": "fault_latch_reset_test_only_st",
-    "message": "代码现在是这样的：\n```st\nIF FaultIn THEN FaultLatch := TRUE; MotorCmd := FALSE; END_IF;\nIF ResetPB AND NOT FaultIn THEN FaultLatch := FALSE; END_IF;\nIF FaultLatch THEN StartCmd := FALSE; END_IF;\n```\n上次测试里，`FaultIn` 已经没了，`FaultLatch` 却还挂着。",
+    "message": "请只对下面已有故障锁存复位 ST 代码做测试评估：\n```st\nIF FaultIn THEN FaultLatch := TRUE; MotorCmd := FALSE; END_IF;\nIF ResetPB AND NOT FaultIn THEN FaultLatch := FALSE; END_IF;\nIF FaultLatch THEN StartCmd := FALSE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`FaultIn` 消失后，`FaultLatch` 是否仍然挂着。",
     "topic_family": "fault_latch_reset",
     "route_hint": "故障锁存 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -586,7 +586,7 @@
   },
   {
     "id": "io_mapping_hmi_test_only_st",
-    "message": "代码现在是这样的：\n```st\nStartReq := DI_Start;\nStopReq := DI_Stop;\nResetReq := DI_Reset;\nAlarmView := AlarmLatch;\n```\n上次测试里，`DI_Reset` 按下去了，内部复位变量却没有变化。",
+    "message": "请只对下面已有 I/O 与 HMI 映射 ST 代码做测试评估：\n```st\nStartReq := DI_Start;\nStopReq := DI_Stop;\nResetReq := DI_Reset;\nAlarmView := AlarmLatch;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`DI_Reset` 按下后，内部复位变量是否没有变化。",
     "topic_family": "io_mapping_hmi",
     "route_hint": "I/O 映射 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -595,7 +595,7 @@
   },
   {
     "id": "manual_auto_mode_test_only_generic",
-    "message": "代码现在是这样的：\n```text\nAutoMode 走自动逻辑\nManualMode 只允许点动\n模式切换时先清输出\n```\n上次测试里，手动刚切回自动，输出还按上一种模式顶着。",
+    "message": "请只对下面已有手自动模式逻辑做测试评估：\n```text\nAutoMode 走自动逻辑\nManualMode 只允许点动\n模式切换时先清输出\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：手动刚切回自动时，输出是否还按上一种模式保持。",
     "topic_family": "manual_auto_mode",
     "route_hint": "手自动切换 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -604,7 +604,7 @@
   },
   {
     "id": "motor_start_stop_test_only_st",
-    "message": "代码现在是这样的：\n```st\nMotorCmd := StartPB OR MotorCmd;\nIF NOT StopPB OR NOT EStopOK OR NOT OverloadOK THEN\n  MotorCmd := FALSE;\nEND_IF;\n```\n上次测试里，`StopPB` 松开后，`MotorCmd` 还是偶尔亮一下。",
+    "message": "请只对下面已有电机启停 ST 代码做测试评估：\n```st\nMotorCmd := StartPB OR MotorCmd;\nIF NOT StopPB OR NOT EStopOK OR NOT OverloadOK THEN\n  MotorCmd := FALSE;\nEND_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`StopPB` 松开后，`MotorCmd` 是否还会偶尔亮一下。",
     "topic_family": "motor_start_stop",
     "route_hint": "电机启停 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -613,7 +613,7 @@
   },
   {
     "id": "pump_level_control_test_only_generic",
-    "message": "代码现在是这样的：\n```text\n低液位允许起泵\n高液位到就停泵\n故障没恢复前不准硬启动\n```\n上次测试里，高液位已经到位，泵却还在继续跑。",
+    "message": "请只对下面已有液位泵控制逻辑做测试评估：\n```text\n低液位允许起泵\n高液位到就停泵\n故障没恢复前不准硬启动\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：高液位到位后，泵是否仍然继续运行。",
     "topic_family": "pump_level_control",
     "route_hint": "液位泵 先按现有代码测。",
     "expected_route": "test_only_existing_code",
@@ -622,7 +622,7 @@
   },
   {
     "id": "timer_delay_test_only_generic",
-    "message": "代码现在是这样的：\n```text\nStartCmd 先进入延时\n5 秒后才允许 MotorCmd\nFault 一来直接撤销输出\n```\n上次测试里，StartCmd 抖了一下以后，Timer.Q 没有完全复位。",
+    "message": "请只对下面已有延时启动逻辑做测试评估：\n```text\nStartCmd 先进入延时\n5 秒后才允许 MotorCmd\nFault 一来直接撤销输出\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：StartCmd 抖动后，Timer.Q 是否没有完全复位。",
     "topic_family": "timer_delay",
     "route_hint": "延时启动 先按现有代码测。",
     "expected_route": "test_only_existing_code",

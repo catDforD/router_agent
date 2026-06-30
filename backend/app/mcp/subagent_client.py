@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import difflib
 import json
 from pathlib import PurePath
@@ -20,7 +21,12 @@ from app.mcp.draft import (
 )
 from app.models.router_schema import (
     ArtifactType,
+    Failure,
+    FailureReproduction,
+    FailureSource,
+    FailureStatus,
     NextRecommendedAction,
+    Severity,
     WorkerInput,
     WorkerMetrics,
     WorkerOutcome,
@@ -53,8 +59,6 @@ CONTEXT_FIELDS_BY_WORKER: dict[str, set[str]] = {
     },
     WorkerType.PLC_FORMAL.value: {
         "compiler_type",
-        "properties",
-        "natural_language_requirements",
     },
     WorkerType.PLC_REPAIR.value: {
         "repair_source",
@@ -259,12 +263,18 @@ def build_subagent_request(
             f"unsupported worker type for subagent dispatch: {worker!r}",
             details={"worker_type": worker},
         )
-    return {
-        "message": build_subagent_message(
+    if worker == WorkerType.PLC_FORMAL.value:
+        message = build_formal_subagent_message(worker_input, input_files)
+    elif worker == WorkerType.PLC_TEST.value:
+        message = build_test_subagent_message(input_files)
+    else:
+        message = build_subagent_message(
             worker_input,
             input_files,
             artifact_max_chars=artifact_max_chars,
-        ),
+        )
+    return {
+        "message": message,
         "agent_id": agent_id,
         "context": build_subagent_context(worker_input),
     }
@@ -312,6 +322,86 @@ def build_subagent_message(
             parts.append(_file_message_block(artifact, artifact_max_chars))
 
     return "\n\n".join(part for part in parts if part)
+
+
+def build_formal_subagent_message(
+    worker_input: WorkerInput,
+    input_files: list[McpInputFileSnapshot],
+) -> str:
+    """Build the standard JSON message expected by formal_validation_agent."""
+
+    return json.dumps(
+        {
+            "st_code": _formal_st_code(input_files),
+            "properties": _formal_properties(worker_input),
+        },
+        ensure_ascii=False,
+    )
+
+
+def build_test_subagent_message(
+    input_files: list[McpInputFileSnapshot],
+) -> str:
+    """Build the raw ST message expected by fuzz_testing_agent."""
+
+    return _latest_complete_plc_code(
+        input_files,
+        worker_label="plc-test",
+    )
+
+
+def _formal_st_code(input_files: list[McpInputFileSnapshot]) -> str:
+    return _latest_complete_plc_code(
+        input_files,
+        worker_label="plc-formal",
+    )
+
+
+def _latest_complete_plc_code(
+    input_files: list[McpInputFileSnapshot],
+    *,
+    worker_label: str,
+) -> str:
+    code_files = [
+        artifact
+        for artifact in input_files
+        if _value(artifact.type) == ArtifactType.PLC_CODE.value
+    ]
+    if not code_files:
+        raise SubagentInvalidResponseError(
+            f"{worker_label} subagent dispatch requires a PLC code input file snapshot",
+            details={"required_artifact_type": ArtifactType.PLC_CODE.value},
+        )
+
+    latest = max(code_files, key=lambda artifact: artifact.version)
+    if latest.content_truncated:
+        raise SubagentInvalidResponseError(
+            f"{worker_label} subagent dispatch requires complete PLC code content",
+            details={"path": latest.path, "content_truncated": True},
+        )
+    if latest.content is None or not latest.content.strip():
+        raise SubagentInvalidResponseError(
+            f"{worker_label} subagent dispatch requires non-empty PLC code content",
+            details={"path": latest.path},
+        )
+    return latest.content
+
+
+def _formal_properties(worker_input: WorkerInput) -> Any:
+    worker_config = worker_input.worker_config
+    properties = worker_config.properties if worker_config is not None else None
+    if not _has_structured_content(properties):
+        raise SubagentInvalidResponseError(
+            "plc-formal subagent dispatch requires structured worker_config.properties",
+            details={"worker_type": _value(worker_input.worker_type)},
+        )
+    return properties
+
+
+def _has_structured_content(value: Any) -> bool:
+    if isinstance(value, dict | list):
+        return bool(value)
+    return False
 
 
 def parse_sse_events(lines: Iterable[str]) -> list[SubagentSseEvent]:
@@ -513,6 +603,26 @@ def _formal_draft(
     content = _event_content(report_event)
     status = _formal_status(content)
     passed = status == WorkerOutcomeStatus.PASSED
+    counterexample = _counterexample_content(content)
+    artifact_writes = [
+        _artifact(
+            ArtifactType.FORMAL_REPORT,
+            "formal_report_v1.json",
+            content,
+            "Formal verification report from remote subagent.",
+            mime_type="application/json",
+        )
+    ]
+    if counterexample is not None:
+        artifact_writes.append(
+            _artifact(
+                ArtifactType.COUNTEREXAMPLE,
+                "counterexample_v1.json",
+                counterexample,
+                "Counterexample from remote formal verification subagent.",
+                mime_type="application/json",
+            )
+        )
     return LlmWorkerDraftOutput(
         outcome=WorkerOutcome(
             status=status,
@@ -524,16 +634,13 @@ def _formal_draft(
             content,
             "Remote PLC formal subagent returned a formal verification report.",
         ),
-        artifact_writes=[
-            _artifact(
-                ArtifactType.FORMAL_REPORT,
-                "formal_report_v1.json",
-                content,
-                "Formal verification report from remote subagent.",
-                mime_type="application/json",
-            )
-        ],
+        artifact_writes=artifact_writes,
         metrics=_formal_metrics(content),
+        failures=(
+            []
+            if passed
+            else _formal_failures(worker_input, content, counterexample)
+        ),
         next_recommended_action=(
             NextRecommendedAction.NONE if passed else NextRecommendedAction.REPAIR
         ),
@@ -998,26 +1105,182 @@ def _test_status(content: Any) -> WorkerOutcomeStatus:
 
 
 def _formal_status(content: Any) -> WorkerOutcomeStatus:
-    all_satisfied = _bool_signal(
-        content,
-        {"all_satisfied", "verified", "success", "passed"},
-    )
-    if all_satisfied is True and not _has_failure_signal(content):
-        return WorkerOutcomeStatus.PASSED
-    if all_satisfied is False or _has_failure_signal(content):
-        return WorkerOutcomeStatus.FAILED
-
     failed = _int_signal(
         content,
         {"failed_properties", "violated_properties", "failed", "violations"},
     )
-    total = _int_signal(content, {"total_properties", "total", "properties_count"})
-    passed = _int_signal(content, {"passed_properties", "satisfied_properties", "passed"})
-    if failed == 0 and total is not None and total > 0:
+    not_checked = _int_signal(
+        content,
+        {"not_checked", "not_checked_properties", "unknown_properties", "unknown"},
+    )
+    if (failed is not None and failed > 0) or (
+        not_checked is not None and not_checked > 0
+    ):
+        return WorkerOutcomeStatus.FAILED
+    if _formal_problem_properties(content):
+        return WorkerOutcomeStatus.FAILED
+
+    all_satisfied = _bool_signal(
+        content,
+        {"all_satisfied", "verified", "success", "passed"},
+    )
+    if all_satisfied is True:
         return WorkerOutcomeStatus.PASSED
-    if total is not None and passed is not None and total > 0 and passed == total:
+    if all_satisfied is False:
+        return WorkerOutcomeStatus.FAILED
+
+    total = _int_signal(content, {"total_properties", "total", "properties_count"})
+    passed = _int_signal(
+        content,
+        {"passed_properties", "satisfied_properties", "passed"},
+    )
+    if (
+        failed == 0
+        and not_checked in {0, None}
+        and total is not None
+        and total > 0
+    ):
+        return WorkerOutcomeStatus.PASSED
+    if (
+        total is not None
+        and passed is not None
+        and total > 0
+        and passed == total
+        and not_checked in {0, None}
+    ):
         return WorkerOutcomeStatus.PASSED
     return WorkerOutcomeStatus.FAILED
+
+
+def _formal_failures(
+    worker_input: WorkerInput,
+    content: Any,
+    counterexample: Any | None,
+) -> list[Failure]:
+    return [
+        Failure(
+            failure_id=f"failure-{worker_input.worker_job_id}-formal",
+            source=FailureSource.FORMAL,
+            severity=Severity.BLOCKING,
+            title="PLC formal verification failed",
+            description=_formal_failure_description(content),
+            reproduction=(
+                FailureReproduction(counterexample_path=None)
+                if counterexample is not None
+                else None
+            ),
+            evidence_paths=[],
+            status=FailureStatus.OPEN,
+            created_by_worker_job_id=worker_input.worker_job_id,
+            created_at=datetime.now(UTC),
+        )
+    ]
+
+
+def _formal_failure_description(content: Any) -> str:
+    properties = _formal_problem_properties(content)
+    if not properties:
+        return "Formal verification did not satisfy all required properties."
+
+    summaries = []
+    for index, prop in enumerate(properties[:5], start=1):
+        label = _formal_property_label(prop, index)
+        status = _string_from_keys(prop, ("status", "result", "outcome", "state"))
+        reason = _formal_reason_summary(
+            prop,
+            (
+                "fallback_reason",
+                "not_checked_reason",
+                "reason",
+                "detail_hint",
+                "summary",
+            ),
+        )
+        description = _string_from_keys(
+            prop,
+            ("property_description", "description", "name"),
+        )
+        pieces = [label]
+        if status:
+            pieces.append(f"status={status}")
+        if description:
+            pieces.append(description)
+        if reason:
+            pieces.append(reason)
+        summaries.append(": ".join([pieces[0], "; ".join(pieces[1:])]))
+    if len(properties) > len(summaries):
+        summaries.append(f"{len(properties) - len(summaries)} additional properties failed.")
+    return "\n".join(summaries)
+
+
+def _formal_property_label(prop: dict[str, Any], fallback_index: int) -> str:
+    value = prop.get("property_index") or prop.get("index") or prop.get("id")
+    return f"property {value or fallback_index}"
+
+
+def _formal_problem_properties(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, dict):
+        return []
+    properties: list[dict[str, Any]] = []
+    for key in ("properties", "property_results", "results"):
+        value = content.get(key)
+        if isinstance(value, list):
+            properties.extend(item for item in value if isinstance(item, dict))
+    return [prop for prop in properties if _formal_property_is_problem(prop)]
+
+
+def _formal_property_is_problem(prop: dict[str, Any]) -> bool:
+    status = _string_from_keys(prop, ("status", "result", "outcome", "state"))
+    if status is not None:
+        normalized = status.strip().lower()
+        if normalized in {"pass", "passed", "success", "satisfied"}:
+            return False
+        if any(
+            marker in normalized
+            for marker in ("fail", "error", "violat", "not_checked", "unknown")
+        ):
+            return True
+    return any(
+        _string_from_keys(prop, (key,)) is not None
+        for key in ("fallback_reason", "not_checked_reason", "counterexample")
+    )
+
+
+def _formal_reason_summary(content: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    values: list[str] = []
+    for key in keys:
+        value = content.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() not in values:
+            values.append(value.strip())
+    return "; ".join(values) if values else None
+
+
+def _counterexample_content(content: Any) -> Any | None:
+    if not isinstance(content, dict):
+        return None
+    for key in ("counterexample", "counterexamples"):
+        value = content.get(key)
+        if _has_report_content(value):
+            return value
+    return None
+
+
+def _has_report_content(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list | dict):
+        return bool(value)
+    return True
+
+
+def _string_from_keys(content: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = content.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _repair_passed(content: Any) -> bool:
@@ -1101,7 +1364,12 @@ def _formal_metrics(content: Any) -> WorkerMetrics:
             ),
             "unknown_properties": _int_signal(
                 content,
-                {"unknown_properties", "unknown"},
+                {
+                    "unknown_properties",
+                    "unknown",
+                    "not_checked",
+                    "not_checked_properties",
+                },
             ),
         }
     )

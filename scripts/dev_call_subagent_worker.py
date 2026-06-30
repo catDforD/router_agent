@@ -18,16 +18,15 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.core.config import get_settings  # noqa: E402
-from app.mcp.draft import McpInputArtifactSnapshot, validate_worker_draft_output  # noqa: E402
+from app.mcp.draft import McpInputFileSnapshot, validate_worker_draft_output  # noqa: E402
 from app.mcp.subagent_client import (  # noqa: E402
     build_subagent_request,
     draft_from_subagent_events,
     parse_sse_events,
 )
 from app.models.router_schema import (  # noqa: E402
-    ArtifactRef,
     ArtifactType,
-    ExpectedOutputSpec,
+    ExpectedFileSpec,
     TraceContext,
     WORKER_TOOL_BY_TYPE,
     WorkerBudget,
@@ -77,8 +76,8 @@ def main() -> int:
     args = parse_args()
     worker_type = WorkerType(args.worker)
     payload = worker_input(worker_type)
-    input_artifacts = snapshots(worker_type)
-    request = build_subagent_request(payload, input_artifacts)
+    input_files = snapshots(worker_type)
+    request = build_subagent_request(payload, input_files)
     url = f"{args.base_url.rstrip('/')}/api/chat/stream"
 
     print(f"worker: {worker_type.value}")
@@ -114,7 +113,7 @@ def main() -> int:
         print(json.dumps(error_events[0]["data"], indent=2, ensure_ascii=False))
         return 2
 
-    draft = draft_from_subagent_events(payload, input_artifacts, events)
+    draft = draft_from_subagent_events(payload, input_files, events)
     validate_worker_draft_output(draft, payload)
     print(f"outcome: {draft.outcome.status}")
     print(f"summary: {draft.summary}")
@@ -132,7 +131,7 @@ def main() -> int:
 def worker_input(worker_type: WorkerType) -> WorkerInput:
     worker = worker_type.value
     return WorkerInput(
-        schema_version="router.v1",
+        schema_version="router.v2",
         task_id="task-live-subagent-smoke",
         worker_job_id=f"worker-job-live-{worker}",
         worker_type=worker,
@@ -144,7 +143,10 @@ def worker_input(worker_type: WorkerType) -> WorkerInput:
             WorkerType.PLC_REPAIR: WorkerMode.REPAIR,
         }[worker_type],
         objective=objective(worker_type),
-        input_artifacts=artifact_refs(worker_type),
+        workspace_root="/tmp/router-live-subagent-smoke",
+        current_directory="/tmp/router-live-subagent-smoke",
+        input_paths=[snapshot.path for snapshot in snapshots(worker_type)],
+        output_paths=output_paths(worker_type),
         context=WorkerContext(
             user_goal="Build a safe motor start/stop controller with stop priority.",
             task_type="new_plc_development",
@@ -187,8 +189,8 @@ def worker_config(worker_type: WorkerType) -> dict[str, Any]:
             "enable_fuzz_test": True,
         },
         WorkerType.PLC_FORMAL: {
-            "compiler_type": "rusty",
-            "natural_language_requirements": "Stop button must always disable MotorRun.",
+            "compiler_type": "matiec",
+            "properties": formal_properties(),
         },
         WorkerType.PLC_REPAIR: {
             "repair_source": "test_failure",
@@ -199,22 +201,9 @@ def worker_config(worker_type: WorkerType) -> dict[str, Any]:
     }[worker_type]
 
 
-def artifact_refs(worker_type: WorkerType) -> list[ArtifactRef]:
-    return [
-        ArtifactRef(
-            artifact_id=snapshot.artifact_id,
-            type=snapshot.type,
-            version=snapshot.version,
-            uri=f"memory://{snapshot.artifact_id}",
-            summary=snapshot.summary,
-        )
-        for snapshot in snapshots(worker_type)
-    ]
-
-
-def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
-    raw = McpInputArtifactSnapshot(
-        artifact_id="artifact-live-raw",
+def snapshots(worker_type: WorkerType) -> list[McpInputFileSnapshot]:
+    raw = McpInputFileSnapshot(
+        path=".router/raw_request.txt",
         type=ArtifactType.RAW_USER_REQUEST,
         version=1,
         summary="Raw live smoke request.",
@@ -222,8 +211,8 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
         content_chars=62,
         mime_type="text/plain",
     )
-    requirements = McpInputArtifactSnapshot(
-        artifact_id="artifact-live-requirements",
+    requirements = McpInputFileSnapshot(
+        path=".router/requirements.json",
         type=ArtifactType.REQUIREMENTS_IR,
         version=1,
         summary="Minimal requirements.",
@@ -239,17 +228,25 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
         content_chars=96,
         mime_type="application/json",
     )
-    code = McpInputArtifactSnapshot(
-        artifact_id="artifact-live-code",
+    code = McpInputFileSnapshot(
+        path="src/plc_code.st",
         type=ArtifactType.PLC_CODE,
         version=1,
         summary="Sample ST code.",
-        content=sample_code(),
-        content_chars=len(sample_code()),
+        content=(
+            sample_formal_code()
+            if worker_type == WorkerType.PLC_FORMAL
+            else sample_code()
+        ),
+        content_chars=(
+            len(sample_formal_code())
+            if worker_type == WorkerType.PLC_FORMAL
+            else len(sample_code())
+        ),
         mime_type="text/plain",
     )
-    report = McpInputArtifactSnapshot(
-        artifact_id="artifact-live-test-report",
+    report = McpInputFileSnapshot(
+        path=".router/reports/test_report.json",
         type=ArtifactType.TEST_REPORT,
         version=1,
         summary="Synthetic failing fuzz report.",
@@ -271,29 +268,56 @@ def snapshots(worker_type: WorkerType) -> list[McpInputArtifactSnapshot]:
     return [code, report]
 
 
-def expected_outputs(worker_type: WorkerType) -> list[ExpectedOutputSpec]:
-    outputs = {
+def output_paths(worker_type: WorkerType) -> list[str]:
+    return {
         WorkerType.PLC_DEV: [
-            ArtifactType.REQUIREMENTS_IR,
-            ArtifactType.PLC_CODE,
-            ArtifactType.IO_CONTRACT,
+            "src/plc_code.st",
+            ".router/reports/worker-job-live/requirements.json",
+            ".router/reports/worker-job-live/io_contract.json",
         ],
-        WorkerType.PLC_TEST: [ArtifactType.TEST_REPORT],
-        WorkerType.PLC_FORMAL: [ArtifactType.FORMAL_REPORT],
+        WorkerType.PLC_TEST: [".router/reports/worker-job-live/test_report.json"],
+        WorkerType.PLC_FORMAL: [".router/reports/worker-job-live/formal_report.json"],
         WorkerType.PLC_REPAIR: [
-            ArtifactType.PATCH,
-            ArtifactType.PLC_CODE,
-            ArtifactType.REPAIR_SUMMARY,
+            "src/plc_code.st",
+            ".router/reports/worker-job-live/patch.diff",
+            ".router/reports/worker-job-live/repair_summary.json",
         ],
     }[worker_type]
+
+
+def expected_outputs(worker_type: WorkerType) -> list[ExpectedFileSpec]:
     return [
-        ExpectedOutputSpec(
-            artifact_type=artifact_type,
+        ExpectedFileSpec(
+            path=path,
             required=True,
-            description=f"Expected {artifact_type.value}.",
+            description=f"Expected {path}.",
         )
-        for artifact_type in outputs
+        for path in output_paths(worker_type)
     ]
+
+
+def formal_properties() -> list[dict[str, Any]]:
+    return [
+        {
+            "property_description": "输出 y 必须等于输入 x / y must equal x",
+            "property": {"job_req": "assertion"},
+        }
+    ]
+
+
+def sample_formal_code() -> str:
+    return (
+        "FUNCTION_BLOCK Example\n"
+        "VAR_INPUT\n"
+        "    x : BOOL;\n"
+        "END_VAR\n"
+        "VAR_OUTPUT\n"
+        "    y : BOOL;\n"
+        "END_VAR\n"
+        "y := x;\n"
+        "//#ASSERT (y = x) : assert_y_equals_x\n"
+        "END_FUNCTION_BLOCK"
+    )
 
 
 def sample_code() -> str:
