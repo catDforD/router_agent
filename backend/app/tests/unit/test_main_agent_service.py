@@ -603,9 +603,10 @@ def test_state_view_available_tools_follow_execution_mode(
 
     assert "read_file" not in disabled_tools
     assert "register_workspace_file" not in disabled_tools
+    assert "request_clarification" in disabled_tools
     assert "run_quality_gate" in disabled_tools
     assert "read_file" in read_only_tools
-    assert "register_workspace_file" in read_only_tools
+    assert "request_clarification" in read_only_tools
     assert "write_file" not in read_only_tools
     assert "exec_command" not in read_only_tools
     assert full_access_tools == list(MAIN_AGENT_TOOL_NAMES)
