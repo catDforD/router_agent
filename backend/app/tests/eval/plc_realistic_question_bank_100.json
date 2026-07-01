@@ -360,543 +360,563 @@
     "difficulty": "basic"
   },
   {
-    "id": "analog_scaling_alarm_dev_test_generic",
-    "message": "原始值映射到 0-10 bar，8 bar 以上报高压，0.2 bar 以下报异常。边界值顺手跑一遍测试。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先做代码，再测。",
-    "expected_route": "dev_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "comm_diagnostics_dev_test_generic",
-    "message": "3 秒超时先挂故障锁存，恢复后要手动复位才清。重点跑一下恢复场景。",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先做代码，再测。",
-    "expected_route": "dev_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "conveyor_sequence_dev_test_st",
-    "message": "先把 `Conv1Cmd` / `Conv2Cmd` 的顺序控制写清楚，故障出现时先撤后段。把起停顺序跑一遍。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先做代码，再测。",
+    "id": "find_min_max_values_dev_test",
+    "message": "请帮我写一个 `FindMinMaxValues` 功能块，输入固定 10 个 DINT，输出最小值、最大值以及它们的位置索引。写完后把负数、重复值、全相等、首尾元素为最值这些边界都跑一遍测试。",
+    "topic_family": "find_min_max_values",
+    "route_hint": "最小最大值功能块 先实现，再测边界。",
     "expected_route": "dev_then_test",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "212_FindMinMaxValues",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/212_FindMinMaxValues/plc_st_files/212_FindMinMaxValues.st",
+    "validation_focus": "覆盖 10 个 DINT 输入的负数、重复值、全相等、首尾元素为最值等场景，最值索引取第一次出现的位置。"
   },
   {
-    "id": "counter_batch_dev_test_st",
-    "message": "先把 `R_TRIG` 和 `BatchCnt` 写出来，完成后再由 `PushDone` 清零。重点看抖动时会不会重复计数。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先做代码，再测。",
+    "id": "day_of_year_calculator_dev_test",
+    "message": "请实现一个 `FB_CalculateDayOfYear` 功能块，输入年、月、日，输出当天是这一年的第几天，并给非法日期置错误状态。完成后重点测试平年/闰年、2 月 29 日、1 月 1 日和 12 月 31 日。",
+    "topic_family": "day_of_year_calculator",
+    "route_hint": "年内日序功能块 先实现，再测闰年。",
     "expected_route": "dev_then_test",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "214_DayOfYearCalculator",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/214_DayOfYearCalculator/plc_st_files/214_DayOfYearCalculator.st",
+    "validation_focus": "覆盖平年、闰年、2 月 29 日、年初年末，以及非法月日输入的错误处理。"
   },
   {
-    "id": "fault_latch_reset_dev_test_st",
-    "message": "先把 `FaultLatch` 和 `MotorCmd` 的关系写清，复位条件要等 `FaultIn` 先恢复。把锁存和复位跑一遍。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先做代码，再测。",
+    "id": "select_sort_dev_test",
+    "message": "请写一个 `SelectSort` 功能块，对 10 个 DINT 做升序排序，只有 `Execute` 触发时才更新结果。实现后用已经有序、完全逆序、带重复值和带负数的数组各跑一次测试。",
+    "topic_family": "select_sort",
+    "route_hint": "选择排序功能块 先实现，再测顺序。",
     "expected_route": "dev_then_test",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "215_SelectSort",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/215_SelectSort/plc_st_files/215_SelectSort.st",
+    "validation_focus": "覆盖升序、降序、重复值、负数，以及 execute 为 FALSE 时不改变输出的情况。"
   },
   {
-    "id": "io_mapping_hmi_dev_test_st",
-    "message": "先把 `DI_Start` / `DI_Stop` / `DI_Reset` 映射到内部命令，再把显示变量分开。确认每个按钮都只落一个点。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先做代码，再测。",
+    "id": "random_number_generator_dev_test",
+    "message": "请实现一个简单的 `RandomNumberGenerator` 功能块，输入最小值、最大值和 seed，输出范围内的整数；同一个 seed 要能复现同样结果。实现后测试 min=max、正常范围、多组 seed 和结果不越界。",
+    "topic_family": "random_number_generator",
+    "route_hint": "随机数功能块 先实现，再测范围。",
     "expected_route": "dev_then_test",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "216_RandomNumber",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/216_RandomNumber/plc_st_files/216_RandomNumber.st",
+    "validation_focus": "覆盖最小最大范围、min=max、seed 重复时结果可复现，以及结果不越界。"
   },
   {
-    "id": "manual_auto_mode_dev_test_generic",
-    "message": "先把输出归谁管说清楚，切模式时别把上一种模式的输出带过去。把切换过程跑一遍。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先做代码，再测。",
-    "expected_route": "dev_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "motor_start_stop_dev_test_st",
-    "message": "先把 `MotorCmd` 的自保持搭起来，停机条件来了立刻切掉。重点看急停、过载和停止按钮。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先做代码，再测。",
+    "id": "floating_average_dev_test",
+    "message": "请写一个 `FloatingAverage` 功能块，按触发信号采样 REAL 值并计算滑动平均，支持窗口大小和 Reset。写完后重点测试窗口还没填满、填满后滚动、Reset 清空以及 Trigger 没来时不采样。",
+    "topic_family": "floating_average",
+    "route_hint": "滑动平均功能块 先实现，再测窗口。",
     "expected_route": "dev_then_test",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "220_FloatingAverage",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/220_FloatingAverage/plc_st_files/220_FloatingAverage.st",
+    "validation_focus": "覆盖窗口未填满、窗口填满后滑动、Reset 清空、Trigger 控制采样，以及 WindowSize 边界。"
   },
   {
-    "id": "pump_level_control_dev_test_generic",
-    "message": "先把起停边界写清楚，手动也别越过保护。把高低液位和手动点动都跑一遍。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先做代码，再测。",
+    "id": "lights_control_dev_test",
+    "message": "请实现一个三色灯 `LightsControl` 功能块：自动模式下绿、红、黄按定时顺序轮转，手动按钮可以单独点亮对应灯。完成后跑一下自动轮转、按钮组合、无按钮全灭和三灯互斥测试。",
+    "topic_family": "lights_control",
+    "route_hint": "三灯控制功能块 先实现，再测模式切换。",
     "expected_route": "dev_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "223_LightsControl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/223_LightsControl/plc_st_files/223_LightsControl.st",
+    "validation_focus": "覆盖自动轮转、手动按钮组合、无按钮时全灭，以及任意时刻红黄绿输出互斥。"
   },
   {
-    "id": "timer_delay_dev_test_generic",
-    "message": "先把 5 秒延时写出来，启动信号一断就清计时，故障来了直接停。重点看抖动和复位。",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先做代码，再测。",
+    "id": "linearize_value_dev_test",
+    "message": "请实现 `FB_LinearizeValue`，把模拟输入按 1200-3600、3600-4800、4800-7000 三段线性换算，超出范围时给错误状态。测试重点放在每个断点、断点外和分段内单调性。",
+    "topic_family": "linearize_value",
+    "route_hint": "分段线性化功能块 先实现，再测断点。",
     "expected_route": "dev_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "230_FB_LinearizeValue",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/230_FB_LinearizeValue/plc_st_files/230_FB_LinearizeValue.st",
+    "validation_focus": "覆盖 1200、3600、4800、7000 四个断点及断点外错误状态，分段内输出应单调。"
   },
   {
-    "id": "analog_scaling_alarm_dev_test_formal_st",
-    "message": "先把 `PressureBar` 的换算写顺，再补一条性质：它必须始终在 0..10 之间。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先做代码，再测，再验。",
+    "id": "fifo_queue_dev_test",
+    "message": "请写一个固定长度 FIFO 功能块，支持 enqueue、dequeue、reset 和 clear，输出当前元素和队列状态。实现后把连续入队、连续出队、满队列、空队列和清空后的状态都测一下。",
+    "topic_family": "fifo_queue",
+    "route_hint": "FIFO 队列功能块 先实现，再测满空。",
+    "expected_route": "dev_then_test",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "236_FIFOQueue",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/236_FIFOQueue/plc_st_files/236_FIFOQueue.st",
+    "validation_focus": "覆盖入队、出队、满队列拒绝、空队列出队、Reset/Clear 后状态清空。"
+  },
+  {
+    "id": "bit_edge_detector_dev_test",
+    "message": "请实现一个 `BitEdgeDetector`，输入 BOOL 当前值，输出上升沿和下降沿脉冲。完成后用连续 TRUE、连续 FALSE、0-1-0 跳变和多次抖动序列做测试，确认边沿只出一个扫描周期。",
+    "topic_family": "bit_edge_detector",
+    "route_hint": "位边沿检测功能块 先实现，再测跳变。",
+    "expected_route": "dev_then_test",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "239_BitEdgeDetector",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/239_BitEdgeDetector/plc_st_files/239_BitEdgeDetector.st",
+    "validation_focus": "覆盖 BOOL 序列的上升沿、下降沿、保持不变、多次跳变，边沿输出只保持一个扫描周期。"
+  },
+  {
+    "id": "pulse_generator_dev_test",
+    "message": "请实现 `PulseGenerator`，按输入频率和高低电平比例生成周期脉冲，同时给出当前状态剩余时间。写完后测试频率为 0、正常频率、不同占空比例和剩余时间不为负。",
+    "topic_family": "pulse_generator",
+    "route_hint": "脉冲发生器功能块 先实现，再测频率占空。",
+    "expected_route": "dev_then_test",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "252_PulseGenerator",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/252_PulseGenerator/plc_st_files/252_PulseGenerator.st",
+    "validation_focus": "覆盖频率为 0、正常频率、不同高低电平比例，以及 remainingTime 不出现负值。"
+  },
+  {
+    "id": "hex_digit_analyzer_dev_test_formal",
+    "message": "请实现 `FB_HexDigitAnalyzer`，识别 0..15 的十六进制 digit 类型并处理越界输入。除了常规测试，再补一条形式化性质：合法输入时分类输出不能互相冲突，非法输入时必须置错误。",
+    "topic_family": "hex_digit_analyzer",
+    "route_hint": "十六进制位分析 代码、测试、性质一起做。",
     "expected_route": "dev_then_test_then_formal",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "218_HexDigitAnalyzer",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/218_HexDigitAnalyzer/plc_st_files/218_HexDigitAnalyzer.st",
+    "validation_focus": "性质：输入 0..15 时只允许一个合法 digit 输出为真，输入越界时必须进入错误状态。"
   },
   {
-    "id": "comm_diagnostics_dev_test_formal_st",
-    "message": "先把超时和锁存做出来，再补一条性质：3 秒没心跳时 `CommFaultLatch` 必须为真。",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先做代码，再测，再验。",
+    "id": "truck_garage_dev_test_formal",
+    "message": "请实现一个三行五列的 `TruckGarage` 功能块，入库时找空位写入车号，出库时返回车位和车号并清空槽位。测试入库、出库、满库，再验证性质：任何时刻一个车位只能属于一辆车。",
+    "topic_family": "truck_garage",
+    "route_hint": "车库管理 代码、测试、性质一起做。",
     "expected_route": "dev_then_test_then_formal",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "224_TruckGarage",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/224_TruckGarage/plc_st_files/224_TruckGarage.st",
+    "validation_focus": "性质：同一个车位不能同时分配给两辆车，出库后该车位必须清空。"
   },
   {
-    "id": "conveyor_sequence_dev_test_formal_generic",
-    "message": "先落顺控，再补一条性质：后段不能在前段没准备好时先起。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先做代码，再测，再验。",
-    "expected_route": "dev_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "counter_batch_dev_test_formal_generic",
-    "message": "先实现计数，再补一条性质：每个箱子最多只算一次。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先做代码，再测，再验。",
-    "expected_route": "dev_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "fault_latch_reset_dev_test_formal_generic",
-    "message": "先实现锁存，再补一条性质：故障没恢复前，锁存不能自己掉。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先做代码，再测，再验。",
-    "expected_route": "dev_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "io_mapping_hmi_dev_test_formal_generic",
-    "message": "先把映射写好，再补一条性质：每个外部点都得落到唯一的内部变量。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先做代码，再测，再验。",
-    "expected_route": "dev_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "manual_auto_mode_dev_test_formal_st",
-    "message": "先做模式切换，再补一条性质：`AutoCmd` 和 `JogCmd` 不能同时抢输出。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先做代码，再测，再验。",
+    "id": "merge_bytes_dev_test_formal",
+    "message": "请实现 `FB_MergeBytes`，把字节数组按指定顺序合成 WORD/DWORD 输出。常规测试覆盖 0、255 和混合字节，再补性质验证：每个输出字节都必须来自唯一的输入位置。",
+    "topic_family": "merge_bytes",
+    "route_hint": "字节合并 代码、测试、性质一起做。",
     "expected_route": "dev_then_test_then_formal",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "225_MergeBytes",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/225_MergeBytes/plc_st_files/225_MergeBytes.st",
+    "validation_focus": "性质：输出 DWORD 的每个字节必须只来自对应输入字节，不允许字节顺序错位。"
   },
   {
-    "id": "motor_start_stop_dev_test_formal_generic",
-    "message": "先实现自保持，再补一条性质：停机条件一到，`MotorCmd` 不能再回来。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先做代码，再测，再验。",
-    "expected_route": "dev_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "pump_level_control_dev_test_formal_st",
-    "message": "先做起停逻辑，再补一条性质：高液位出现时，`PumpCmd` 不能继续保持。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先做代码，再测，再验。",
+    "id": "extract_substring_dev_test_formal",
+    "message": "请实现一个字符串/字符数组截取功能块，按起始位置和长度输出子串。测试正常截取、起点在边界、长度超出和空串，再验证性质：任何输入下都不能访问源字符串范围外的位置。",
+    "topic_family": "extract_substring",
+    "route_hint": "字符串截取 代码、测试、性质一起做。",
     "expected_route": "dev_then_test_then_formal",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "226_ExtractSubstring",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/226_ExtractSubstring/plc_st_files/226_ExtractSubstring.st",
+    "validation_focus": "性质：截取范围不得越过源字符串边界，空结果时长度必须为 0。"
   },
   {
-    "id": "timer_delay_dev_test_formal_st",
-    "message": "先把 `TON1` 的边界写清，再补不变量：输出不能在计时结束前提前置位。",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先做代码，再测，再验。",
+    "id": "shift_sequence_dev_test_formal",
+    "message": "请实现 `ShiftSequence`，支持左移、右移、指定范围移位和 Clear。完成后跑左右移、边界范围和 Clear 测试，再验证性质：缓冲区索引不越界，Clear 后状态完全清空。",
+    "topic_family": "shift_sequence",
+    "route_hint": "移位序列 代码、测试、性质一起做。",
     "expected_route": "dev_then_test_then_formal",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "232_ShiftSequence",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/232_ShiftSequence/plc_st_files/232_ShiftSequence.st",
+    "validation_focus": "性质：移位后有效元素数量不超过缓冲区容量，Clear 后所有槽位回到初始值。"
   },
   {
-    "id": "analog_scaling_alarm_test_only_generic",
-    "message": "请只对下面已有模拟量缩放逻辑做测试评估：\n```text\nRawAI 0-4095 映射到 0-10.0 bar\n8.0 bar 以上置高压\n0.2 bar 以下置异常\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：RawAI 到满量程时，PressureBar 是否会跑到 10.3 bar。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先按现有代码测。",
-    "expected_route": "test_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "id": "color_light_control_dev_test_formal",
+    "message": "请实现 `FB_ColorLightControl`，根据控制码输出红黄绿状态，非法控制码进入安全输出。测试每个控制码，再补形式化性质：输出组合必须属于允许集合，不能出现未定义灯态。",
+    "topic_family": "color_light_control",
+    "route_hint": "颜色灯控制 代码、测试、性质一起做。",
+    "expected_route": "dev_then_test_then_formal",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "237_FB_ColorLightControl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/237_FB_ColorLightControl/plc_st_files/237_FB_ColorLightControl.st",
+    "validation_focus": "性质：任一控制码下红、黄、绿互斥组合必须符合定义，非法控制码必须输出安全状态。"
   },
   {
-    "id": "comm_diagnostics_test_only_generic",
-    "message": "请只对下面已有通讯诊断逻辑做测试评估：\n```text\n3 秒没收到心跳就置通信故障\n通讯恢复后还要 Reset 才能清\n故障挂着时压住自动启动许可\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：心跳恢复后，故障是否仍然一直挂着。",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先按现有代码测。",
-    "expected_route": "test_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "id": "ring_queue_multi_item_dev_test_formal",
+    "message": "请实现一个支持批量 push/pop 的环形队列功能块，能按 itemIndex 和 itemLen 处理多元素。测试回绕、满队列、空队列和 Reset，再验证性质：读写指针不越界，满队列不覆盖有效数据。",
+    "topic_family": "ring_queue_multi_item",
+    "route_hint": "环形队列 代码、测试、性质一起做。",
+    "expected_route": "dev_then_test_then_formal",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "241_RingQueueMultiItem",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/241_RingQueueMultiItem/plc_st_files/241_RingQueueMultiItem.st",
+    "validation_focus": "性质：读写指针始终落在队列容量范围内，队列满时不能覆盖未弹出的元素。"
   },
   {
-    "id": "conveyor_sequence_test_only_st",
-    "message": "请只对下面已有输送线顺控 ST 代码做测试评估：\n```st\nIF InfeedReady THEN Conv1Cmd := TRUE; END_IF;\nIF Conv1Ready THEN Conv2Cmd := TRUE; END_IF;\nIF Fault THEN Conv2Cmd := FALSE; Conv1Cmd := FALSE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`Conv2Cmd` 是否会在 `Conv1Cmd` 未稳定前先亮。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先按现有代码测。",
+    "id": "parity_check_dev_test_formal",
+    "message": "请实现 `ParityCheck`，输入数值和奇偶选择，输出校验是否通过。测试 0、单 bit、多 bit、最大值，再验证性质：任意翻转一位时，奇偶结果必须发生翻转。",
+    "topic_family": "parity_check",
+    "route_hint": "奇偶校验 代码、测试、性质一起做。",
+    "expected_route": "dev_then_test_then_formal",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "248_ParityCheck",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/248_ParityCheck/plc_st_files/248_ParityCheck.st",
+    "validation_focus": "性质：翻转输入中的任意一位会翻转奇偶校验结果。"
+  },
+  {
+    "id": "string_extractor_dev_test_formal",
+    "message": "请实现 `GetString`，从字符数组中按前后分隔符提取片段，并支持是否包含分隔符。测试找得到、找不到、起始位置在末尾、包含分隔符，再验证性质：输出永远不超过目标缓冲区。",
+    "topic_family": "string_extractor",
+    "route_hint": "字符串提取 代码、测试、性质一起做。",
+    "expected_route": "dev_then_test_then_formal",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "250_StringExtractor",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/250_StringExtractor/plc_st_files/250_StringExtractor.st",
+    "validation_focus": "性质：输出长度不超过目标缓冲区，includeBeforeAfter 只影响边界字符是否保留。"
+  },
+  {
+    "id": "split_number_dev_test_formal",
+    "message": "请实现 `FB_SplitNumber`，把输入整数拆成高低字节/字并输出。测试 0、边界值、随机值和最大值，再补性质验证：把拆分结果重新组合后必须得到原始输入。",
+    "topic_family": "split_number",
+    "route_hint": "数字拆分 代码、测试、性质一起做。",
+    "expected_route": "dev_then_test_then_formal",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "255_SplitNumber",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/255_SplitNumber/plc_st_files/255_SplitNumber.st",
+    "validation_focus": "性质：拆出的高低位重新组合后必须等于原始输入。"
+  },
+  {
+    "id": "multi_pump_control_test_only_existing_code",
+    "message": "只对现有 `MultiPumpCtrl` 做测试：自动模式应按优先级最多启动 3 台泵，手动模式只跟随 selections，stop 后所有运行命令清零。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "multi_pump_control",
+    "route_hint": "多泵控制 只测现有 ST。",
     "expected_route": "test_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "213_MultiPumpCtrl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/213_MultiPumpCtrl/plc_st_files/213_MultiPumpCtrl.st",
+    "validation_focus": "验证自动模式最多 3 台泵运行、按优先级选择且 stop 优先清零。"
   },
   {
-    "id": "counter_batch_test_only_st",
-    "message": "请只对下面已有批量计数 ST 代码做测试评估：\n```st\nR_TRIG1(CLK := PhotoEye);\nIF R_TRIG1.Q THEN BatchCnt := BatchCnt + 1; END_IF;\nIF BatchCnt >= 12 THEN BatchDone := TRUE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`PhotoEye` 抖动一下时，`BatchCnt` 是否会被加两次。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先按现有代码测。",
+    "id": "analog_batch_processing_test_only_existing_code",
+    "message": "只测现有 `AnalogBatchProcessing`：启用通道才参与上下限判断，双极性和测量模式不要互相影响，通道数量边界要跑到。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "analog_batch_processing",
+    "route_hint": "模拟量批处理 只测现有 ST。",
     "expected_route": "test_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "217_AnalogBatchProcessing",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/217_AnalogBatchProcessing/plc_st_files/217_AnalogBatchProcessing.st",
+    "validation_focus": "验证禁用通道不报警、启用通道按各自上下限报警，Count 边界不越界。"
   },
   {
-    "id": "fault_latch_reset_test_only_st",
-    "message": "请只对下面已有故障锁存复位 ST 代码做测试评估：\n```st\nIF FaultIn THEN FaultLatch := TRUE; MotorCmd := FALSE; END_IF;\nIF ResetPB AND NOT FaultIn THEN FaultLatch := FALSE; END_IF;\nIF FaultLatch THEN StartCmd := FALSE; END_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`FaultIn` 消失后，`FaultLatch` 是否仍然挂着。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先按现有代码测。",
+    "id": "bottle_processing_test_only_existing_code",
+    "message": "只对现有 `FB_BottleProcessing` 做测试评估：一瓶进入后必须按清洗、灌装、旋盖、包装、完成的顺序走，未确认前不能跳到下一步。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "bottle_processing",
+    "route_hint": "瓶装线顺控 只测现有 ST。",
     "expected_route": "test_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "221_BottleProcessing",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/221_BottleProcessing/plc_st_files/221_BottleProcessing.st",
+    "validation_focus": "验证每个确认按钮只在对应步骤有效，完成取走后所有步骤和输出复位。"
   },
   {
-    "id": "io_mapping_hmi_test_only_st",
-    "message": "请只对下面已有 I/O 与 HMI 映射 ST 代码做测试评估：\n```st\nStartReq := DI_Start;\nStopReq := DI_Stop;\nResetReq := DI_Reset;\nAlarmView := AlarmLatch;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`DI_Reset` 按下后，内部复位变量是否没有变化。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先按现有代码测。",
+    "id": "material_mixing_test_only_existing_code",
+    "message": "只测现有 `MaterialMixing`：急停优先，手自动模式下阀门和搅拌电机的输出要按工艺阶段走，液位未到不能启动混合。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "material_mixing",
+    "route_hint": "物料混合 只测现有 ST。",
     "expected_route": "test_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "222_MaterialMixing",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/222_MaterialMixing/plc_st_files/222_MaterialMixing.st",
+    "validation_focus": "验证急停最高优先级、液位条件未满足时搅拌电机不启动、自动流程按阶段输出。"
   },
   {
-    "id": "manual_auto_mode_test_only_generic",
-    "message": "请只对下面已有手自动模式逻辑做测试评估：\n```text\nAutoMode 走自动逻辑\nManualMode 只允许点动\n模式切换时先清输出\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：手动刚切回自动时，输出是否还按上一种模式保持。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先按现有代码测。",
-    "expected_route": "test_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "motor_start_stop_test_only_st",
-    "message": "请只对下面已有电机启停 ST 代码做测试评估：\n```st\nMotorCmd := StartPB OR MotorCmd;\nIF NOT StopPB OR NOT EStopOK OR NOT OverloadOK THEN\n  MotorCmd := FALSE;\nEND_IF;\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：`StopPB` 松开后，`MotorCmd` 是否还会偶尔亮一下。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先按现有代码测。",
+    "id": "temperature_control_test_only_existing_code",
+    "message": "只对现有 `TempCtrl` 做测试：温度低于设定值才允许加热，传感器越界要关加热，过热保护定时结束前不能恢复输出。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "temperature_control",
+    "route_hint": "温控 只测现有 ST。",
     "expected_route": "test_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "227_TempCtrl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/227_TempCtrl/plc_st_files/227_TempCtrl.st",
+    "validation_focus": "验证传感器 0..100 范围、低温加热、高温停止、越界关断和过热保护锁定。"
   },
   {
-    "id": "pump_level_control_test_only_generic",
-    "message": "请只对下面已有液位泵控制逻辑做测试评估：\n```text\n低液位允许起泵\n高液位到就停泵\n故障没恢复前不准硬启动\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：高液位到位后，泵是否仍然继续运行。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先按现有代码测。",
+    "id": "flexible_production_test_only_existing_code",
+    "message": "只测现有 `FlexibleProduction`：五个传感器和各工位完成信号要按顺序推进，临时数组写入不能越界，未到位不能提前启动下一站。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "flexible_production",
+    "route_hint": "柔性产线 只测现有 ST。",
     "expected_route": "test_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "228_FlexibleProduction",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/228_FlexibleProduction/plc_st_files/228_FlexibleProduction.st",
+    "validation_focus": "验证站点顺序推进、工位完成信号门控、临时数组索引不越界。"
   },
   {
-    "id": "timer_delay_test_only_generic",
-    "message": "请只对下面已有延时启动逻辑做测试评估：\n```text\nStartCmd 先进入延时\n5 秒后才允许 MotorCmd\nFault 一来直接撤销输出\n```\n限制：不要修改或生成代码，不要修复，不要做形式化验证；如果测试失败，只报告失败用例和可能原因。重点复现：StartCmd 抖动后，Timer.Q 是否没有完全复位。",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先按现有代码测。",
+    "id": "recipe_manager_test_only_existing_code",
+    "message": "只对现有 `FB_RecipeManager` 做测试：新增、删除、修改、查询配方都要按 recipeID 定位，满表和重复 ID 要有明确状态。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "recipe_manager",
+    "route_hint": "配方管理 只测现有 ST。",
     "expected_route": "test_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "229_RecipeManager",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/229_RecipeManager/plc_st_files/229_RecipeManager.st",
+    "validation_focus": "验证 recipeID 唯一、满表拒绝新增、删除后槽位释放、查询不存在时返回错误。"
   },
   {
-    "id": "analog_scaling_alarm_formal_only_st",
-    "message": "代码现在是这样的：\n```st\nPressureBar := REAL(RawAI) * 10.0 / 4095.0;\nIF PressureBar > 8.0 THEN HighAlarm := TRUE; END_IF;\nIF PressureBar < 0.2 THEN SensorFail := TRUE; END_IF;\n```\n要验证的是：`PressureBar` 应该始终在 0..10 之间。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先按现有代码验。",
+    "id": "mechanical_arm_control_test_only_existing_code",
+    "message": "只测现有 `MechanicalArm`：手动、单步、单周期、连续模式的动作不能互相抢输出，急停和限位必须立即压住对应动作。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "mechanical_arm_control",
+    "route_hint": "机械臂控制 只测现有 ST。",
+    "expected_route": "test_only_existing_code",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "238_MechanicalArmControl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/238_MechanicalArmControl/plc_st_files/238_MechanicalArmControl.st",
+    "validation_focus": "验证急停优先、限位保护、模式互斥，以及抓取/释放动作不同时有效。"
+  },
+  {
+    "id": "production_line_control_test_only_existing_code",
+    "message": "只对现有 `FB_ProductionLineControl` 做测试：自动模式按 A/B/C 工位传感器和按钮推进，手动模式正反转互斥，切模式时不要保留旧输出。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "production_line_control",
+    "route_hint": "生产线控制 只测现有 ST。",
+    "expected_route": "test_only_existing_code",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "249_ProductionLineControl",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/249_ProductionLineControl/plc_st_files/249_ProductionLineControl.st",
+    "validation_focus": "验证正反转互斥、自动工位推进、完成灯复位和模式切换清输出。"
+  },
+  {
+    "id": "alarm_process_test_only_existing_code",
+    "message": "只测现有 `AlarmProcess`：高低报警要带迟滞，loLevel >= hiLevel 或迟滞窗口过大时必须置错误状态。 请只做测试评估，先不要改代码、不要修复，也不要做形式化验证；如果失败，只列失败用例和可能原因。",
+    "topic_family": "alarm_process",
+    "route_hint": "报警处理 只测现有 ST。",
+    "expected_route": "test_only_existing_code",
+    "source_theme": "st_codesys",
+    "difficulty": "basic",
+    "benchmark_id": "253_AlarmProcess",
+    "benchmark_st_path": "data/raw-data/benchmark_raw/253_AlarmProcess/plc_st_files/253_AlarmProcess.st",
+    "validation_focus": "验证高低限报警迟滞、非法上下限、迟滞窗口过大和 status 码。"
+  },
+  {
+    "id": "example_y_equals_x_formal_only_existing_code",
+    "message": "请只对现有 `Example` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (y = x) : assert_y_equals_x`，请按 assertion property 验证 `y` 始终等于 `x`。",
+    "topic_family": "formal_bool_identity",
+    "route_hint": "布尔直通 只验证现有 ST 断言。",
     "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_Example",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/example_y_equals_x.st",
+    "validation_focus": "验证内嵌断言 assert_y_equals_x：输出 y 始终等于输入 x。",
+    "formal_properties": [
+      {
+        "property_description": "Output y must always equal input x.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "comm_diagnostics_formal_only_st",
-    "message": "要验证的是：三秒超时后 `CommFaultLatch` 必须为 TRUE。\n```st\nTON1(IN := NOT HeartbeatRx, PT := T#3s);\nIF TON1.Q THEN CommFaultLatch := TRUE; END_IF;\nIF ResetPB AND CommOK THEN CommFaultLatch := FALSE; END_IF;\n```",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先按现有代码验。",
+    "id": "imp_alarm_follows_sensor_formal_only_existing_code",
+    "message": "请只对现有 `FB_Imp` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (alarm = sensor) : assert_alarm_follows_sensor`，请按 assertion property 验证报警输出跟随传感器输入。",
+    "topic_family": "formal_alarm_implication",
+    "route_hint": "报警直通 只验证现有 ST 断言。",
     "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_Imp",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_imp_alarm_follows_sensor.st",
+    "validation_focus": "验证内嵌断言 assert_alarm_follows_sensor：alarm 始终等于 sensor。",
+    "formal_properties": [
+      {
+        "property_description": "Alarm output must always equal sensor input.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "conveyor_sequence_formal_only_generic",
-    "message": "代码现在是这样的：\n```text\n1 号先启动\n2 号要等 1 号到位或延时结束\n停机时先停 2 号，再延时停 1 号\n```\n要验证的是：后段不能在前段没准备好时先起。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "counter_batch_formal_only_generic",
-    "message": "代码现在是这样的：\n```text\nPhotoEye 每来一个箱子加 1\n计到 12 个拉高 Done\nPushDone 后计数清零\n```\n要验证的是：每个箱子最多只该算一次。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "fault_latch_reset_formal_only_generic",
-    "message": "代码现在是这样的：\n```text\nFaultIn 动作就拉起报警锁存\nReset 只有在 FaultIn 恢复后才有效\n锁存期间 StartCmd 不给通过\n```\n要验证的是：故障没恢复前，锁存不能自己掉。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "io_mapping_hmi_formal_only_generic",
-    "message": "代码现在是这样的：\n```text\n把 DI_Start、DI_Stop、DI_Reset 对到内部命令\nMotorCmd 和 AlarmLatch 单独给 HMI 读取\n点名和方向先别混\n```\n要验证的是：每个 HMI 操作都应该能落到唯一的内部变量。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "manual_auto_mode_formal_only_st",
-    "message": "代码现在是这样的：\n```st\nIF AutoMode THEN AutoCmd := TRUE; END_IF;\nIF ManualMode THEN JogCmd := TRUE; END_IF;\nIF ModeSwitched THEN AutoCmd := FALSE; JogCmd := FALSE; END_IF;\n```\n要验证的是：同一时刻不能让 `AutoCmd` 和 `JogCmd` 同时抢输出。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先按现有代码验。",
+    "id": "not_output_formal_only_existing_code",
+    "message": "请只对现有 `FB_NotOutput` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (y = NOT x) : assert_y_is_not_x`，请按 assertion property 验证 `y` 始终为 `x` 的取反。",
+    "topic_family": "formal_bool_not",
+    "route_hint": "布尔取反 只验证现有 ST 断言。",
     "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_NotOutput",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_not_output.st",
+    "validation_focus": "验证内嵌断言 assert_y_is_not_x：输出 y 始终等于 NOT x。",
+    "formal_properties": [
+      {
+        "property_description": "Output y must always equal NOT x.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "motor_start_stop_formal_only_generic",
-    "message": "代码现在是这样的：\n```text\nStartPB 允许起动\nMotorCmd 负责自保持\nStopPB、EStopOK、OverloadOK 任一动作就掉输出\n```\n要验证的是：停机条件一到，MotorCmd 不能继续为真。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "pump_level_control_formal_only_st",
-    "message": "代码现在是这样的：\n```st\nIF LowLevel THEN PumpCmd := TRUE; END_IF;\nIF HighLevel THEN PumpCmd := FALSE; END_IF;\nIF Fault THEN PumpCmd := FALSE; END_IF;\n```\n要验证的是：高液位出现时，`PumpCmd` 不能维持为真。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先按现有代码验。",
-    "expected_route": "formal_only_existing_code",
-    "source_theme": "st_codesys",
-    "difficulty": "basic"
-  },
-  {
-    "id": "timer_delay_formal_only_st",
-    "message": "要验证的是：`MotorCmd` 在 `TON1.Q` 置位前不能变成 TRUE。\n```st\nTON1(IN := StartCmd AND NOT Fault, PT := T#5s);\nIF TON1.Q THEN MotorCmd := TRUE; END_IF;\nIF NOT StartCmd OR Fault THEN MotorCmd := FALSE; END_IF;\n```",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先按现有代码验。",
+    "id": "and2_output_formal_only_existing_code",
+    "message": "请只对现有 `FB_And2` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (y = (a AND b)) : assert_y_is_a_and_b`，请按 assertion property 验证 `y` 始终等于 `a AND b`。",
+    "topic_family": "formal_bool_and",
+    "route_hint": "布尔与 只验证现有 ST 断言。",
     "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_And2",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_and2_output.st",
+    "validation_focus": "验证内嵌断言 assert_y_is_a_and_b：输出 y 始终等于 a AND b。",
+    "formal_properties": [
+      {
+        "property_description": "Output y must always equal a AND b.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "analog_scaling_alarm_repair_test_generic",
-    "message": "代码现在是这样的：\n```text\nRawAI 0-4095 映射到 0-10.0 bar\n8.0 bar 以上置高压\n0.2 bar 以下置异常\n```\n上次测试里，RawAI 已经到满量程了，PressureBar 却跑到了 10.3 bar。修完后再看满量程。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "comm_diagnostics_repair_test_generic",
-    "message": "上次回归里暴露出的问题是：心跳已经回来，但故障还是一直挂着。\n```text\n3 秒没收到心跳就置通信故障\n通讯恢复后还要 Reset 才能清\n故障挂着时压住自动启动许可\n```\n修完再测。",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "conveyor_sequence_repair_test_st",
-    "message": "代码现在是这样的：\n```st\nIF InfeedReady THEN Conv1Cmd := TRUE; END_IF;\nIF Conv1Ready THEN Conv2Cmd := TRUE; END_IF;\nIF Fault THEN Conv2Cmd := FALSE; Conv1Cmd := FALSE; END_IF;\n```\n上次测试里，`Conv2Cmd` 先亮了，`Conv1Cmd` 还没真正稳定。修顺后再过一次起停。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
+    "id": "or2_output_formal_only_existing_code",
+    "message": "请只对现有 `FB_Or2` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (y = (a OR b)) : assert_y_is_a_or_b`，请按 assertion property 验证 `y` 始终等于 `a OR b`。",
+    "topic_family": "formal_bool_or",
+    "route_hint": "布尔或 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_Or2",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_or2_output.st",
+    "validation_focus": "验证内嵌断言 assert_y_is_a_or_b：输出 y 始终等于 a OR b。",
+    "formal_properties": [
+      {
+        "property_description": "Output y must always equal a OR b.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "counter_batch_repair_test_st",
-    "message": "这段 ST 过不了测试：`PhotoEye` 抖了一下，`BatchCnt` 被加了两次。\n```st\nR_TRIG1(CLK := PhotoEye);\nIF R_TRIG1.Q THEN BatchCnt := BatchCnt + 1; END_IF;\nIF BatchCnt >= 12 THEN BatchDone := TRUE; END_IF;\n```\n改完后再跑一遍回归。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
+    "id": "stop_dominates_formal_only_existing_code",
+    "message": "请只对现有 `FB_StopDominates` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (motor = (start AND NOT stop)) : assert_motor_respects_stop`，请按 assertion property 验证 motor 始终等于 `start AND NOT stop`。",
+    "topic_family": "formal_stop_interlock",
+    "route_hint": "停止优先 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_StopDominates",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_stop_dominates.st",
+    "validation_focus": "验证内嵌断言 assert_motor_respects_stop：motor 始终等于 start AND NOT stop。",
+    "formal_properties": [
+      {
+        "property_description": "Motor output must always equal start AND NOT stop.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "fault_latch_reset_repair_test_st",
-    "message": "代码现在是这样的：\n```st\nIF FaultIn THEN FaultLatch := TRUE; MotorCmd := FALSE; END_IF;\nIF ResetPB AND NOT FaultIn THEN FaultLatch := FALSE; END_IF;\nIF FaultLatch THEN StartCmd := FALSE; END_IF;\n```\n上次测试里，`FaultIn` 已经没了，`FaultLatch` 却还挂着。修完后再看锁存和复位。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
+    "id": "fault_dominates_formal_only_existing_code",
+    "message": "请只对现有 `FB_FaultDominates` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (run = (enable AND NOT fault)) : assert_run_respects_fault`，请按 assertion property 验证 run 始终等于 `enable AND NOT fault`。",
+    "topic_family": "formal_fault_interlock",
+    "route_hint": "故障优先 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_FaultDominates",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_fault_dominates.st",
+    "validation_focus": "验证内嵌断言 assert_run_respects_fault：run 始终等于 enable AND NOT fault。",
+    "formal_properties": [
+      {
+        "property_description": "Run output must always equal enable AND NOT fault.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "io_mapping_hmi_repair_test_st",
-    "message": "这段 ST 过不了测试：`DI_Reset` 按下去了，内部复位变量却没有变化。\n```st\nStartReq := DI_Start;\nStopReq := DI_Stop;\nResetReq := DI_Reset;\nAlarmView := AlarmLatch;\n```\n改完后把回归再过一遍。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
+    "id": "limit_protect_formal_only_existing_code",
+    "message": "请只对现有 `FB_LimitProtect` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (move = (command AND NOT limit)) : assert_move_respects_limit`，请按 assertion property 验证 move 始终等于 `command AND NOT limit`。",
+    "topic_family": "formal_limit_interlock",
+    "route_hint": "限位保护 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_LimitProtect",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_limit_protect.st",
+    "validation_focus": "验证内嵌断言 assert_move_respects_limit：move 始终等于 command AND NOT limit。",
+    "formal_properties": [
+      {
+        "property_description": "Move output must always equal command AND NOT limit.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "manual_auto_mode_repair_test_generic",
-    "message": "代码现在是这样的：\n```text\nAutoMode 走自动逻辑\nManualMode 只允许点动\n模式切换时先清输出\n```\n上次测试里，手动刚切回自动，输出还按上一种模式顶着。修完后再切一次模式。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "motor_start_stop_repair_test_st",
-    "message": "这段 ST 过不了测试：`StopPB` 松开后，`MotorCmd` 还是偶尔亮一下。\n```st\nMotorCmd := StartPB OR MotorCmd;\nIF NOT StopPB OR NOT EStopOK OR NOT OverloadOK THEN\n  MotorCmd := FALSE;\nEND_IF;\n```\n改完后再接着回归。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
+    "id": "mode_mux_formal_only_existing_code",
+    "message": "请只对现有 `FB_ModeMux` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT ... : assert_mode_selects_command`，请按 assertion property 验证自动模式选 `autoCmd`，非自动模式选 `manualCmd`。",
+    "topic_family": "formal_mode_mux",
+    "route_hint": "模式选择 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_ModeMux",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_mode_mux.st",
+    "validation_focus": "验证内嵌断言 assert_mode_selects_command：模式选择输出来自对应命令。",
+    "formal_properties": [
+      {
+        "property_description": "Mode selector must route the corresponding command to outputCmd.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   },
   {
-    "id": "pump_level_control_repair_test_generic",
-    "message": "代码现在是这样的：\n```text\n低液位允许起泵\n高液位到就停泵\n故障没恢复前不准硬启动\n```\n上次测试里，高液位已经到位，泵却还在继续跑。修完后再看高液位。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "timer_delay_repair_test_generic",
-    "message": "上次回归里暴露出的问题是：StartCmd 抖了一下以后，Timer.Q 没有完全复位。\n```text\nStartCmd 先进入延时\n5 秒后才允许 MotorCmd\nFault 一来直接撤销输出\n```\n修完再测。",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先修测试暴露的问题。",
-    "expected_route": "repair_after_test_then_test",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "analog_scaling_alarm_repair_formal_st",
-    "message": "代码现在是这样的：\n```st\nPressureBar := REAL(RawAI) * 10.0 / 4095.0;\nIF PressureBar > 8.0 THEN HighAlarm := TRUE; END_IF;\nIF PressureBar < 0.2 THEN SensorFail := TRUE; END_IF;\n```\n反例是：原始值越界时，显示值还在正常范围里。修好后再跑测试和形式验证。",
-    "topic_family": "analog_scaling_alarm",
-    "route_hint": "模拟量缩放 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
+    "id": "mutex_outputs_formal_only_existing_code",
+    "message": "请只对现有 `FB_MutexOutputs` ST 做形式化验证，不要生成新代码，也不要修复。代码里已经有 `//#ASSERT (NOT (forward AND reverse)) : assert_forward_reverse_mutex`，请按 assertion property 验证 forward 和 reverse 不能同时为 TRUE。",
+    "topic_family": "formal_output_mutex",
+    "route_hint": "输出互斥 只验证现有 ST 断言。",
+    "expected_route": "formal_only_existing_code",
     "source_theme": "st_codesys",
-    "difficulty": "basic"
-  },
-  {
-    "id": "comm_diagnostics_repair_formal_st",
-    "message": "这段 ST 的反例是：心跳已恢复，`AutoStartPermit` 却先变成 TRUE。\n```st\nTON1(IN := NOT HeartbeatRx, PT := T#3s);\nIF TON1.Q THEN CommFaultLatch := TRUE; END_IF;\nIF ResetPB AND CommOK THEN CommFaultLatch := FALSE; END_IF;\n```\n修完后，再把测试和性质检查都过一遍。",
-    "topic_family": "comm_diagnostics",
-    "route_hint": "通讯诊断 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "st_codesys",
-    "difficulty": "basic"
-  },
-  {
-    "id": "conveyor_sequence_repair_formal_generic",
-    "message": "代码现在是这样的：\n```text\n1 号先启动\n2 号要等 1 号到位或延时结束\n停机时先停 2 号，再延时停 1 号\n```\n反例是：前段还没稳定，后段就提前跑了。修好后再跑测试和形式验证。",
-    "topic_family": "conveyor_sequence",
-    "route_hint": "输送线顺控 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "counter_batch_repair_formal_generic",
-    "message": "反例已经出来了：光电一抖，Count 直接从 3 跳到 5。\n```text\nPhotoEye 每来一个箱子加 1\n计到 12 个拉高 Done\nPushDone 后计数清零\n```\n改完后再把测试和形式检查补回来。",
-    "topic_family": "counter_batch",
-    "route_hint": "批量计数 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "fault_latch_reset_repair_formal_generic",
-    "message": "代码现在是这样的：\n```text\nFaultIn 动作就拉起报警锁存\nReset 只有在 FaultIn 恢复后才有效\n锁存期间 StartCmd 不给通过\n```\n反例是：FaultIn 还在，Reset 却把报警清了。修好后再跑测试和形式验证。",
-    "topic_family": "fault_latch_reset",
-    "route_hint": "故障锁存 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "io_mapping_hmi_repair_formal_generic",
-    "message": "反例已经出来了：同一个按钮同时被当成了输入和显示变量。\n```text\n把 DI_Start、DI_Stop、DI_Reset 对到内部命令\nMotorCmd 和 AlarmLatch 单独给 HMI 读取\n点名和方向先别混\n```\n改完后再把测试和形式检查补回来。",
-    "topic_family": "io_mapping_hmi",
-    "route_hint": "I/O 映射 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "manual_auto_mode_repair_formal_st",
-    "message": "代码现在是这样的：\n```st\nIF AutoMode THEN AutoCmd := TRUE; END_IF;\nIF ManualMode THEN JogCmd := TRUE; END_IF;\nIF ModeSwitched THEN AutoCmd := FALSE; JogCmd := FALSE; END_IF;\n```\n反例是：自动已经回来，点动却还没真正退出。修好后再跑测试和形式验证。",
-    "topic_family": "manual_auto_mode",
-    "route_hint": "手自动切换 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "st_codesys",
-    "difficulty": "basic"
-  },
-  {
-    "id": "motor_start_stop_repair_formal_generic",
-    "message": "反例已经出来了：StopPB 已经断开，MotorCmd 却晚了一拍才掉。\n```text\nStartPB 允许起动\nMotorCmd 负责自保持\nStopPB、EStopOK、OverloadOK 任一动作就掉输出\n```\n改完后再把测试和形式检查补回来。",
-    "topic_family": "motor_start_stop",
-    "route_hint": "电机启停 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "generic_plc",
-    "difficulty": "basic"
-  },
-  {
-    "id": "pump_level_control_repair_formal_st",
-    "message": "代码现在是这样的：\n```st\nIF LowLevel THEN PumpCmd := TRUE; END_IF;\nIF HighLevel THEN PumpCmd := FALSE; END_IF;\nIF Fault THEN PumpCmd := FALSE; END_IF;\n```\n反例是：高液位已经动作，泵还在继续跑。修好后再跑测试和形式验证。",
-    "topic_family": "pump_level_control",
-    "route_hint": "液位泵 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "st_codesys",
-    "difficulty": "basic"
-  },
-  {
-    "id": "timer_delay_repair_formal_st",
-    "message": "这段 ST 的反例是：`ET` 还没到 `PT`，`MotorCmd` 就提前置位了。\n```st\nTON1(IN := StartCmd AND NOT Fault, PT := T#5s);\nIF TON1.Q THEN MotorCmd := TRUE; END_IF;\nIF NOT StartCmd OR Fault THEN MotorCmd := FALSE; END_IF;\n```\n修完后，再把测试和性质检查都过一遍。",
-    "topic_family": "timer_delay",
-    "route_hint": "延时启动 先修反例，再回到测试和验证。",
-    "expected_route": "repair_after_formal_then_test_then_formal",
-    "source_theme": "st_codesys",
-    "difficulty": "basic"
+    "difficulty": "basic",
+    "benchmark_id": "formal_fixture_FB_MutexOutputs",
+    "benchmark_st_path": "backend/app/tests/eval/formal_st_files/fb_mutex_outputs.st",
+    "validation_focus": "验证内嵌断言 assert_forward_reverse_mutex：forward 与 reverse 永不同时为 TRUE。",
+    "formal_properties": [
+      {
+        "property_description": "Forward and reverse outputs must never be true at the same time.",
+        "property": {
+          "job_req": "assertion"
+        }
+      }
+    ]
   }
 ]

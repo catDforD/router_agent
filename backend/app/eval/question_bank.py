@@ -1,16 +1,29 @@
-"""Load and group the 100-case PLC question bank."""
+"""Load and group the PLC workflow question bank."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 DEFAULT_QUESTION_BANK_FILE = Path(__file__).resolve().parents[1] / "tests" / "eval" / "plc_realistic_question_bank_100.json"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPECTED_ROUTE_COUNTS = {
+    "clarify_before_dispatch": 20,
+    "qa_direct_answer": 20,
+    "dev_then_test": 10,
+    "dev_then_test_then_formal": 10,
+    "test_only_existing_code": 10,
+    "formal_only_existing_code": 10,
+}
+EXECUTION_ROUTES = {
+    "dev_then_test",
+    "dev_then_test_then_formal",
+    "test_only_existing_code",
+    "formal_only_existing_code",
+}
 
 
 class QuestionBankValidationError(ValueError):
@@ -29,6 +42,10 @@ class QuestionBankCase(QuestionBankBaseModel):
     expected_route: str
     source_theme: str
     difficulty: str
+    benchmark_id: str | None = None
+    benchmark_st_path: str | None = None
+    validation_focus: str | None = None
+    formal_properties: list[dict[str, object]] | None = None
 
     @field_validator("id")
     @classmethod
@@ -38,7 +55,9 @@ class QuestionBankCase(QuestionBankBaseModel):
         return value
 
 
-def load_question_bank_cases(path: Path = DEFAULT_QUESTION_BANK_FILE) -> list[QuestionBankCase]:
+def load_question_bank_cases(
+    path: Path = DEFAULT_QUESTION_BANK_FILE,
+) -> list[QuestionBankCase]:
     return parse_question_bank_cases_text(
         path.read_text(encoding="utf-8"),
         source=str(path),
@@ -97,35 +116,76 @@ def _validate_unique_ids(cases: list[QuestionBankCase], *, source: str) -> None:
 
 
 def _validate_coverage(cases: list[QuestionBankCase], *, source: str) -> None:
-    if len(cases) != 100:
+    if len(cases) != 80:
         raise QuestionBankValidationError(
-            f"{source}: question bank must contain exactly 100 cases"
+            f"{source}: question bank must contain exactly 80 cases"
         )
     route_counts = {
         route: len(items)
         for route, items in group_question_bank_cases(cases).items()
     }
-    expected_routes = {
-        "clarify_before_dispatch",
-        "qa_direct_answer",
-        "dev_then_test",
-        "dev_then_test_then_formal",
-        "test_only_existing_code",
-        "formal_only_existing_code",
-        "repair_after_test_then_test",
-        "repair_after_formal_then_test_then_formal",
-    }
+    expected_routes = set(EXPECTED_ROUTE_COUNTS)
+    unknown_routes = sorted(set(route_counts) - expected_routes)
+    if unknown_routes:
+        raise QuestionBankValidationError(
+            f"{source}: unknown expected routes: {unknown_routes}"
+        )
     missing_routes = sorted(expected_routes - set(route_counts))
     if missing_routes:
         raise QuestionBankValidationError(
             f"{source}: missing expected routes: {missing_routes}"
         )
-    bad_counts = {}
-    for route, count in route_counts.items():
-        expected_count = 20 if route in {"clarify_before_dispatch", "qa_direct_answer"} else 10
+    bad_counts: dict[str, int] = {}
+    for route, expected_count in EXPECTED_ROUTE_COUNTS.items():
+        count = route_counts.get(route, 0)
         if count != expected_count:
             bad_counts[route] = count
     if bad_counts:
         raise QuestionBankValidationError(
             f"{source}: unexpected route bucket sizes: {bad_counts}"
         )
+    _validate_benchmark_metadata(cases, source=source)
+
+
+def _validate_benchmark_metadata(
+    cases: list[QuestionBankCase],
+    *,
+    source: str,
+) -> None:
+    missing_metadata: list[str] = []
+    bad_paths: list[str] = []
+    for case in cases:
+        if case.expected_route not in EXECUTION_ROUTES:
+            continue
+        if not case.benchmark_id or not case.benchmark_st_path:
+            missing_metadata.append(case.id)
+            continue
+        path = Path(case.benchmark_st_path)
+        if path.is_absolute() or ".." in path.parts:
+            bad_paths.append(f"{case.id}: {case.benchmark_st_path}")
+            continue
+        if not (
+            _is_allowed_st_path(case.benchmark_st_path)
+            and (REPO_ROOT / path).is_file()
+        ):
+            bad_paths.append(f"{case.id}: {case.benchmark_st_path}")
+
+    if missing_metadata:
+        raise QuestionBankValidationError(
+            f"{source}: execution route cases missing benchmark metadata: {missing_metadata}"
+        )
+    if bad_paths:
+        raise QuestionBankValidationError(
+            f"{source}: invalid benchmark ST paths: {bad_paths}"
+        )
+
+
+def _is_allowed_st_path(value: str) -> bool:
+    if not value.endswith(".st"):
+        return False
+    if (
+        value.startswith("data/raw-data/benchmark_raw/")
+        and "/plc_st_files/" in value
+    ):
+        return True
+    return value.startswith("backend/app/tests/eval/formal_st_files/")
