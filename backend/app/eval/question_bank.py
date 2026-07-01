@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
-DEFAULT_QUESTION_BANK_FILE = Path(__file__).resolve().parents[1] / "tests" / "eval" / "plc_realistic_question_bank_100.json"
+DEFAULT_QUESTION_BANK_FILE = Path(__file__).resolve().parents[1] / "tests" / "eval" / "plc_realistic_question_bank.json"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPECTED_ROUTE_COUNTS = {
     "clarify_before_dispatch": 20,

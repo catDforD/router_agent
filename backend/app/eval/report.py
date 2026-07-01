@@ -260,7 +260,7 @@ def build_inspect_eval_log_payload(
             "run_id": run_dir.name,
             "created": generated_at,
             "task": "router_plc_question_bank",
-            "task_id": "plc_realistic_question_bank_100",
+            "task_id": "plc_realistic_question_bank",
             "task_version": 2,
             "task_file": str(source_file),
             "task_display_name": "Router PLC Workflow Question Bank",

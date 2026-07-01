@@ -1,6 +1,6 @@
 # PLC 基础真实问题题库 v9
 
-本版保留澄清和 QA 样例，保留四类执行 workflow 样例，并删除修复类路由。文件名暂沿用 `plc_realistic_question_bank_100.json`。
+本版保留澄清和 QA 样例，保留四类执行 workflow 样例，并删除修复类路由。机器可读题库文件为 `backend/app/tests/eval/plc_realistic_question_bank.json`。
 
 ## 汇总
 
