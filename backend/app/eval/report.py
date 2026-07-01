@@ -20,8 +20,6 @@ ROUTE_ORDER = [
     "dev_then_test_then_formal",
     "test_only_existing_code",
     "formal_only_existing_code",
-    "repair_after_test_then_test",
-    "repair_after_formal_then_test_then_formal",
 ]
 SOURCE_THEME_ORDER = ["generic_plc", "st_codesys"]
 

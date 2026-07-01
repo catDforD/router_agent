@@ -28,7 +28,9 @@ frontend/dist/
 frontend/node_modules/
 
 # Local runtime data
-data/
+data/*
+!data/raw-data/
+!data/raw-data/**
 eval_report.md
 output/
 docs (2).zip

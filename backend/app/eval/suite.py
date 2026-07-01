@@ -10,7 +10,6 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.ids import prefixed_id
 from app.agents.main_agent import (
     build_main_agent_event,
     episode_output_from_task,
@@ -26,12 +25,9 @@ from app.core.database import get_engine_for_url, get_session_factory_for_url
 from app.core.time import utc_now
 from app.mcp.mock_worker import (
     SCENARIO_DEV_TEST_PASS,
-    SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS,
-    SCENARIO_TEST_FAILED_THEN_REPAIR_PASS,
 )
 from app.models.db_models import Base, WorkerJobRow
 from app.models.router_schema import EventType, TaskState, TaskStatus
-from app.models.router_schema import Failure, FailureSource, FailureStatus, Severity
 from app.repositories.artifact_repo import ArtifactRepository
 from app.repositories.gate_repo import GateResultRepository
 from app.repositories.task_repo import TaskRepository
@@ -40,6 +36,8 @@ from app.services.runtime_service import RuntimeRunResult, RuntimeService
 from app.services.task_service import TaskService
 from app.eval.question_bank import (
     DEFAULT_QUESTION_BANK_FILE,
+    EXPECTED_ROUTE_COUNTS,
+    REPO_ROOT,
     QuestionBankCase,
     load_question_bank_cases,
 )
@@ -1060,16 +1058,7 @@ def select_stratified_cases(
     if sample_size <= 0 or sample_size >= len(cases):
         return list(cases)
 
-    route_order = [
-        "clarify_before_dispatch",
-        "qa_direct_answer",
-        "dev_then_test",
-        "dev_then_test_then_formal",
-        "test_only_existing_code",
-        "formal_only_existing_code",
-        "repair_after_test_then_test",
-        "repair_after_formal_then_test_then_formal",
-    ]
+    route_order = list(EXPECTED_ROUTE_COUNTS)
     by_route: dict[str, list[QuestionBankCase]] = {route: [] for route in route_order}
     for case in cases:
         by_route.setdefault(case.expected_route, []).append(case)
@@ -1106,10 +1095,6 @@ def _sequence_for_route(route: str) -> list[str]:
         return ["test", "finalizing", "gate"]
     if route == "formal_only_existing_code":
         return ["formal", "finalizing", "gate"]
-    if route == "repair_after_test_then_test":
-        return ["test", "repair", "test", "finalizing", "gate"]
-    if route == "repair_after_formal_then_test_then_formal":
-        return ["test", "formal", "repair", "test", "formal", "finalizing", "gate"]
     raise ValueError(f"unsupported route: {route}")
 
 
@@ -1126,20 +1111,12 @@ def _expected_worker_sequence_for_route(route: str) -> list[str] | None:
         return ["plc-test"]
     if route == "formal_only_existing_code":
         return ["plc-formal"]
-    if route == "repair_after_test_then_test":
-        return ["plc-test", "plc-repair", "plc-test"]
-    if route == "repair_after_formal_then_test_then_formal":
-        return ["plc-test", "plc-formal", "plc-repair", "plc-test", "plc-formal"]
     return None
 
 
 def _expected_final_status_for_route(route: str) -> str:
     if route == "clarify_before_dispatch":
         return "waiting_user"
-    if route == "repair_after_test_then_test":
-        return "succeeded"
-    if route == "repair_after_formal_then_test_then_formal":
-        return "succeeded"
     return "succeeded"
 
 
@@ -1165,20 +1142,6 @@ def _plan_kwargs_for_route(route: str) -> dict[str, Any]:
             "requires_test": False,
             "requires_formal": True,
         }
-    if route == "repair_after_test_then_test":
-        return {
-            "normalized_goal": "Repair after a failing test and rerun regression.",
-            "task_type": "repair_existing_code",
-            "requires_test": True,
-            "requires_formal": False,
-        }
-    if route == "repair_after_formal_then_test_then_formal":
-        return {
-            "normalized_goal": "Repair after a failing formal check and rerun both validation stages.",
-            "task_type": "repair_existing_code",
-            "requires_test": True,
-            "requires_formal": True,
-        }
     if route == "dev_then_test_then_formal":
         return {
             "normalized_goal": "Create PLC code, test it, and verify it formally.",
@@ -1195,10 +1158,6 @@ def _plan_kwargs_for_route(route: str) -> dict[str, Any]:
 
 
 def _mock_scenario_for_route(route: str) -> str:
-    if route == "repair_after_test_then_test":
-        return SCENARIO_TEST_FAILED_THEN_REPAIR_PASS
-    if route == "repair_after_formal_then_test_then_formal":
-        return SCENARIO_FORMAL_FAILED_THEN_REPAIR_PASS
     return SCENARIO_DEV_TEST_PASS
 
 
@@ -1211,8 +1170,6 @@ def _seed_context_files_for_case(
     if case.expected_route not in {
         "test_only_existing_code",
         "formal_only_existing_code",
-        "repair_after_test_then_test",
-        "repair_after_formal_then_test_then_formal",
     }:
         return
 
@@ -1243,6 +1200,10 @@ def _seed_context_files_for_case(
                     "source_theme": case.source_theme,
                     "topic_family": case.topic_family,
                     "message": case.message,
+                    "benchmark_id": case.benchmark_id,
+                    "benchmark_st_path": case.benchmark_st_path,
+                    "validation_focus": case.validation_focus,
+                    "formal_properties": case.formal_properties,
                     "requirements": _seed_requirements(case),
                 },
                 ensure_ascii=False,
@@ -1256,62 +1217,6 @@ def _seed_context_files_for_case(
             content=_seed_code_content(case),
         )
 
-        if case.expected_route == "repair_after_test_then_test":
-            _seed_open_repair_failure(
-                tools.context,
-                task_id,
-                source=FailureSource.TEST.value,
-                evidence_paths=[
-                    _write_seed_file(
-                        tools,
-                        task_id,
-                        path=f"{seed_dir}/test_report_failed_v1.json",
-                        content=json.dumps(
-                            _seed_failed_test_report(case),
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                    ),
-                    _write_seed_file(
-                        tools,
-                        task_id,
-                        path=f"{seed_dir}/failing_trace_v1.json",
-                        content=json.dumps(
-                            _seed_failing_trace(case),
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                    ),
-                ],
-            )
-        elif case.expected_route == "repair_after_formal_then_test_then_formal":
-            _seed_open_repair_failure(
-                tools.context,
-                task_id,
-                source=FailureSource.FORMAL.value,
-                evidence_paths=[
-                    _write_seed_file(
-                        tools,
-                        task_id,
-                        path=f"{seed_dir}/formal_report_failed_v1.json",
-                        content=json.dumps(
-                            _seed_failed_formal_report(case),
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                    ),
-                    _write_seed_file(
-                        tools,
-                        task_id,
-                        path=f"{seed_dir}/counterexample_v1.json",
-                        content=json.dumps(
-                            _seed_counterexample(case),
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                    ),
-                ],
-            )
         session.commit()
 
 
@@ -1338,98 +1243,27 @@ def _write_seed_file(
     return str(result.details.get("path") or path)
 
 
-def _seed_open_repair_failure(
-    context: AgentToolContext,
-    task_id: str,
-    *,
-    source: str,
-    evidence_paths: list[str],
-) -> None:
-    repository = TaskRepository(context.session)
-    task = repository.get_task(task_id)
-    is_formal = source == FailureSource.FORMAL.value
-    now = utc_now()
-    failure = Failure(
-        failure_id=prefixed_id("failure"),
-        source=source,
-        severity=Severity.BLOCKING,
-        title=(
-            "Seeded formal counterexample"
-            if is_formal
-            else "Seeded test regression failure"
-        ),
-        description=(
-            "Question bank repair route starts with existing formal failure evidence."
-            if is_formal
-            else "Question bank repair route starts with existing failing test evidence."
-        ),
-        expected=(
-            "EmergencyStop implies MotorRun is false."
-            if is_formal
-            else "MotorRun is false when EmergencyStop is true."
-        ),
-        actual=(
-            "Counterexample keeps MotorRun true."
-            if is_formal
-            else "Failing trace keeps MotorRun true."
-        ),
-        evidence_paths=evidence_paths,
-        status=FailureStatus.OPEN,
-        created_by_worker_job_id="eval-seed",
-        created_at=now,
-    )
-    gate_updates: dict[str, Any] = {
-        "has_blocking_failure": True,
-        "can_finish_as_success": False,
-    }
-    if is_formal:
-        gate_updates.update(
-            {
-                "formal_required": True,
-                "latest_formal_passed": False,
-                "formal_regression_required": True,
-            }
-        )
-    else:
-        gate_updates.update(
-            {
-                "test_required": True,
-                "latest_test_passed": False,
-                "regression_required": True,
-            }
-        )
-    repository.update_task_state(
-        task.model_copy(
-            deep=True,
-            update={
-                "gates": task.gates.model_copy(update=gate_updates),
-                "failures": [*task.failures, failure],
-                "updated_at": now,
-            },
-        )
-    )
-    if context.checkpoint is not None:
-        context.checkpoint()
-
-
 def _seed_requirements(case: QuestionBankCase) -> list[dict[str, str]]:
+    focus = case.validation_focus or f"覆盖 {case.topic_family} 的基础现场逻辑。"
     return [
         {
             "id": "REQ-001",
-            "text": "启动命令有效且无急停、故障时允许电机运行。",
+            "text": case.message,
         },
         {
             "id": "REQ-002",
-            "text": "停止、急停或故障任一条件有效时必须立即断开电机输出。",
+            "text": f"验证重点：{focus}",
         },
         {
             "id": "REQ-003",
-            "text": f"测试主题覆盖 {case.topic_family} 的基础现场逻辑。",
+            "text": f"基准样例：{case.benchmark_id or case.topic_family}",
         },
     ]
 
 
 def _seed_code_content(case: QuestionBankCase) -> str:
+    if case.benchmark_st_path:
+        return _benchmark_st_file(case).read_text(encoding="utf-8")
     return (
         "FUNCTION_BLOCK FB_MotorControl\n"
         "VAR_INPUT\n"
@@ -1451,56 +1285,13 @@ def _seed_code_content(case: QuestionBankCase) -> str:
     )
 
 
-def _seed_failed_test_report(case: QuestionBankCase) -> dict[str, Any]:
-    return {
-        "schema_version": "router.eval_seed.v1",
-        "status": "failed",
-        "topic_family": case.topic_family,
-        "total": 4,
-        "passed": 3,
-        "failed": 1,
-        "failed_case": "emergency_stop_forces_motor_off",
-        "summary": "EmergencyStop 有效后 MotorRun 没有被强制断开。",
-    }
-
-
-def _seed_failing_trace(case: QuestionBankCase) -> dict[str, Any]:
-    return {
-        "schema_version": "router.eval_seed.v1",
-        "topic_family": case.topic_family,
-        "case": "emergency_stop_forces_motor_off",
-        "steps": [
-            {"StartCmd": True, "EmergencyStop": False, "MotorRun": True},
-            {"StartCmd": True, "EmergencyStop": True, "MotorRun": True},
-        ],
-        "expected": "EmergencyStop 为 TRUE 时 MotorRun 应为 FALSE。",
-        "actual": "MotorRun 保持 TRUE。",
-    }
-
-
-def _seed_failed_formal_report(case: QuestionBankCase) -> dict[str, Any]:
-    return {
-        "schema_version": "router.eval_seed.v1",
-        "status": "failed",
-        "topic_family": case.topic_family,
-        "total_properties": 3,
-        "passed_properties": 2,
-        "failed_properties": 1,
-        "failed_property": "EmergencyStop -> NOT MotorRun",
-        "summary": "急停安全性质存在反例。",
-    }
-
-
-def _seed_counterexample(case: QuestionBankCase) -> dict[str, Any]:
-    return {
-        "schema_version": "router.eval_seed.v1",
-        "topic_family": case.topic_family,
-        "property": "EmergencyStop -> NOT MotorRun",
-        "trace": [
-            {"t": 0, "StartCmd": True, "EmergencyStop": False, "MotorRun": True},
-            {"t": 1, "StartCmd": True, "EmergencyStop": True, "MotorRun": True},
-        ],
-    }
+def _benchmark_st_file(case: QuestionBankCase) -> Path:
+    if case.benchmark_st_path is None:
+        raise ValueError(f"{case.id} does not define benchmark_st_path")
+    path = REPO_ROOT / case.benchmark_st_path
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 def _output_artifact_refs(
